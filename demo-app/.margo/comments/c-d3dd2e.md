@@ -1,0 +1,26 @@
+---
+id: c-d3dd2e
+type: task
+author: sxhuan@gmail.com
+authorName: Stanley Song
+branch: main
+created: '2026-05-09T09:39:58.814Z'
+status: open
+target:
+  url: /
+  selector: section#pricing > h2:nth-of-type(1)
+  text: Pricing
+  role: h2
+  viewport:
+    w: 1512
+    h: 827
+  coords:
+    x: 460
+    'y': 343
+  textAnchor:
+    phrase: Pricing
+    before: ''
+    after: ''
+---
+
+yyy
