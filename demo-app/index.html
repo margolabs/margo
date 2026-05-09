@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>margo demo</title>
+    <style>
+      :root { font-family: system-ui; color: #111; }
+      body { margin: 0; }
+      header { padding: 24px 32px; border-bottom: 1px solid #e5e7eb; }
+      header h1 { margin: 0; font-size: 22px; }
+      main { padding: 24px 32px 48px; max-width: 720px; margin: 0 auto; }
+      h2 { margin-top: 0; }
+      .card { padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px; margin-bottom: 24px; }
+      button.cta {
+        background: #3b82f6; color: white; border: 0; padding: 10px 16px;
+        border-radius: 8px; font-size: 15px; cursor: pointer;
+      }
+      button.cta:hover { background: #2563eb; }
+      nav { display: flex; gap: 16px; }
+      nav a { color: #3b82f6; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Acme Pricing</h1>
+      <nav>
+        <a href="#features">Features</a>
+        <a href="#contact">Contact</a>
+      </nav>
+    </header>
+    <main>
+      <section id="features" class="card">
+        <h2>Why teams pick Acme</h2>
+        <p>Acme cuts the boring parts of running a small team — billing, contracts, payroll — into one quiet workflow. More time on the work that actually pays.</p>
+      </section>
+
+      <section id="pricing" class="card">
+        <h2>Pricing</h2>
+        <p>Simple, predictable, and refundable in the first 30 days.</p>
+        <p style="margin-top: 24px;">
+          <button class="cta" data-testid="cta-primary">Start free trial</button>
+        </p>
+      </section>
+
+      <section id="contact" class="card">
+        <h2>Get in touch</h2>
+        <p>Reach us at <a href="mailto:hello@acme.com">hello@acme.com</a>.</p>
+      </section>
+    </main>
+  </body>
+</html>

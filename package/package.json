@@ -1,0 +1,62 @@
+{
+  "name": "@margo/dev",
+  "version": "0.0.1",
+  "description": "Live-app feedback layer for AI-coding teams. Comments live as files in your repo; AI works through them.",
+  "type": "module",
+  "main": "./dist/plugin/vite.js",
+  "types": "./dist/plugin/vite.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/plugin/vite.d.ts",
+      "import": "./dist/plugin/vite.js"
+    },
+    "./vite": {
+      "types": "./dist/plugin/vite.d.ts",
+      "import": "./dist/plugin/vite.js"
+    }
+  },
+  "bin": {
+    "margo": "./dist/install/cli.js"
+  },
+  "files": [
+    "dist",
+    "src/templates"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-overlay.mjs",
+    "dev": "tsc -w -p tsconfig.json",
+    "test": "vitest"
+  },
+  "keywords": [
+    "feedback",
+    "annotation",
+    "claude-code",
+    "ai-coding",
+    "vite-plugin",
+    "design-collaboration"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "vite": ">=4"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.0.0",
+    "vitest": "^1.0.0"
+  }
+}

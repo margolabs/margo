@@ -1,0 +1,15 @@
+{
+  "name": "margo-demo-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@margo/dev": "file:../package",
+    "vite": "^5.0.0"
+  }
+}

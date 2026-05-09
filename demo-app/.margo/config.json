@@ -1,0 +1,24 @@
+{
+  "$schema": "https://margo.dev/schema/config.v0.json",
+  "workspace": {
+    "name": "margo-demo",
+    "appUrl": {
+      "dev": "http://localhost:5173",
+      "preview": null
+    }
+  },
+  "roster": [
+    { "email": "demo@margo.local", "role": "designer", "displayName": "Demo User" }
+  ],
+  "git": {
+    "autoCommit": true,
+    "autoPush":   false,
+    "commitPrefix": "margo:",
+    "branchPolicy": "current",
+    "pullBeforePush": false
+  },
+  "ai": {
+    "implicitTaskTrigger": true,
+    "proactiveInboxSummaryAtSessionStart": true
+  }
+}
