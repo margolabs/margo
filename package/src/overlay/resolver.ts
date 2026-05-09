@@ -27,8 +27,8 @@ export type ResolveResult =
 export function resolveTarget(target: Target, currentUrl: string): ResolveResult {
   if (target.url !== currentUrl) return { kind: 'wrong-route' };
 
-  // Gap anchors take precedence — they describe the space between two
-  // elements, so a single-element resolve would be wrong even if it succeeded.
+  // Gap and box anchors take precedence — they describe a region/spacing,
+  // so a single-element resolve would be wrong even if it succeeded.
   if (target.gapAnchor) {
     const gap = resolveGap(target.gapAnchor);
     if (gap) return gap;
@@ -81,15 +81,28 @@ function resolveGap(anchor: GapAnchor): ResolveResult | null {
   if (!a || !b) return null;
   const ra = a.getBoundingClientRect();
   const rb = b.getBoundingClientRect();
-  const gap = computeGapRect(ra, rb, anchor.axis);
-  // Degenerate (overlapping or touching elements) — treat as lost.
-  if (gap.width <= 0 || gap.height <= 0) return null;
-  // Wrap as a single DOMRect so the renderer treats it like other anchors.
-  const rect = new DOMRect(gap.left, gap.top, gap.width, gap.height);
-  // We deliberately use the closer element as `el` so that pin click events
-  // and existing element-based UI affordances still work; the rect drives
-  // visual placement.
-  return { kind: 'exact', el: a, rects: [rect] };
+  // The captured axis + order are hints, not oracles. Auto-detection at
+  // capture time picks axis by larger centroid distance, which can disagree
+  // with visual intent (e.g. wide h1 + narrow nav link have a wider x-delta
+  // than y-delta even when they're vertically stacked). And reflow can swap
+  // which element is "first". Try all (axis, order) combinations and use
+  // the first that yields a positive-area gap.
+  const altAxis = anchor.axis === 'vertical' ? 'horizontal' : 'vertical';
+  const attempts: Array<[DOMRect, DOMRect, 'vertical' | 'horizontal']> = [
+    [ra, rb, anchor.axis],
+    [rb, ra, anchor.axis],
+    [ra, rb, altAxis],
+    [rb, ra, altAxis],
+  ];
+  for (const [first, second, axis] of attempts) {
+    const g = computeGapRect(first, second, axis);
+    if (g.width > 0 && g.height > 0) {
+      // `el` is one of the boundary elements so click events + element-based
+      // UI affordances still work; the rect drives visual placement.
+      return { kind: 'exact', el: a, rects: [new DOMRect(g.left, g.top, g.width, g.height)] };
+    }
+  }
+  return null;
 }
 
 function findElement(d: { selector: string; text: string; role: string }): Element | null {

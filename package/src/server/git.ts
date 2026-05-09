@@ -36,6 +36,13 @@ export async function getAuthor(cwd: string): Promise<{ name: string; email: str
   return { name, email };
 }
 
+/** Read user's self-declared margo role from `git config margo.role`. */
+export async function getDeclaredRole(cwd: string): Promise<'pm' | 'designer' | 'dev' | undefined> {
+  const v = (await run(cwd, ['config', 'margo.role'])).stdout.trim().toLowerCase();
+  if (v === 'pm' || v === 'designer' || v === 'dev') return v;
+  return undefined;
+}
+
 /** Stage, commit, and (optionally) push files under .margo/ */
 export async function commitAndPush(
   files: string[],

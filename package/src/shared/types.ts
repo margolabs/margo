@@ -39,8 +39,9 @@ export interface Target {
 export interface CommentFrontmatter {
   id: string;
   type: CommentType;
-  author: string;
-  role: Role;
+  author: string;          // canonical id (email) — used for own-only delete check etc.
+  authorName?: string;     // friendly name from `git config user.name` at creation time
+  role?: Role;             // optional — only set when configured (roster or git config margo.role)
   branch: string;
   created: string;
   status: CommentStatus;
@@ -56,7 +57,7 @@ export interface Comment {
 
 export interface Reply {
   author: string;
-  role: Role | string;
+  role?: Role | string;
   timestamp: string;
   body: string;
   isAi?: boolean;

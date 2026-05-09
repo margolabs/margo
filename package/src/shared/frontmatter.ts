@@ -19,6 +19,7 @@ export function serializeComment(fm: CommentFrontmatter, body: string): string {
     id: fm.id,
     type: fm.type,
     author: fm.author,
+    ...(fm.authorName ? { authorName: fm.authorName } : {}),
     role: fm.role,
     branch: fm.branch,
     created: fm.created,
@@ -32,11 +33,11 @@ export function serializeComment(fm: CommentFrontmatter, body: string): string {
 
 export function appendReply(
   body: string,
-  reply: { author: string; role: string; timestamp: string; body: string; isAi?: boolean; aiModel?: string },
+  reply: { author: string; role?: string; timestamp: string; body: string; isAi?: boolean; aiModel?: string },
 ): string {
   const header = reply.isAi
     ? `**ai-reply** — ${reply.aiModel ?? 'unknown-model'} — ${reply.timestamp}`
-    : `**reply** — ${reply.author} (${reply.role}) — ${reply.timestamp}`;
+    : `**reply** — ${reply.author}${reply.role ? ` (${reply.role})` : ''} — ${reply.timestamp}`;
   const sep = body.endsWith('\n') ? '' : '\n';
   return `${body}${sep}\n---\n${header}\n\n${reply.body.trim()}\n`;
 }

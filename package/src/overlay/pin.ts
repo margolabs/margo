@@ -12,6 +12,7 @@
 
 import type { GapAnchor, Target, TextAnchor } from '../shared/types.js';
 
+
 export function captureTargetFromGap(first: Element, second: Element, currentUrl: string): Target {
   // Auto-detect axis from element centers — bigger delta in y means vertically
   // stacked (gap runs left-to-right between them); bigger delta in x means
@@ -77,30 +78,31 @@ function descriptor(el: Element) {
   };
 }
 
+// Tags that are conceptually atomic UI primitives — clicking on their text
+// almost always means "anchor the whole control", not "anchor this word".
+const INTERACTIVE_TAGS = new Set([
+  'BUTTON', 'A', 'INPUT', 'LABEL', 'SELECT', 'TEXTAREA', 'SUMMARY', 'OPTION',
+]);
+
+// Click = element anchor. Drag-select = text anchor (handled separately by
+// captureTargetFromRange). Auto-creating a text-anchor on every click was
+// surprising — clicking a heading shouldn't lock the comment to the word
+// under the cursor, the user almost always means "the heading" or its
+// container. Keep text-anchoring opt-in via drag.
 export function captureTargetFromEvent(e: MouseEvent, currentUrl: string): Target {
   const clickEl = e.target as Element;
-  const range = caretRangeAtPoint(e.clientX, e.clientY);
-  if (range && range.startContainer.nodeType === Node.TEXT_NODE) {
-    const wordRange = expandToPhrase(range);
-    if (wordRange) {
-      const phrase = wordRange.toString().trim();
-      if (phrase.length > 0) {
-        const containerEl = wordRange.startContainer.parentElement ?? clickEl;
-        const anchor = buildTextAnchor(containerEl, phrase);
-        const r = wordRange.getBoundingClientRect();
-        return {
-          url: currentUrl,
-          selector: shortSelector(containerEl),
-          text: visibleText(containerEl),
-          role: ariaRoleOrTag(containerEl),
-          viewport: { w: window.innerWidth, h: window.innerHeight },
-          coords: { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) },
-          textAnchor: anchor,
-        };
-      }
-    }
+  const interactive = nearestInteractive(clickEl);
+  return captureTarget(interactive ?? clickEl, currentUrl);
+}
+
+function nearestInteractive(el: Element): Element | null {
+  let cur: Element | null = el;
+  while (cur && cur.tagName !== 'BODY') {
+    if (INTERACTIVE_TAGS.has(cur.tagName)) return cur;
+    if (cur.getAttribute('role') === 'button' || cur.getAttribute('role') === 'link') return cur;
+    cur = cur.parentElement;
   }
-  return captureTarget(clickEl, currentUrl);
+  return null;
 }
 
 export function captureTargetFromRange(range: Range, currentUrl: string): Target {

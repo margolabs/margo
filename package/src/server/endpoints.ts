@@ -18,6 +18,7 @@ import {
   commitAndPush,
   getAuthor,
   getCurrentBranch,
+  getDeclaredRole,
   removeAndCommit,
   type GitOptions,
 } from './git.js';
@@ -132,7 +133,7 @@ async function handleCreate(
   const body = (await readJson<CreateCommentRequest>(req));
   const id = newCommentId();
   const author = await getAuthor(ctx.rootDir);
-  const role = resolveRole(author.email, ctx.config);
+  const role = await resolveRole(author.email, ctx.config, ctx.rootDir);
   const branch = await getCurrentBranch(ctx.rootDir);
   const created = new Date().toISOString();
 
@@ -140,7 +141,8 @@ async function handleCreate(
     id,
     type: body.type ?? 'task',
     author: author.email,
-    role,
+    ...(author.name ? { authorName: author.name } : {}),
+    ...(role ? { role } : {}),
     branch,
     created,
     status: 'open' as const,
@@ -171,7 +173,7 @@ async function handleUpdate(
     const author = await getAuthor(ctx.rootDir);
     newBody = appendReply(newBody, {
       author: author.email,
-      role: resolveRole(author.email, ctx.config),
+      role: await resolveRole(author.email, ctx.config, ctx.rootDir),
       timestamp: new Date().toISOString(),
       body: body.patch.reply.body,
     });
@@ -274,8 +276,24 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T;
 }
 
-function resolveRole(email: string, config: MargoConfig): 'pm' | 'designer' | 'dev' | 'other' {
-  return config.roster.find((r) => r.email === email)?.role ?? 'other';
+type ValidRole = 'pm' | 'designer' | 'dev';
+const VALID_ROLES: ValidRole[] = ['pm', 'designer', 'dev'];
+
+async function resolveRole(
+  email: string,
+  config: MargoConfig,
+  cwd: string,
+): Promise<ValidRole | undefined> {
+  // 1. roster lookup (team-shared, lives in .margo/config.json)
+  const fromRoster = config.roster.find((r) => r.email === email)?.role;
+  if (fromRoster && VALID_ROLES.includes(fromRoster as ValidRole)) {
+    return fromRoster as ValidRole;
+  }
+  // 2. self-declaration (`git config margo.role designer`) — per-user, no config edit needed
+  const declared = await getDeclaredRole(cwd);
+  if (declared) return declared;
+  // 3. nothing — return undefined so the chip doesn't render
+  return undefined;
 }
 
 function gitOpts(ctx: EndpointContext): GitOptions {

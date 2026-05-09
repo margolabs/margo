@@ -5,7 +5,7 @@
 // Intentionally plain DOM + minimal CSS: this code lives inside the host
 // app's page, and we cannot assume any framework or styling library.
 
-import { captureTargetFromEvent, captureTargetFromGap, captureTargetFromRange } from './pin.js';
+import { captureTarget, captureTargetFromEvent, captureTargetFromGap, captureTargetFromRange } from './pin.js';
 import { resolveTarget } from './resolver.js';
 import { installRouteTracker, onRouteChange, currentRoute } from './route-tracker.js';
 import { SyncClient, type SyncEvent } from './sync.js';
@@ -162,13 +162,25 @@ function renderAllPins(
     const pin = document.createElement('button');
     pin.dataset.margoPin = c.frontmatter.id;
     pin.className = 'margo-pin';
-    // Clamp the pin to the viewport so it never lands off-screen for elements
-    // at the extreme right/top edges (the original `r.left + r.width - 8`
-    // could push it past the right edge for full-width elements).
+    // Pin position. For text/gap anchors the rect is small and meaningful —
+    // park the pin at its top-right corner. For element/container anchors
+    // the rect can be huge (a tall <main> spans the page) so the corner is
+    // visually disconnected from where the user actually clicked. In that
+    // case use the captured click point (target.coords) scaled from the
+    // capture-time viewport to the current viewport.
     const PIN_SIZE = 22;
     const PAD = 4;
-    const docLeft = r.left + r.width - 8 + window.scrollX;
-    const docTop = r.top - 8 + window.scrollY;
+    let docLeft: number, docTop: number;
+    if (isTextAnchor || isGapAnchor) {
+      docLeft = r.left + r.width - 8 + window.scrollX;
+      docTop = r.top - 8 + window.scrollY;
+    } else {
+      const cap = c.frontmatter.target;
+      const sx = cap.viewport.w > 0 ? window.innerWidth / cap.viewport.w : 1;
+      const sy = cap.viewport.h > 0 ? window.innerHeight / cap.viewport.h : 1;
+      docLeft = cap.coords.x * sx - PIN_SIZE / 2 + window.scrollX;
+      docTop = cap.coords.y * sy - PIN_SIZE / 2 + window.scrollY;
+    }
     const minLeft = window.scrollX + PAD;
     const maxLeft = window.scrollX + window.innerWidth - PIN_SIZE - PAD;
     const minTop = window.scrollY + PAD;
@@ -189,7 +201,11 @@ function renderAllPins(
     };
     pin.addEventListener('mouseenter', () => { setHover(true); showTooltip(pin, tipText); });
     pin.addEventListener('mouseleave', () => { setHover(false); hideTooltip(); });
-    pin.addEventListener('click', () => { hideTooltip(); openCommentPanel(root, c, sync, readOnly, me); });
+    pin.addEventListener('click', (e) => {
+      e.stopPropagation();
+      hideTooltip();
+      openCommentPanel(root, c, sync, readOnly, me, pin);
+    });
     root.appendChild(pin);
   }
 
@@ -353,7 +369,7 @@ function renderOrphanCard(
       <button class="margo-close" type="button" aria-label="dismiss">×</button>
     </div>
     <div class="margo-panel-meta">
-      <span class="margo-role">${escapeHtml(c.frontmatter.role)}</span>
+      ${c.frontmatter.role ? `<span class="margo-role">${escapeHtml(c.frontmatter.role)}</span>` : ''}
       <span class="margo-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
     </div>
   `;
@@ -380,10 +396,10 @@ function renderOrphanCard(
   meta.textContent = wasAt;
   card.appendChild(meta);
 
-  const body = document.createElement('pre');
-  body.className = 'margo-body';
-  body.textContent = c.body.trim();
-  card.appendChild(body);
+  // Use the chat thread renderer so orphan cards match the panel's premium look.
+  const threadWrap = document.createElement('div');
+  threadWrap.innerHTML = renderThread(c);
+  card.appendChild(threadWrap.firstElementChild!);
 
   if (!readOnly) {
     const actions = document.createElement('div');
@@ -503,6 +519,7 @@ function enablePinComposer(
     document.body.classList.toggle('margo-targeting', on);
     launcher.textContent = on ? 'cancel' : '+ pin';
     if (on) setGap(false);
+    if (!on) clearHoverHint();
   };
   const setGap = (on: boolean) => {
     gapActive = on;
@@ -513,12 +530,71 @@ function enablePinComposer(
     gapLauncher.textContent = on ? 'cancel' : '+ gap';
     clearGapHighlight();
     if (on) setPin(false);
+    if (!on) clearHoverHint();
   };
 
   launcher.addEventListener('click', () => setPin(!active));
   gapLauncher.addEventListener('click', () => setGap(!gapActive));
   root.appendChild(gapLauncher);
   root.appendChild(launcher);
+
+  // Hover-target state: starts as the leafmost element under the cursor.
+  // For "pure container" cases (where children fill the entire box and
+  // there's no empty area to click), the user can jump directly to any
+  // ancestor via the breadcrumb chips on the hint.
+  let currentTarget: Element | null = null;
+  let currentChain: Element[] = [];
+  let walkedUp = false;
+
+  const setHoverTarget = (el: Element | null) => {
+    currentTarget = el;
+    currentChain = el ? ancestorChain(el) : [];
+    if (el) paintHoverHint(el, currentChain, walkedUp);
+    else clearHoverHint();
+  };
+
+  document.addEventListener('mousemove', (e) => {
+    if (!active && !gapActive) return;
+    // Lock the hint on the chosen target while the comment composer is open —
+    // otherwise the outline would follow the cursor into the modal, obscuring
+    // which element the comment is actually being attached to.
+    if (root.querySelector('[data-margo-modal]')) return;
+    const leaf = leafmostNonOverlayAt(e.clientX, e.clientY);
+    // If user picked a specific ancestor and the cursor is still inside
+    // that walked-up element, preserve their choice. Move the cursor out
+    // and the hint resets to the new leafmost.
+    if (walkedUp && currentTarget && leaf && currentTarget.contains(leaf)) return;
+    walkedUp = false;
+    setHoverTarget(leaf);
+  });
+
+  // Esc cancels pin/gap mode. Skipped when a modal or panel is open so
+  // those handlers (which Esc-close themselves) take precedence.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (root.querySelector('[data-margo-modal]')) return;
+    if (root.querySelector('.margo-panel')) return;
+    if (active) { e.preventDefault(); setPin(false); }
+    else if (gapActive) { e.preventDefault(); setGap(false); }
+  });
+
+  // Breadcrumb crumb click (delegated on overlay root). Each crumb maps
+  // back to a stored ancestor by index — clicking it sets the target to
+  // that ancestor without leaving the cursor.
+  root.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement | null;
+    if (t && t.classList.contains('margo-hover-hint-crumb')) {
+      e.stopPropagation();
+      e.preventDefault();
+      const idx = parseInt(t.dataset.margoCrumbIndex ?? '-1', 10);
+      if (idx >= 0 && idx < currentChain.length) {
+        const picked = currentChain[idx];
+        walkedUp = true;
+        currentTarget = picked;
+        paintHoverHint(picked, currentChain, true);
+      }
+    }
+  });
 
   // Gap mode: two-click selection. First click marks element A (visual
   // outline), second click captures A + B, computes the gap, opens composer.
@@ -569,7 +645,18 @@ function enablePinComposer(
       && sel.toString().trim().length > 0;
     const captured = hasSelection
       ? captureTargetFromRange(sel!.getRangeAt(0), currentRoute())
-      : captureTargetFromEvent(e, currentRoute());
+      : (walkedUp && currentTarget)
+        ? captureTarget(currentTarget, currentRoute())
+        : captureTargetFromEvent(e, currentRoute());
+    // Override coords with the actual click point (in viewport space). For
+    // element/container anchors this is what positions the pin — without
+    // this, the pin lands at the resolved rect's corner, which for a tall
+    // container is the top edge (far from where the user clicked, often
+    // visually overlapping the first child).
+    if (!hasSelection) {
+      captured.coords = { x: e.clientX, y: e.clientY };
+      captured.viewport = { w: window.innerWidth, h: window.innerHeight };
+    }
     const body = await uiPrompt({
       title: 'New comment',
       message: hasSelection
@@ -625,12 +712,78 @@ function clearGapHighlight(): void {
   for (const el of Array.from(root.querySelectorAll('[data-margo-gap-pick]'))) el.remove();
 }
 
+// Single-element hover hint shared by pin + gap modes. Outlines exactly one
+// element — the leafmost non-overlay element under the cursor — so the
+// visual feedback matches what click would capture (e.target is the
+// leafmost; CSS :hover misleadingly matches all ancestors).
+function paintHoverHint(el: Element, chain: Element[], walkedUp = false): void {
+  const root = document.getElementById(ROOT_ID);
+  if (!root) return;
+  const r = el.getBoundingClientRect();
+  let div = root.querySelector('[data-margo-hover-hint]') as HTMLElement | null;
+  if (!div) {
+    div = document.createElement('div');
+    div.dataset.margoHoverHint = '';
+    div.className = 'margo-hover-hint';
+    root.appendChild(div);
+  }
+  div.classList.toggle('margo-hover-hint-walked', walkedUp);
+  div.style.left = `${r.left + window.scrollX}px`;
+  div.style.top = `${r.top + window.scrollY}px`;
+  div.style.width = `${r.width}px`;
+  div.style.height = `${r.height}px`;
+  // Breadcrumb of ancestors (root → leaf). Click any crumb to jump-target
+  // that ancestor — solves the "pure container fully filled by children"
+  // case where there's no empty area to hover-target the container directly.
+  const crumbs = chain.map((a, i) => {
+    const active = a === el ? ' margo-hover-hint-crumb-active' : '';
+    return `<button class="margo-hover-hint-crumb${active}" type="button" data-margo-crumb-index="${i}">${escapeHtml(describeElement(a))}</button>`;
+  }).join('<span class="margo-hover-hint-sep">›</span>');
+  div.innerHTML = `<div class="margo-hover-hint-tag">${crumbs}</div>`;
+}
+
+function clearHoverHint(): void {
+  const root = document.getElementById(ROOT_ID);
+  if (!root) return;
+  for (const el of Array.from(root.querySelectorAll('[data-margo-hover-hint]'))) el.remove();
+}
+
+function describeElement(el: Element): string {
+  const tag = el.tagName.toLowerCase();
+  const id = (el as HTMLElement).id ? `#${(el as HTMLElement).id}` : '';
+  const cls = el.classList.length > 0 ? `.${el.classList[0]}` : '';
+  return `${tag}${id}${cls}`;
+}
+
+function ancestorChain(el: Element, max = 5): Element[] {
+  const chain: Element[] = [];
+  let cur: Element | null = el;
+  while (cur && cur.tagName !== 'HTML' && cur.tagName !== 'BODY') {
+    chain.push(cur);
+    cur = cur.parentElement;
+    if (chain.length >= max) break;
+  }
+  return chain.reverse(); // root → leaf, reads like a path
+}
+
+// Returns the leafmost non-overlay element under the cursor — same element
+// that e.target would yield on click.
+function leafmostNonOverlayAt(x: number, y: number): Element | null {
+  const stack = document.elementsFromPoint(x, y);
+  for (const el of stack) {
+    if (!el.closest('[data-margo]')) return el;
+  }
+  return null;
+}
+
+
 function openCommentPanel(
   root: HTMLElement,
   c: Comment,
   sync: SyncClient,
   readOnly: boolean,
   me: { email: string } | null,
+  anchor?: Element,
 ): void {
   const existing = root.querySelector('.margo-panel');
   if (existing) existing.remove();
@@ -643,11 +796,11 @@ function openCommentPanel(
         <button class="margo-close" type="button" aria-label="close">×</button>
       </div>
       <div class="margo-panel-meta">
-        <span class="margo-role">${escapeHtml(c.frontmatter.role)}</span>
+        ${c.frontmatter.role ? `<span class="margo-role">${escapeHtml(c.frontmatter.role)}</span>` : ''}
         <span class="margo-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
       </div>
     </header>
-    <pre class="margo-body">${escapeHtml(c.body)}</pre>
+    ${renderThread(c)}
     ${readOnly ? '<p class="margo-readonly">read-only — run <code>npm run dev</code> locally to reply</p>' : ''}
   `;
 
@@ -664,6 +817,43 @@ function openCommentPanel(
   }
   panel.appendChild(makeIdFooter(c.frontmatter.id));
   root.appendChild(panel);
+  // Anchor the panel near the pin (or fall back to the bottom-right corner
+  // when there's no anchor — e.g. opened programmatically). Done after
+  // appending so we can measure the rendered panel's height.
+  if (anchor) positionPanelNearAnchor(panel, anchor);
+}
+
+function positionPanelNearAnchor(panel: HTMLElement, anchor: Element): void {
+  const a = anchor.getBoundingClientRect();
+  const PAD = 8;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  // Force position-fixed + measure rendered size. The panel was rendered
+  // with the default bottom-right CSS, but those rules are overridden here.
+  panel.style.right = 'auto';
+  panel.style.bottom = 'auto';
+  panel.style.left = '0px';
+  panel.style.top = '0px';
+  const pw = panel.offsetWidth;
+  const ph = panel.offsetHeight;
+
+  // Prefer right of pin → left of pin → centered above/below if neither fits.
+  let left: number;
+  if (a.right + PAD + pw <= vw - PAD) {
+    left = a.right + PAD;
+  } else if (a.left - PAD - pw >= PAD) {
+    left = a.left - PAD - pw;
+  } else {
+    left = Math.max(PAD, Math.min(vw - pw - PAD, a.left - pw / 2 + a.width / 2));
+  }
+  // Prefer aligning panel's top with pin's top, but clamp to viewport so
+  // the panel never overflows top/bottom.
+  let top = a.top;
+  if (top + ph > vh - PAD) top = vh - ph - PAD;
+  if (top < PAD) top = PAD;
+
+  panel.style.left = `${left}px`;
+  panel.style.top = `${top}px`;
 }
 
 function makeIdFooter(id: string): HTMLElement {
@@ -858,6 +1048,136 @@ function hideTooltip(): void {
   if (tip) tip.style.display = 'none';
 }
 
+// ——— thread rendering: parse the markdown body into messages, render as chat ———
+
+interface Message {
+  kind: 'human' | 'ai';
+  author: string;            // email (humans) or model name (ai)
+  authorName?: string;       // friendly display name when known (frontmatter.authorName)
+  role?: string;             // designer/dev/pm — only on humans
+  timestamp?: string;
+  body: string;
+}
+
+function parseThread(c: Comment): Message[] {
+  const out: Message[] = [];
+  // First chunk before any `---` separator is the original comment.
+  const parts = c.body.split(/\n---\n/);
+  out.push({
+    kind: 'human',
+    author: c.frontmatter.author,
+    authorName: c.frontmatter.authorName,
+    role: c.frontmatter.role,
+    timestamp: c.frontmatter.created,
+    body: (parts[0] ?? '').trim(),
+  });
+  for (const part of parts.slice(1)) {
+    const trimmed = part.trim();
+    // `**ai-reply** — <model> — <ts>\n\n<body>`
+    const ai = trimmed.match(/^\*\*ai-reply\*\*\s*—\s*([^—\n]+?)\s*—\s*([^\n]+)\n+([\s\S]*)$/);
+    if (ai) {
+      out.push({ kind: 'ai', author: ai[1].trim(), timestamp: ai[2].trim(), body: ai[3].trim() });
+      continue;
+    }
+    // `**reply** — <author> (<role>) — <ts>\n\n<body>`
+    const human = trimmed.match(/^\*\*reply\*\*\s*—\s*(\S+)(?:\s*\(([^)]+)\))?\s*—\s*([^\n]+)\n+([\s\S]*)$/);
+    if (human) {
+      out.push({ kind: 'human', author: human[1].trim(), role: human[2]?.trim(), timestamp: human[3].trim(), body: human[4].trim() });
+      continue;
+    }
+    // Fallback — preserve unparseable block as a generic note so nothing is lost.
+    out.push({ kind: 'human', author: 'unknown', body: trimmed });
+  }
+  return out;
+}
+
+function renderThread(c: Comment): string {
+  const messages = parseThread(c);
+  const items = messages
+    .map((m) => (m.kind === 'ai' ? renderAiMessage(m) : renderHumanMessage(m)))
+    .join('');
+  return `<div class="margo-thread">${items}</div>`;
+}
+
+function renderHumanMessage(m: Message): string {
+  const display = displayNameOf(m);
+  const initial = initialOf(display);
+  const color = colorForEmail(m.author);
+  const time = m.timestamp ? formatTime(m.timestamp) : '';
+  return `
+    <div class="margo-msg margo-msg-human">
+      <div class="margo-avatar margo-avatar-human" style="background:${color.bg};color:${color.fg}" title="${escapeHtml(m.author)}">${escapeHtml(initial)}</div>
+      <div class="margo-msg-stack">
+        <div class="margo-msg-meta">
+          <span class="margo-msg-author" title="${escapeHtml(m.author)}">${escapeHtml(display)}</span>
+          ${m.role ? `<span class="margo-msg-role">${escapeHtml(m.role)}</span>` : ''}
+          ${time ? `<span class="margo-msg-time">${escapeHtml(time)}</span>` : ''}
+        </div>
+        <div class="margo-bubble">${escapeHtml(m.body)}</div>
+      </div>
+    </div>
+  `;
+}
+
+// Fallback chain: frontmatter.authorName → email local-part (title-cased
+// when the local part has dot/underscore separators, otherwise kept as-is
+// since slack-style usernames are typically lowercase) → full email.
+function displayNameOf(m: Message): string {
+  if (m.authorName && m.authorName.trim()) return m.authorName.trim();
+  const local = (m.author.split('@')[0] ?? m.author).trim();
+  if (!local) return m.author;
+  if (/[._-]/.test(local)) {
+    return local
+      .split(/[._-]+/)
+      .filter(Boolean)
+      .map((w) => w[0]!.toUpperCase() + w.slice(1).toLowerCase())
+      .join(' ');
+  }
+  return local;
+}
+
+function renderAiMessage(m: Message): string {
+  const time = m.timestamp ? formatTime(m.timestamp) : '';
+  return `
+    <div class="margo-msg margo-msg-ai">
+      <div class="margo-avatar margo-avatar-ai" aria-label="AI">✦</div>
+      <div class="margo-msg-stack">
+        <div class="margo-msg-meta">
+          <span class="margo-msg-author">AI</span>
+          <span class="margo-msg-model">${escapeHtml(m.author)}</span>
+          <span class="margo-msg-time">${escapeHtml(time)}</span>
+        </div>
+        <div class="margo-bubble">${escapeHtml(m.body)}</div>
+      </div>
+    </div>
+  `;
+}
+
+function initialOf(displayOrEmail: string): string {
+  const s = (displayOrEmail.split('@')[0] ?? displayOrEmail).trim();
+  return (s[0] ?? '?').toUpperCase();
+}
+
+function colorForEmail(email: string): { bg: string; fg: string } {
+  // Stable per-email hue so the same person gets the same avatar color across renders.
+  let h = 0;
+  for (let i = 0; i < email.length; i++) h = ((h << 5) - h + email.charCodeAt(i)) | 0;
+  const hue = Math.abs(h) % 360;
+  return { bg: `hsl(${hue} 65% 90%)`, fg: `hsl(${hue} 60% 32%)` };
+}
+
+function formatTime(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const diff = Date.now() - d.getTime();
+  const min = 60_000, hr = 60 * min, day = 24 * hr;
+  if (diff < min) return 'just now';
+  if (diff < hr) return `${Math.floor(diff / min)}m ago`;
+  if (diff < day) return `${Math.floor(diff / hr)}h ago`;
+  if (diff < 7 * day) return `${Math.floor(diff / day)}d ago`;
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
 function wireCopyId(btn: HTMLButtonElement, id: string): void {
   // Copy ID to clipboard, briefly swap the icon to a check + show "copied"
   // text so the user gets confirmation without an alert.
@@ -884,7 +1204,11 @@ function wireCopyId(btn: HTMLButtonElement, id: string): void {
   });
 }
 
-function escapeHtml(s: string): string {
+function escapeHtml(s: string | null | undefined): string {
+  // Defensive against optional fields slipping through (e.g. role can be
+  // undefined for users not in the roster). Without this, a single
+  // undefined value crashes the whole HTML render.
+  if (s == null) return '';
   return s.replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!,
   );
@@ -1103,8 +1427,50 @@ function injectStyles(): void {
     .margo-launcher-gap:hover { background: var(--margo-muted); }
     /* targeting cursor variants */
     body.margo-gap-targeting * { cursor: crosshair !important; }
-    body.margo-gap-step1 *:hover { outline: 1px dashed hsl(217 91% 60%); outline-offset: 2px; }
-    body.margo-gap-step2 *:hover { outline: 1px dashed hsl(217 91% 60%); outline-offset: 2px; }
+    /* Single-element hover hint (JS-driven) — replaces CSS *:hover which was
+       misleading because :hover matches all ancestors. We outline only the
+       leafmost element under the cursor, matching what click captures. */
+    .margo-hover-hint {
+      position: absolute; z-index: 999996; pointer-events: none;
+      outline: 1.5px dashed hsl(217 91% 60%); outline-offset: 2px;
+      background: hsl(217 91% 60% / .06);
+      border-radius: 2px;
+      transition: all .06s ease-out;
+    }
+    .margo-hover-hint-tag {
+      position: absolute; top: -26px; left: 0;
+      display: inline-flex; align-items: center; gap: 0;
+      background: hsl(217 91% 60%);
+      font: inherit; font-size: 10px; font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 3px 4px; border-radius: 4px;
+      box-shadow: 0 1px 2px rgb(0 0 0 / .15);
+      white-space: nowrap; max-width: calc(100vw - 32px); overflow: hidden;
+      pointer-events: auto;
+    }
+    .margo-hover-hint-crumb {
+      display: inline-flex; align-items: center;
+      padding: 2px 6px;
+      background: transparent; color: rgb(255 255 255 / .85);
+      border: 0; border-radius: 3px;
+      font: inherit; font-size: 10px; font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background-color .12s, color .12s;
+    }
+    .margo-hover-hint-crumb:hover { background: rgb(255 255 255 / .2); color: white; }
+    .margo-hover-hint-crumb-active {
+      background: white; color: hsl(217 91% 32%);
+    }
+    .margo-hover-hint-crumb-active:hover { background: white; color: hsl(217 91% 32%); }
+    .margo-hover-hint-sep {
+      color: rgb(255 255 255 / .55); padding: 0 1px; font-weight: 400;
+    }
+    /* Stronger fill when user picked a non-leaf ancestor explicitly */
+    .margo-hover-hint-walked {
+      background: hsl(217 91% 60% / .15);
+      outline-color: hsl(217 91% 48%);
+    }
     /* gap-pick visual feedback (during 2-click selection) */
     .margo-gap-pick {
       position: absolute; z-index: 999998; pointer-events: none;
@@ -1220,10 +1586,70 @@ function injectStyles(): void {
       font: inherit; font-size: 13px; color: var(--margo-fg);
       max-height: 260px; overflow: auto;
     }
-    /* ——— action row (sits between body and footer) ——— */
+    /* ——— chat thread (humans left, AI right) ——— */
+    .margo-thread {
+      display: flex; flex-direction: column; gap: 14px;
+      padding: 14px 14px;
+      max-height: 380px; overflow: auto;
+      background: hsl(240 5% 98%);
+    }
+    .margo-thread::-webkit-scrollbar { width: 8px; }
+    .margo-thread::-webkit-scrollbar-thumb { background: hsl(240 5% 88%); border-radius: 999px; }
+    .margo-msg {
+      display: flex; gap: 8px; align-items: flex-start;
+      max-width: 88%;
+    }
+    /* Slack/Linear-style — all messages left-aligned, avatar identifies the
+       speaker. AI keeps its distinct gradient avatar + tinted bubble below
+       so it's still unmistakable in a multi-user thread. */
+    .margo-msg { align-self: flex-start; }
+    .margo-msg-stack { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .margo-avatar {
+      width: 28px; height: 28px; border-radius: 9999px;
+      flex: 0 0 auto;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 600;
+      box-shadow: 0 1px 2px rgb(0 0 0 / .08);
+    }
+    .margo-avatar-ai {
+      background: linear-gradient(135deg, hsl(280 70% 60%), hsl(217 91% 60%));
+      color: white; font-size: 14px;
+    }
+    .margo-msg-meta {
+      display: flex; gap: 6px; align-items: baseline;
+      font-size: 10px; line-height: 1.2;
+      padding: 0 4px;
+    }
+    .margo-msg-author { font-weight: 600; color: var(--margo-fg); font-size: 11px; }
+    .margo-msg-role {
+      color: var(--margo-muted-fg); font-size: 10px;
+      padding: 1px 5px; background: var(--margo-muted); border-radius: 999px;
+    }
+    .margo-msg-model {
+      color: var(--margo-muted-fg); font-size: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 1px 5px; background: var(--margo-muted); border-radius: 4px;
+    }
+    .margo-msg-time { color: var(--margo-muted-fg); font-size: 10px; }
+    .margo-bubble {
+      background: var(--margo-bg);
+      border: 1px solid var(--margo-border);
+      border-radius: 14px;
+      padding: 9px 12px;
+      font-size: 13px; line-height: 1.5; color: var(--margo-fg);
+      white-space: pre-wrap; word-break: break-word;
+      box-shadow: 0 1px 1px rgb(0 0 0 / .03);
+    }
+    .margo-msg .margo-bubble { border-top-left-radius: 4px; }
+    .margo-msg-ai .margo-bubble {
+      background: linear-gradient(180deg, hsl(217 91% 97%), hsl(280 70% 97%));
+      border-color: hsl(217 91% 88%);
+    }
+    /* ——— action row (sits between thread and footer) ——— */
     .margo-actions {
       display: flex; gap: 8px; align-items: center;
-      padding: 0 16px 14px;
+      padding: 12px 16px 14px;
+      border-top: 1px solid var(--margo-border);
     }
     /* ——— Badge (variant=secondary, status-aware) ——— */
     .margo-role, .margo-status {
