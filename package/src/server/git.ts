@@ -89,7 +89,11 @@ async function commitAndMaybePush(message: string, opts: GitOptions): Promise<vo
   if (!opts.autoPush) return;
 
   if (opts.pullBeforePush) {
-    const pull = await run(opts.cwd, ['pull', '--rebase']);
+    // --autostash so the rebase doesn't refuse to start when the user has
+    // unstaged work-in-progress alongside the comment file. Their unstaged
+    // changes are stashed before the rebase, reapplied after, and never
+    // included in the push (only what we explicitly committed goes out).
+    const pull = await run(opts.cwd, ['pull', '--rebase', '--autostash']);
     if (pull.code !== 0) {
       throw new Error(
         `git pull --rebase failed before push. Resolve manually and re-run: ${pull.stderr}`,
@@ -106,7 +110,8 @@ async function commitAndMaybePush(message: string, opts: GitOptions): Promise<vo
 /** Background: pull from remote so local sees others' new comments. */
 export async function backgroundPull(cwd: string): Promise<void> {
   // --rebase to avoid generating merge commits inside the comment stream.
-  await run(cwd, ['pull', '--rebase', '--quiet']);
+  // --autostash so a dirty WT doesn't block the silent background pull.
+  await run(cwd, ['pull', '--rebase', '--autostash', '--quiet']);
 }
 
 /** Short SHA of HEAD, or null if not in a git repo / no commits yet. */
