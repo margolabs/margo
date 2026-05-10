@@ -187,6 +187,10 @@ export const dynamic = 'force-dynamic';
 `;
 
 async function patchNextConfig(cwd: string): Promise<void> {
+  // We use the withMargo() HOC instead of injecting raw config keys —
+  // wrapping is the standard Next.js pattern (withMDX, withSentryConfig
+  // etc.), reads as one obvious line, and composes safely with whatever
+  // rewrites/externalPackages the user already has.
   const candidates = ['next.config.ts', 'next.config.mjs', 'next.config.js'];
   let target: string | undefined;
   for (const c of candidates) {
@@ -194,24 +198,43 @@ async function patchNextConfig(cwd: string): Promise<void> {
   }
   if (!target) {
     console.log('[margo] no next.config.* found — add this to your config:');
-    console.log("       serverExternalPackages: ['@margo/dev'],");
-    console.log("       async rewrites() { return [{ source: '/__margo/:path*', destination: '/margo-runtime/:path*' }]; }");
+    console.log("       import { withMargo } from '@margo/dev/next';");
+    console.log('       export default withMargo(nextConfig);');
     return;
   }
   const original = await fs.readFile(target, 'utf8');
-  if (original.includes('@margo/dev') || original.includes('margo-runtime')) return; // already wired
+  if (original.includes('withMargo')) return;
 
-  // Naive but readable insertion: find the first object literal `{` after a
-  // `NextConfig =` (TS) or `module.exports =` (JS), and inject our keys.
-  const anchor = original.match(/(?:NextConfig\s*=\s*|module\.exports\s*=\s*)\{/);
-  if (!anchor || anchor.index === undefined) {
-    console.log(`[margo] could not auto-patch ${target}.`);
-    console.log("       Add: serverExternalPackages: ['@margo/dev'], and a rewrite from /__margo/:path* to /margo-runtime/:path*");
+  // Find the `export default <expr>;` we'll wrap, and the import section
+  // we'll prepend our import to. Naive regexes — good enough for the
+  // generated next.config.ts and most user-edited variants.
+  const exportMatch = original.match(/export\s+default\s+([^;\n]+);?/);
+  if (!exportMatch || exportMatch.index === undefined) {
+    console.log(`[margo] could not auto-wrap ${target}.`);
+    console.log("       Add: import { withMargo } from '@margo/dev/next/config';");
+    console.log('       And change `export default nextConfig;` to `export default withMargo(nextConfig);`');
     return;
   }
-  const insertAt = anchor.index + anchor[0].length;
-  const inject = `\n  serverExternalPackages: ['@margo/dev'],\n  async rewrites() {\n    return [{ source: '/__margo/:path*', destination: '/margo-runtime/:path*' }];\n  },\n`;
-  const next = original.slice(0, insertAt) + inject + original.slice(insertAt);
+  const exportExpr = exportMatch[1].trim();
+  const wrappedExport = `export default withMargo(${exportExpr});`;
+
+  // Insert our import after the last existing import line, or at the top
+  // if there are none.
+  const importStmt = `import { withMargo } from '@margo/dev/next';`;
+  const importLines = [...original.matchAll(/^import .+;$/gm)];
+  const lastImport = importLines[importLines.length - 1];
+  let next: string;
+  if (lastImport && lastImport.index !== undefined) {
+    const end = lastImport.index + lastImport[0].length;
+    next = original.slice(0, end) + `\n${importStmt}` + original.slice(end);
+  } else {
+    next = `${importStmt}\n${original}`;
+  }
+  // Replace the export — recompute index because we inserted text earlier.
+  const newExportMatch = next.match(/export\s+default\s+([^;\n]+);?/);
+  if (newExportMatch && newExportMatch.index !== undefined) {
+    next = next.slice(0, newExportMatch.index) + wrappedExport + next.slice(newExportMatch.index + newExportMatch[0].length);
+  }
   await fs.writeFile(target, next, 'utf8');
 }
 

@@ -16,7 +16,8 @@
     },
     "./next": {
       "types": "./dist/plugin/next.d.ts",
-      "import": "./dist/plugin/next.js"
+      "import": "./dist/plugin/next.js",
+      "default": "./dist/plugin/next.js"
     }
   },
   "bin": {
@@ -44,9 +45,9 @@
     "node": ">=18"
   },
   "peerDependencies": {
-    "vite": ">=4",
     "next": ">=13",
-    "react": ">=18"
+    "react": ">=18",
+    "vite": ">=4"
   },
   "peerDependenciesMeta": {
     "vite": {

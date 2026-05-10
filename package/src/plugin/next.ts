@@ -4,7 +4,7 @@
 //
 // Usage in a Next.js app:
 //
-//   // app/__margo/[[...path]]/route.ts
+//   // app/margo-runtime/[[...path]]/route.ts (init CLI creates this)
 //   import { handlers } from '@margo/dev/next';
 //   export const { GET, POST, PATCH, DELETE } = handlers;
 //   export const runtime = 'nodejs';
@@ -15,7 +15,17 @@
 //   ...
 //   <body>{children}<MargoScript /></body>
 //
-// The init CLI sets both up automatically.
+//   // next.config.ts
+//   import { withMargo } from '@margo/dev/next';
+//   export default withMargo(nextConfig);
+//
+// Production safety: behavior is gated by NODE_ENV. When NODE_ENV=production
+// and MARGO_ENABLED is unset, dispatch() returns 404 immediately and
+// <MargoScript /> renders null, so chokidar/git/file watcher never run and
+// no overlay code reaches the browser. We import the runtime modules
+// statically (not via dynamic import) — Turbopack misbehaves with dynamic
+// imports inside route-evaluated modules, triggering restart loops on
+// every request.
 
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
@@ -80,16 +90,16 @@ async function ensureCtx(): Promise<HandlerContext> {
 
   if (!watcherStarted) {
     watcherStarted = true;
-    const watcher = new CommentWatcher(commentsDir);
-    watcher.on('event', (e) => broadcastSse(cachedCtx!, e));
-    watcher.start();
+    const w = new CommentWatcher(commentsDir);
+    w.on('event', (e) => broadcastSse(cachedCtx!, e));
+    w.start();
     pullTimer = setInterval(() => {
       backgroundPull(rootDir).catch(() => { /* sync paused; overlay can show banner if it cares */ });
     }, 30_000);
     // Process exit cleans these up; Next.js dev server doesn't tell us
     // when it shuts down per-route, so we lean on process lifecycle.
     process.once('exit', () => {
-      void watcher.stop();
+      void w.stop();
       if (pullTimer) clearInterval(pullTimer);
     });
   }
@@ -125,6 +135,7 @@ async function dispatch(request: Request, ctx?: RouteContext): Promise<Response>
   if (request.method === 'GET' && (route === 'overlay.js' || route === 'overlay.js.map')) {
     return serveOverlay(route);
   }
+
   const handlerCtx = await ensureCtx();
   try {
     if (route === 'list' && request.method === 'GET') {
@@ -232,6 +243,12 @@ export const handlers = {
   PATCH: dispatch,
   DELETE: dispatch,
 };
+
+// Re-export the next-config wrapper so users have a single import path.
+// Sub-sub-paths like '@margo/dev/next/config' tripped Next.js's config
+// loader (ERR_PACKAGE_PATH_NOT_EXPORTED) even though Node resolved them
+// fine — flatter is safer.
+export { withMargo } from './next-config.js';
 
 // React component — drop into `app/layout.tsx`. Renders nothing in
 // production unless MARGO_ENABLED=1 (preview deploys).
