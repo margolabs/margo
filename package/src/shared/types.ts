@@ -86,6 +86,10 @@ export interface MargoConfig {
     commitPrefix: string;
     branchPolicy: 'current' | 'main-only';
     pullBeforePush: boolean;
+    // Interval (ms) between background `git fetch` ticks that look for new
+    // teammate comments on upstream. Surfaces a notification in the overlay;
+    // never auto-pulls. Set 0 to disable. Default 60000.
+    remotePollIntervalMs?: number;
   };
   ai: {
     implicitTaskTrigger: boolean;

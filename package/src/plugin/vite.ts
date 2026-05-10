@@ -14,7 +14,7 @@ import type { Plugin } from 'vite';
 import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } from '../server/endpoints.js';
 import type { SseClient } from '../server/handlers.js';
 import { CommentWatcher } from '../server/watcher.js';
-import { backgroundPull } from '../server/git.js';
+import { RemotePoller } from '../server/remote-poller.js';
 import type { MargoConfig } from '../shared/types.js';
 
 const PLUGIN_DIR = path.dirname(url.fileURLToPath(import.meta.url));
@@ -48,13 +48,20 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
   let config: MargoConfig = DEFAULTS;
   const sseClients = new Set<SseClient>();
   let watcher: CommentWatcher | undefined;
-  let pullTimer: NodeJS.Timeout | undefined;
+  let poller: RemotePoller | undefined;
 
   const ctx = (): EndpointContext => ({
     rootDir: viteRoot,
     commentsDir,
     config,
     sseClients,
+    // Replay the most recent remote-changes payload so a tab that loaded
+    // after the poller's initial tick still sees the banner.
+    onSseClientConnect: (client) => {
+      const last = poller?.getLastPayload();
+      if (last) client.write(`data: ${JSON.stringify(last)}\n\n`);
+    },
+    onAfterSync: () => poller?.reset(),
   });
 
   return {
@@ -92,17 +99,15 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
       watcher.on('event', (e) => broadcastSse(ctx(), e));
       watcher.start();
 
-      // Periodic background pull so others' comments arrive automatically.
-      const intervalMs = 30_000;
-      pullTimer = setInterval(() => {
-        backgroundPull(viteRoot).catch(() => {
-          // Silent failure: the overlay can show "sync paused" if it cares.
-        });
-      }, intervalMs);
+      // Background fetch-and-notify: detect new teammate comments on upstream
+      // without pulling. Surfaces a banner the user clicks to /__margo/sync.
+      poller = new RemotePoller(viteRoot, config.git.remotePollIntervalMs);
+      poller.on('event', (e) => broadcastSse(ctx(), e));
+      poller.start();
 
       server.httpServer?.once('close', () => {
         watcher?.stop();
-        if (pullTimer) clearInterval(pullTimer);
+        poller?.stop();
       });
     },
 

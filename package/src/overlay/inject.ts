@@ -37,6 +37,10 @@ export function start(opts: StartOptions): void {
   // Refreshed on SSE events (someone else's commit landed) and on tab focus
   // (user may have run git checkout / git pull in another terminal).
   let gitState: GitState | null = null;
+  // Set when the server's RemotePoller spots new comment changes on upstream.
+  // Drives the "N new comments · Pull" banner. Null when there's nothing
+  // incoming (either we're up to date or we already pulled).
+  let remoteIncoming: { added: string[]; modified: string[]; deleted: string[]; total: number } | null = null;
   // Persist the "show resolved" choice across reloads — surveying past
   // decisions is a recurring task, so the user shouldn't have to re-toggle.
   const showResolvedKey = 'margo:showResolved';
@@ -93,6 +97,28 @@ export function start(opts: StartOptions): void {
     if (next) { gitState = next; renderPins(); }
   };
 
+  const renderRemoteBanner = () => {
+    // Preview mode never sees this banner — there's nothing to "pull" into.
+    if (opts.mode !== 'dev') return;
+    renderRemoteChangesBanner(root, remoteIncoming, async () => {
+      // Optimistic dismiss: the user clicked Pull, so hide the banner now.
+      // If the pull fails, restore + surface the error.
+      const stash = remoteIncoming;
+      remoteIncoming = null;
+      renderRemoteBanner();
+      const result = await sync.syncFromRemote();
+      if (!result.ok) {
+        remoteIncoming = stash;
+        renderRemoteBanner();
+        await uiAlert(result.error, 'Pull failed');
+        return;
+      }
+      // Pull succeeded. The CommentWatcher will fire add/change events for
+      // the newly-arrived files, which already trigger refetchAndRender +
+      // refreshGitState in the SSE handler above. Nothing else to do here.
+    });
+  };
+
   sync.addEventListener('event', (ev) => {
     const e = (ev as CustomEvent<SyncEvent>).detail;
     if (e.type === 'snapshot') {
@@ -107,6 +133,12 @@ export function start(opts: StartOptions): void {
       // A new comment file probably means a teammate pushed; their push may
       // have advanced our HEAD via the background pull. Refresh git state too.
       void refreshGitState();
+    }
+    if (e.type === 'remote-changes') {
+      remoteIncoming = e.total > 0
+        ? { added: e.added, modified: e.modified, deleted: e.deleted, total: e.total }
+        : null;
+      renderRemoteBanner();
     }
   });
 
@@ -543,6 +575,43 @@ function handleHashDeepLink(): void {
     // user-initiated pin click still gets its animation.
     requestAnimationFrame(() => { suppressNextPanelAnim = false; });
   }, 400);
+}
+
+function renderRemoteChangesBanner(
+  root: HTMLElement,
+  state: { added: string[]; modified: string[]; deleted: string[]; total: number } | null,
+  onPull: () => Promise<void> | void,
+): void {
+  const existing = root.querySelector('.margo-remote-banner');
+  if (!state) {
+    existing?.remove();
+    return;
+  }
+  // Reuse the existing node when present so the banner doesn't flicker if a
+  // subsequent remote-changes event arrives with a different count.
+  const banner = (existing as HTMLDivElement | null) ?? document.createElement('div');
+  if (!existing) {
+    banner.className = 'margo-remote-banner';
+    banner.setAttribute('role', 'status');
+    root.appendChild(banner);
+  }
+  const noun = state.total === 1 ? 'comment' : 'comments';
+  banner.innerHTML = `
+    <span class="margo-remote-banner-text">${state.total} new ${noun} on origin</span>
+    <button type="button" class="margo-remote-banner-pull">Pull</button>
+    <button type="button" class="margo-remote-banner-dismiss" aria-label="dismiss">×</button>
+  `;
+  const pullBtn = banner.querySelector('.margo-remote-banner-pull') as HTMLButtonElement;
+  const dismissBtn = banner.querySelector('.margo-remote-banner-dismiss') as HTMLButtonElement;
+  pullBtn.addEventListener('click', async () => {
+    pullBtn.disabled = true;
+    pullBtn.textContent = 'Pulling…';
+    await onPull();
+  });
+  // Dismiss is local-only: the next poller tick will re-surface the banner
+  // if upstream still has changes the user hasn't pulled. That's deliberate —
+  // the user can stash the nag for a minute without losing it for good.
+  dismissBtn.addEventListener('click', () => banner.remove());
 }
 
 function renderHidePinsToggle(
@@ -1853,6 +1922,38 @@ function injectStyles(): void {
       font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       color: var(--margo-fg);
     }
+    /* ——— remote-changes banner (fetch+notify; click to pull) ——— */
+    .margo-remote-banner {
+      position: fixed; top: 16px; right: 16px; z-index: 999999;
+      display: inline-flex; align-items: center; gap: 10px;
+      max-width: calc(100vw - 32px);
+      padding: 8px 8px 8px 14px;
+      background: var(--margo-bg); color: var(--margo-fg);
+      border: 1px solid var(--margo-border);
+      border-radius: 9999px;
+      font: inherit; font-size: 13px;
+      box-shadow: 0 1px 2px rgb(0 0 0 / .08), 0 8px 24px rgb(0 0 0 / .08);
+    }
+    .margo-remote-banner-text { font-weight: 500; }
+    .margo-remote-banner-pull {
+      display: inline-flex; align-items: center; height: 26px; padding: 0 12px;
+      background: var(--margo-primary); color: var(--margo-primary-fg);
+      border: 0; border-radius: 9999px;
+      font: inherit; font-weight: 500; font-size: 12px;
+      cursor: pointer;
+      transition: background-color .12s;
+    }
+    .margo-remote-banner-pull:hover { background: hsl(240 5.9% 18%); }
+    .margo-remote-banner-pull:disabled { opacity: .6; cursor: progress; }
+    .margo-remote-banner-dismiss {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 24px; height: 24px;
+      background: transparent; color: var(--margo-muted-fg);
+      border: 0; border-radius: 9999px;
+      font: inherit; font-size: 18px; line-height: 1;
+      cursor: pointer;
+    }
+    .margo-remote-banner-dismiss:hover { background: var(--margo-muted); color: var(--margo-fg); }
     /* ——— launcher (Button: variant=default, size=sm, shape=pill) ——— */
     .margo-launcher {
       position: fixed; bottom: 16px; right: 16px; z-index: 999999;

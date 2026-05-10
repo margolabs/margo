@@ -17,7 +17,8 @@
     "autoPush":   true,
     "commitPrefix": "margo:",
     "branchPolicy": "current",
-    "pullBeforePush": true
+    "pullBeforePush": true,
+    "remotePollIntervalMs": 60000
   },
   "ai": {
     "implicitTaskTrigger": true,

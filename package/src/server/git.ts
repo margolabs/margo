@@ -125,6 +125,49 @@ export async function backgroundPull(cwd: string): Promise<void> {
   await run(cwd, ['pull', '--rebase', '--autostash', '--quiet']);
 }
 
+/** Fetch from the configured remote without touching the working tree. */
+export async function fetchRemote(cwd: string): Promise<boolean> {
+  const { code } = await run(cwd, ['fetch', '--quiet']);
+  return code === 0;
+}
+
+/**
+ * Files under `pathFilter` that upstream commits have changed since we last
+ * shared history with the upstream. Empty array when there's no upstream, no
+ * incoming commits, or no changes touching the path. Never throws.
+ */
+export async function listIncomingChanges(
+  cwd: string,
+  pathFilter: string,
+): Promise<{ added: string[]; modified: string[]; deleted: string[] } | null> {
+  // Resolve the merge base between HEAD and @{u}. If there's no upstream,
+  // bail out — single-dev repos and detached HEAD both end up here.
+  const base = await run(cwd, ['merge-base', 'HEAD', '@{u}']);
+  if (base.code !== 0) return null;
+  const baseSha = base.stdout.trim();
+  if (!baseSha) return null;
+
+  // Tree-diff from merge-base to upstream gives us exactly the file changes
+  // an upcoming `git pull` would apply, scoped to pathFilter.
+  const diff = await run(cwd, [
+    'diff', '--name-status', `${baseSha}..@{u}`, '--', pathFilter,
+  ]);
+  if (diff.code !== 0) return { added: [], modified: [], deleted: [] };
+
+  const added: string[] = [];
+  const modified: string[] = [];
+  const deleted: string[] = [];
+  for (const line of diff.stdout.split('\n')) {
+    if (!line.trim()) continue;
+    const [status, file] = line.split('\t', 2);
+    if (!file) continue;
+    if (status?.startsWith('A')) added.push(file);
+    else if (status?.startsWith('D')) deleted.push(file);
+    else modified.push(file);
+  }
+  return { added, modified, deleted };
+}
+
 /** Short SHA of HEAD, or null if not in a git repo / no commits yet. */
 export async function getCurrentCommit(cwd: string): Promise<string | null> {
   const { stdout, code } = await run(cwd, ['rev-parse', '--short', 'HEAD']);

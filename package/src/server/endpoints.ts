@@ -85,6 +85,7 @@ function handleEvents(ctx: EndpointContext, req: IncomingMessage, res: ServerRes
   // depend on the return type matching SseClient's signature.
   const client: SseClient = { write: (payload) => { res.write(payload); } };
   ctx.sseClients.add(client);
+  ctx.onSseClientConnect?.(client);
   req.on('close', () => ctx.sseClients.delete(client));
 }
 

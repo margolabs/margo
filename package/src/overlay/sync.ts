@@ -7,7 +7,16 @@ export type SyncEvent =
   | { type: 'snapshot'; comments: Comment[] }
   | { type: 'created'; id: string }
   | { type: 'updated'; id: string }
-  | { type: 'deleted'; id: string };
+  | { type: 'deleted'; id: string }
+  // Server detected new comment changes on upstream (origin/<branch>).
+  // The overlay shows a one-click "pull" banner; total === 0 dismisses it.
+  | {
+      type: 'remote-changes';
+      added: string[];
+      modified: string[];
+      deleted: string[];
+      total: number;
+    };
 
 export class SyncClient extends EventTarget {
   private es?: EventSource;
@@ -68,6 +77,24 @@ export class SyncClient extends EventTarget {
       if (!res.ok) return null;
       return await res.json();
     } catch { return null; }
+  }
+
+  /** Trigger a `git pull --rebase --autostash` on the dev server. */
+  async syncFromRemote(): Promise<{ ok: true } | { ok: false; error: string }> {
+    try {
+      const res = await fetch('/__margo/sync', { method: 'POST' });
+      if (!res.ok) {
+        let error = `${res.status}`;
+        try {
+          const body = (await res.json()) as { error?: string };
+          if (body.error) error = body.error;
+        } catch { /* fall through */ }
+        return { ok: false, error };
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
   }
 
   async getGitState(): Promise<GitState | null> {

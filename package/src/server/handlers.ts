@@ -39,6 +39,14 @@ export interface HandlerContext {
   commentsDir: string;   // .margo/comments
   config: MargoConfig;
   sseClients: Set<SseClient>;
+  // Called after a new SSE client is registered, so plugins can replay any
+  // "sticky" state (e.g. the remote-changes snapshot) the client missed by
+  // connecting after the originating event fired.
+  onSseClientConnect?: (client: SseClient) => void;
+  // Called after `syncFromRemote` succeeds. Plugins use this to clear the
+  // poller's cached snapshot so newly-connected tabs don't see a stale
+  // "incoming comments" banner for changes that have already been pulled.
+  onAfterSync?: () => void;
 }
 
 /** Throw from a handler to surface a specific HTTP status to the adapter. */
@@ -209,6 +217,7 @@ export async function deleteComment(
 
 export async function syncFromRemote(ctx: HandlerContext): Promise<{ ok: true }> {
   await backgroundPull(ctx.rootDir);
+  ctx.onAfterSync?.();
   return { ok: true };
 }
 

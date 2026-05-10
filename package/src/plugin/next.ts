@@ -45,8 +45,8 @@ import {
   type HandlerContext,
   type SseClient,
 } from '../server/handlers.js';
-import { backgroundPull } from '../server/git.js';
 import { CommentWatcher } from '../server/watcher.js';
+import { RemotePoller } from '../server/remote-poller.js';
 import type { CreateCommentRequest, MargoConfig, UpdateCommentRequest } from '../shared/types.js';
 
 const PLUGIN_DIR = path.dirname(url.fileURLToPath(import.meta.url));
@@ -71,7 +71,7 @@ const DEFAULTS: MargoConfig = {
 // and reuses the same chokidar watcher + sseClients set across requests.
 let cachedCtx: HandlerContext | null = null;
 let watcherStarted = false;
-let pullTimer: NodeJS.Timeout | null = null;
+let poller: RemotePoller | null = null;
 
 async function ensureCtx(): Promise<HandlerContext> {
   if (cachedCtx) return cachedCtx;
@@ -86,21 +86,33 @@ async function ensureCtx(): Promise<HandlerContext> {
     // .margo/config.json doesn't exist — handlers still work, just with defaults.
   }
   const sseClients = new Set<SseClient>();
-  cachedCtx = { rootDir, commentsDir, config, sseClients };
+  cachedCtx = {
+    rootDir,
+    commentsDir,
+    config,
+    sseClients,
+    // Replay the most recent remote-changes payload so a tab that loaded
+    // after the poller's initial tick still sees the banner.
+    onSseClientConnect: (client) => {
+      const last = poller?.getLastPayload();
+      if (last) client.write(`data: ${JSON.stringify(last)}\n\n`);
+    },
+    onAfterSync: () => poller?.reset(),
+  };
 
   if (!watcherStarted) {
     watcherStarted = true;
     const w = new CommentWatcher(commentsDir);
     w.on('event', (e) => broadcastSse(cachedCtx!, e));
     w.start();
-    pullTimer = setInterval(() => {
-      backgroundPull(rootDir).catch(() => { /* sync paused; overlay can show banner if it cares */ });
-    }, 30_000);
+    poller = new RemotePoller(rootDir, config.git.remotePollIntervalMs);
+    poller.on('event', (e) => broadcastSse(cachedCtx!, e));
+    poller.start();
     // Process exit cleans these up; Next.js dev server doesn't tell us
     // when it shuts down per-route, so we lean on process lifecycle.
     process.once('exit', () => {
       void w.stop();
-      if (pullTimer) clearInterval(pullTimer);
+      poller?.stop();
     });
   }
 
@@ -213,6 +225,7 @@ function handleEvents(ctx: HandlerContext, request: Request): Response {
         },
       };
       ctx.sseClients.add(client);
+      ctx.onSseClientConnect?.(client);
       // Web Fetch surfaces client disconnect via the request's AbortSignal.
       // Without this we'd leak SseClient entries forever as tabs close.
       request.signal.addEventListener('abort', () => {
