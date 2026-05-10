@@ -89,15 +89,26 @@ async function commitAndMaybePush(message: string, opts: GitOptions): Promise<vo
   if (!opts.autoPush) return;
 
   if (opts.pullBeforePush) {
-    // --autostash so the rebase doesn't refuse to start when the user has
-    // unstaged work-in-progress alongside the comment file. Their unstaged
-    // changes are stashed before the rebase, reapplied after, and never
-    // included in the push (only what we explicitly committed goes out).
-    const pull = await run(opts.cwd, ['pull', '--rebase', '--autostash']);
-    if (pull.code !== 0) {
-      throw new Error(
-        `git pull --rebase failed before push. Resolve manually and re-run: ${pull.stderr}`,
-      );
+    // Fetch only updates refs under .git/, not the working tree — file
+    // watchers don't see anything change. Then check whether we're behind.
+    // If not, skip the pull entirely. This avoids the autostash dance
+    // (stash → rebase → unstash) which touches working-tree mtimes and
+    // makes Turbopack-style file watchers restart the dev server. Common
+    // case (everyone in sync) becomes a single git fetch, no stash.
+    await run(opts.cwd, ['fetch', '--quiet']).catch(() => undefined);
+    const behind = await run(opts.cwd, ['rev-list', '--count', 'HEAD..@{u}']);
+    const behindCount = Number.parseInt(behind.stdout.trim(), 10);
+    if (Number.isFinite(behindCount) && behindCount > 0) {
+      // --autostash so the rebase doesn't refuse to start when the user has
+      // unstaged work-in-progress alongside the comment file. Their unstaged
+      // changes are stashed before the rebase, reapplied after, and never
+      // included in the push.
+      const pull = await run(opts.cwd, ['pull', '--rebase', '--autostash']);
+      if (pull.code !== 0) {
+        throw new Error(
+          `git pull --rebase failed before push. Resolve manually and re-run: ${pull.stderr}`,
+        );
+      }
     }
   }
 

@@ -48,6 +48,34 @@ export class HandlerError extends Error {
   }
 }
 
+// Background git queue. Comment writes return to the client as soon as the
+// .md file is on disk; the git add/commit/pull/push runs after, serialized
+// through this promise chain. Two reasons for the chain:
+//
+//   1. UX: the user's POST returns in <50ms instead of waiting 2-3s for the
+//      git push to round-trip.
+//   2. Dev-server stability: `git pull --rebase --autostash` temporarily
+//      moves any unstaged changes via stash. Turbopack's file watcher sees
+//      those mtime changes and restarts the dev server — killing any
+//      in-flight HTTP request. With async git, the response has already
+//      flushed before the stash dance starts, so a restart never strands
+//      a client mid-request.
+//
+// Cost: errors during commit/push are visible in the dev-server console,
+// not surfaced to the client. Acceptable trade-off — the .md file is on
+// disk, so subsequent reads work; the user can `git status` to see the
+// uncommitted file if they care, and the next margo write retries the
+// queue from the top.
+let gitQueue: Promise<unknown> = Promise.resolve();
+
+function enqueueGitOp(label: string, op: () => Promise<unknown>): void {
+  gitQueue = gitQueue
+    .catch(() => undefined) // a prior failure mustn't poison subsequent ops
+    .then(() => op().catch((err) => {
+      console.error(`[margo] background git op failed (${label}):`, (err as Error).message);
+    }));
+}
+
 export async function listComments(ctx: HandlerContext): Promise<{ comments: Comment[] }> {
   return { comments: await readAllComments(ctx.commentsDir) };
 }
@@ -106,8 +134,12 @@ export async function createComment(
   const file = path.join(ctx.commentsDir, `${id}.md`);
   await fs.mkdir(ctx.commentsDir, { recursive: true });
   await fs.writeFile(file, serializeComment(fm, body.body), 'utf8');
-  await commitAndPush([file], `comment by ${author.email} on ${body.target.url}`, gitOpts(ctx));
+  // SSE fires immediately so the local overlay (and any other tabs on this
+  // dev server) re-render with the new pin without waiting on git.
   broadcastSse(ctx, { type: 'created', id });
+  enqueueGitOp(`comment ${id}`, () =>
+    commitAndPush([file], `comment by ${author.email} on ${body.target.url}`, gitOpts(ctx)),
+  );
   return { id };
 }
 
@@ -138,8 +170,10 @@ export async function updateComment(
     filesToCommit.push(decisionsFile);
   }
 
-  await commitAndPush(filesToCommit, `update on ${body.id}`, gitOpts(ctx));
   broadcastSse(ctx, { type: 'updated', id: body.id });
+  enqueueGitOp(`update ${body.id}`, () =>
+    commitAndPush(filesToCommit, `update on ${body.id}`, gitOpts(ctx)),
+  );
   return { ok: true };
 }
 
@@ -163,8 +197,13 @@ export async function deleteComment(
     throw new HandlerError(403, { error: 'only the original author can delete a comment' });
   }
   // Authorship is the only gate — git history preserves the file regardless.
-  await removeAndCommit([file], `delete ${id} by ${me.email}`, gitOpts(ctx));
+  // Delete the file synchronously so subsequent reads don't see the ghost,
+  // then queue the git rm + commit + push for the background.
+  await fs.unlink(file).catch(() => { /* already gone is fine */ });
   broadcastSse(ctx, { type: 'deleted', id });
+  enqueueGitOp(`delete ${id}`, () =>
+    removeAndCommit([file], `delete ${id} by ${me.email}`, gitOpts(ctx)),
+  );
   return { ok: true };
 }
 
