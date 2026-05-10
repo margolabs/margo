@@ -5,7 +5,7 @@ author: sxhuan@gmail.com
 authorName: Stanley Song
 branch: main
 created: '2026-05-09T10:08:29.166Z'
-status: resolved
+status: open
 target:
   url: /
   selector: main:nth-of-type(1)
@@ -20,6 +20,7 @@ target:
     x: 1132
     'y': 282
 ---
+
 
 
 make the max width to lg
