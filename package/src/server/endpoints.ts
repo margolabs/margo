@@ -16,9 +16,12 @@ import { newCommentId } from '../shared/id.js';
 import {
   backgroundPull,
   commitAndPush,
+  getAheadBehind,
   getAuthor,
   getCurrentBranch,
+  getCurrentCommit,
   getDeclaredRole,
+  getDirtyState,
   removeAndCommit,
   type GitOptions,
 } from './git.js';
@@ -36,7 +39,7 @@ export interface EndpointContext {
   sseClients: Set<ServerResponse>;
 }
 
-const ENDPOINTS = ['/__margo/comment', '/__margo/list', '/__margo/events', '/__margo/sync', '/__margo/me'] as const;
+const ENDPOINTS = ['/__margo/comment', '/__margo/list', '/__margo/events', '/__margo/sync', '/__margo/me', '/__margo/git-state'] as const;
 
 export function isMargoEndpoint(url: string | undefined): boolean {
   if (!url) return false;
@@ -52,6 +55,7 @@ export async function handleEndpoint(
   try {
     if (url === '/__margo/list' && req.method === 'GET') return await handleList(ctx, res);
     if (url === '/__margo/me' && req.method === 'GET') return await handleMe(ctx, res);
+    if (url === '/__margo/git-state' && req.method === 'GET') return await handleGitState(ctx, res);
     if (url === '/__margo/comment' && req.method === 'POST') return await handleCreate(ctx, req, res);
     if (url === '/__margo/comment' && req.method === 'PATCH') return await handleUpdate(ctx, req, res);
     if (url.startsWith('/__margo/comment') && req.method === 'DELETE') return await handleDelete(ctx, req, res);
@@ -76,6 +80,27 @@ async function handleMe(ctx: EndpointContext, res: ServerResponse): Promise<void
   const author = await getAuthor(ctx.rootDir);
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ email: author.email, name: author.name }));
+}
+
+async function handleGitState(ctx: EndpointContext, res: ServerResponse): Promise<void> {
+  // The overlay polls this to diagnose anchor failures: same commit + clean
+  // WT means the element really is gone; otherwise the viewer's checkout is
+  // the cause and we can say so explicitly in the orphan tray.
+  const [commit, branch, dirtyState, aheadBehind] = await Promise.all([
+    getCurrentCommit(ctx.rootDir),
+    getCurrentBranch(ctx.rootDir).catch(() => 'unknown'),
+    getDirtyState(ctx.rootDir),
+    getAheadBehind(ctx.rootDir),
+  ]);
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({
+    commit: commit ?? '',
+    branch,
+    dirty: dirtyState.dirty,
+    dirtyCount: dirtyState.count,
+    ahead: aheadBehind?.ahead ?? null,
+    behind: aheadBehind?.behind ?? null,
+  }));
 }
 
 async function handleDelete(
@@ -134,8 +159,21 @@ async function handleCreate(
   const id = newCommentId();
   const author = await getAuthor(ctx.rootDir);
   const role = await resolveRole(author.email, ctx.config, ctx.rootDir);
-  const branch = await getCurrentBranch(ctx.rootDir);
+  const [branch, commit, dirtyState] = await Promise.all([
+    getCurrentBranch(ctx.rootDir),
+    getCurrentCommit(ctx.rootDir),
+    getDirtyState(ctx.rootDir),
+  ]);
   const created = new Date().toISOString();
+
+  // Stamp commit + dirty onto the target so divergent viewers can diagnose
+  // anchor failures. Server-side override (not trusted from the client) so a
+  // stale browser tab can't pretend to be a different commit.
+  const target = {
+    ...body.target,
+    ...(commit ? { commit } : {}),
+    ...(dirtyState.dirty ? { dirty: true } : {}),
+  };
 
   const fm = {
     id,
@@ -146,7 +184,7 @@ async function handleCreate(
     branch,
     created,
     status: 'open' as const,
-    target: body.target,
+    target,
   };
   const file = path.join(ctx.commentsDir, `${id}.md`);
   await fs.mkdir(ctx.commentsDir, { recursive: true });

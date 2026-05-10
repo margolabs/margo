@@ -34,6 +34,13 @@ export interface Target {
   coords: { x: number; y: number };
   textAnchor?: TextAnchor;
   gapAnchor?: GapAnchor;
+  // Short SHA of HEAD when the pin was authored. Lets viewers detect
+  // "this pin was made against a different commit than what I'm rendering."
+  commit?: string;
+  // True if the author's working tree had uncommitted changes when they
+  // pinned. Pin may anchor to DOM that only exists in their local edits;
+  // viewers won't see it even on the same commit.
+  dirty?: boolean;
 }
 
 export interface CommentFrontmatter {
@@ -90,6 +97,22 @@ export interface CreateCommentRequest {
   type: CommentType;
   body: string;
   target: Target;
+}
+
+// Local repo state, returned by GET /__margo/git-state. The overlay uses this
+// to diagnose why a comment failed to anchor — same commit + clean WT means
+// the element really is gone; otherwise the viewer's checkout is the cause.
+export interface GitState {
+  commit: string;       // short SHA of HEAD
+  branch: string;
+  dirty: boolean;
+  dirtyCount: number;   // number of changed files; 0 when clean
+  // Number of commits the local branch is behind the upstream tracking
+  // branch, when both exist. Lets the overlay say "you're 3 commits behind"
+  // instead of just "different commit." Null when there's no upstream.
+  behind: number | null;
+  // Same shape, ahead.
+  ahead: number | null;
 }
 
 export interface UpdateCommentRequest {

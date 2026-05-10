@@ -9,7 +9,7 @@ import { captureTarget, captureTargetFromEvent, captureTargetFromGap, captureTar
 import { resolveTarget } from './resolver.js';
 import { installRouteTracker, onRouteChange, currentRoute } from './route-tracker.js';
 import { SyncClient, type SyncEvent } from './sync.js';
-import type { Comment, CommentType } from '../shared/types.js';
+import type { Comment, CommentType, GitState } from '../shared/types.js';
 
 interface StartOptions {
   mode: 'dev' | 'preview';
@@ -33,12 +33,22 @@ export function start(opts: StartOptions): void {
   // own-only delete affordance — null while the fetch is in flight or in
   // preview mode (where we don't ask the backend at all).
   let me: { email: string } | null = null;
+  // Local repo state — drives the divergence diagnostics in the orphan tray.
+  // Refreshed on SSE events (someone else's commit landed) and on tab focus
+  // (user may have run git checkout / git pull in another terminal).
+  let gitState: GitState | null = null;
   // Persist the "show resolved" choice across reloads — surveying past
   // decisions is a recurring task, so the user shouldn't have to re-toggle.
   const showResolvedKey = 'margo:showResolved';
   let showResolved = localStorage.getItem(showResolvedKey) === '1';
 
-  const renderPins = () => renderAllPins(root, store, sync, opts.mode === 'preview', me, showResolved);
+  const renderPins = () => renderAllPins(root, store, sync, opts.mode === 'preview', me, showResolved, gitState);
+
+  const refreshGitState = async () => {
+    if (opts.mode !== 'dev') return;
+    const next = await sync.getGitState();
+    if (next) { gitState = next; renderPins(); }
+  };
 
   sync.addEventListener('event', (ev) => {
     const e = (ev as CustomEvent<SyncEvent>).detail;
@@ -51,12 +61,22 @@ export function start(opts: StartOptions): void {
     // Optimization (delta fetches) deferred.
     if (e.type === 'created' || e.type === 'updated' || e.type === 'deleted') {
       void refetchAndRender(sync, store, renderPins);
+      // A new comment file probably means a teammate pushed; their push may
+      // have advanced our HEAD via the background pull. Refresh git state too.
+      void refreshGitState();
     }
   });
 
   sync.start();
   if (opts.mode === 'dev') {
     void sync.getMe().then((u) => { me = u; renderPins(); });
+    void refreshGitState();
+    // Catches the common case: user runs `git checkout other-branch` in a
+    // terminal, alt-tabs back to the browser. Without this the orphan tray
+    // would still show diagnostics for the previous branch.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') void refreshGitState();
+    });
   }
   // Toggle is rendered once and lives outside renderAllPins (which clears its
   // own children every cycle). The button mutates `showResolved` and triggers
@@ -118,6 +138,7 @@ function renderAllPins(
   readOnly: boolean,
   me: { email: string } | null,
   showResolved: boolean,
+  gitState: GitState | null,
 ): void {
   // Clear existing pin + highlight + tray + bulk-action nodes (keep the launcher and toggle)
   for (const el of Array.from(root.querySelectorAll('[data-margo-pin],[data-margo-highlight],[data-margo-tray],[data-margo-bulk]'))) el.remove();
@@ -209,7 +230,7 @@ function renderAllPins(
     root.appendChild(pin);
   }
 
-  if (orphans.length > 0) renderOrphanTray(root, orphans, sync, readOnly, me);
+  if (orphans.length > 0) renderOrphanTray(root, orphans, sync, readOnly, me, gitState);
   if (!readOnly && onPage.length > 0) renderPageBulkActions(root, onPage, sync);
 }
 
@@ -306,6 +327,7 @@ function renderOrphanTray(
   sync: SyncClient,
   readOnly: boolean,
   me: { email: string } | null,
+  gitState: GitState | null,
 ): void {
   const tray = document.createElement('div');
   tray.dataset.margoTray = '';
@@ -332,7 +354,7 @@ function renderOrphanTray(
     bulk.addEventListener('click', () => bulkResolve(bulk, orphans, sync, 'orphans'));
     list.appendChild(bulk);
   }
-  for (const c of orphans) list.appendChild(renderOrphanCard(c, sync, readOnly, me));
+  for (const c of orphans) list.appendChild(renderOrphanCard(c, sync, readOnly, me, gitState));
   tray.appendChild(list);
 
   toggle.addEventListener('click', () => {
@@ -348,6 +370,7 @@ function renderOrphanCard(
   sync: SyncClient,
   readOnly: boolean,
   me: { email: string } | null,
+  gitState: GitState | null,
 ): HTMLElement {
   const card = document.createElement('div');
   card.className = 'margo-orphan';
@@ -379,10 +402,17 @@ function renderOrphanCard(
   header.querySelector('.margo-close')!.addEventListener('click', () => card.remove());
   card.appendChild(header);
 
+  const diag = diagnoseOrphan(c, gitState);
   const lostLabel = document.createElement('p');
   lostLabel.className = 'margo-orphan-label';
-  lostLabel.textContent = 'Anchor removed — coworker edited this away.';
+  lostLabel.textContent = diag.label;
   card.appendChild(lostLabel);
+  if (diag.hint) {
+    const hint = document.createElement('p');
+    hint.className = 'margo-orphan-hint';
+    hint.textContent = diag.hint;
+    card.appendChild(hint);
+  }
 
   if (quoted) {
     const q = document.createElement('blockquote');
@@ -493,6 +523,44 @@ async function promptDecisionSummary(c: Comment): Promise<string | null> {
 
 function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+// Diagnose why a comment failed to anchor on this view.
+// Order of checks matters — a dirty author WT poisons the comment regardless
+// of commit match, so we surface that first. After that, commit drift is the
+// most common cause; viewer's own dirty WT is checked last because it's the
+// most recoverable.
+function diagnoseOrphan(c: Comment, gitState: GitState | null): { label: string; hint: string | null } {
+  const target = c.frontmatter.target;
+  if (target.dirty) {
+    return {
+      label: "Pinned with author's uncommitted changes.",
+      hint: 'This element may exist only in their working tree. They\'ll need to commit and push for you to see it.',
+    };
+  }
+  if (!gitState) {
+    return { label: 'Anchor not found in this view.', hint: null };
+  }
+  if (target.commit && gitState.commit && target.commit !== gitState.commit) {
+    const behind = gitState.behind ?? 0;
+    const hint = behind > 0
+      ? `You're ${behind} commit${behind === 1 ? '' : 's'} behind upstream — try \`git pull\`.`
+      : `Author was on commit \`${target.commit}\`; you're on \`${gitState.commit}\`. The element may exist on a different branch or commit.`;
+    return {
+      label: `Pinned at ${target.commit} — you're on ${gitState.commit}.`,
+      hint,
+    };
+  }
+  if (gitState.dirty) {
+    return {
+      label: `Your working tree has ${gitState.dirtyCount} uncommitted file${gitState.dirtyCount === 1 ? '' : 's'}.`,
+      hint: 'This anchor may exist in HEAD but be hidden by your local changes. Stash or revert to re-check.',
+    };
+  }
+  return {
+    label: 'Element no longer exists in the code at this commit.',
+    hint: null,
+  };
 }
 
 function enablePinComposer(
@@ -1821,6 +1889,12 @@ function injectStyles(): void {
       font-size: 12px; color: var(--margo-muted-fg);
     }
     .margo-orphan-quote-text { text-decoration: line-through; text-decoration-color: hsl(0 60% 55% / .6); }
+    .margo-orphan-hint {
+      margin: 6px 16px 0; padding: 6px 10px;
+      background: hsl(28 80% 96%); border-radius: 4px;
+      font-size: 11px; color: hsl(28 50% 30%);
+      line-height: 1.4;
+    }
     .margo-orphan-meta {
       margin: 8px 16px 0;
       font-size: 11px; color: var(--margo-muted-fg);

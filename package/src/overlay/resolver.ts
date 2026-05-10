@@ -35,40 +35,78 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
     return { kind: 'lost-anchor' };
   }
 
-  // 1. Selector match
-  // Use querySelectorAll, not querySelector: if the selector is structural
-  // and matches multiple elements (e.g. `nav > a:nth-of-type(2)` after a
-  // refactor duplicated the layout), silently picking the first match would
-  // hide ambiguity from the user. Count matches and downgrade to "moved"
-  // when there are several — the dashed pin outline tells the user "this
-  // might not be on the original element."
+  // Resolve cascade — each layer downgrades to `moved` (dashed pin) so the
+  // user sees "may have changed." Order is from most-confident to least.
+  // The goal: anchor recovery for structural changes (renames, paraphrasing,
+  // tag swaps, section moves) so they don't end up in the orphan tray. Only
+  // genuine deletions should fail through to lost-anchor.
+
+  // 1. Selector match — exact text (highest confidence)
+  let selectorMatches: Element[] = [];
   try {
-    const all = Array.from(document.querySelectorAll(target.selector))
-      .filter((el) => matchesText(el, target.text));
-    if (all.length === 1) {
-      return { kind: 'exact', el: all[0], rects: rectsFor(all[0], target.textAnchor) };
+    selectorMatches = Array.from(document.querySelectorAll(target.selector));
+    const exact = selectorMatches.filter((el) => matchesText(el, target.text));
+    if (exact.length === 1) {
+      return { kind: 'exact', el: exact[0], rects: rectsFor(exact[0], target.textAnchor) };
     }
-    if (all.length > 1) {
-      const best = pickByCoords(all, target) ?? all[0];
+    if (exact.length > 1) {
+      const best = pickByCoords(exact, target) ?? exact[0];
       return { kind: 'moved', el: best, rects: rectsFor(best, target.textAnchor) };
     }
   } catch {
-    // invalid selector — fall through
+    // invalid selector — selectorMatches stays empty; fall through.
   }
 
-  // 2. Text + role match (scan candidates)
+  // 2. Selector still resolves but the visible text changed. Common case:
+  //    a designer/dev renamed a button label or tweaked copy. The element
+  //    itself is the same; we just can't text-match it anymore.
+  if (selectorMatches.length === 1) {
+    return { kind: 'moved', el: selectorMatches[0], rects: rectsFor(selectorMatches[0], target.textAnchor) };
+  }
+  if (selectorMatches.length > 1) {
+    const fuzzy = pickByFuzzyText(selectorMatches, target.text) ?? pickByCoords(selectorMatches, target) ?? selectorMatches[0];
+    return { kind: 'moved', el: fuzzy, rects: rectsFor(fuzzy, target.textAnchor) };
+  }
+
+  // 3. Text + role exact (scan candidates)
   if (target.text) {
-    const candidates = textCandidates(target);
-    if (candidates.length === 1) {
-      return { kind: 'exact', el: candidates[0], rects: rectsFor(candidates[0], target.textAnchor) };
+    const exactTextRole = textCandidates(target, { fuzzy: false, requireRole: true });
+    if (exactTextRole.length === 1) {
+      return { kind: 'exact', el: exactTextRole[0], rects: rectsFor(exactTextRole[0], target.textAnchor) };
     }
-    if (candidates.length > 1) {
-      const best = pickByCoords(candidates, target);
+    if (exactTextRole.length > 1) {
+      const best = pickByCoords(exactTextRole, target);
       if (best) return { kind: 'moved', el: best, rects: rectsFor(best, target.textAnchor) };
     }
+
+    // 4. Text exact, role relaxed. Catches tag swaps (h2→h1, span→p),
+    //    role-attribute removals, button → link conversions etc.
+    const exactTextNoRole = textCandidates(target, { fuzzy: false, requireRole: false });
+    if (exactTextNoRole.length >= 1) {
+      const best = pickByCoords(exactTextNoRole, target) ?? exactTextNoRole[0];
+      return { kind: 'moved', el: best, rects: rectsFor(best, target.textAnchor) };
+    }
+
+    // 5. Fuzzy text (Sørensen–Dice ≥ 0.6), role relaxed. Catches paraphrasing,
+    //    typo fixes, translation, copy editing.
+    const fuzzyText = textCandidates(target, { fuzzy: true, requireRole: false });
+    if (fuzzyText.length >= 1) {
+      const best = pickByCoords(fuzzyText, target) ?? fuzzyText[0];
+      return { kind: 'moved', el: best, rects: rectsFor(best, target.textAnchor) };
+    }
   }
 
-  // 3. Coord-based fallback
+  // 6. Document-wide phrase search using the textAnchor. Catches the case
+  //    where the original phrase was moved into a different parent/section
+  //    so the captured selector + container both miss.
+  if (target.textAnchor?.phrase) {
+    const wide = findPhraseAnywhere(target.textAnchor);
+    if (wide) {
+      return { kind: 'moved', el: wide.el, rects: wide.rects };
+    }
+  }
+
+  // 7. Coord-based fallback (existing behavior)
   const atCoords = elementAtScaledCoords(target);
   if (atCoords) return { kind: 'moved', el: atCoords, rects: rectsFor(atCoords, target.textAnchor) };
 
@@ -269,21 +307,114 @@ function matchesText(el: Element, text: string): boolean {
   return live.startsWith(text.replace(/\.\.\.$/, '').slice(0, 64));
 }
 
-function textCandidates(target: Target): Element[] {
+function textCandidates(target: Target, opts: { fuzzy: boolean; requireRole: boolean }): Element[] {
   if (!target.text) return [];
   const trimmed = target.text.replace(/\.\.\.$/, '').trim();
   if (!trimmed) return [];
+  const probe = trimmed.slice(0, 48);
+  const fuzzyProbe = trimmed.slice(0, 200);
   const all = Array.from(document.querySelectorAll('*'));
   return all.filter((el) => {
     if (el.children.length > 0 && el.tagName !== 'BUTTON' && el.tagName !== 'A') return false;
+    if (el.closest('[data-margo]')) return false; // never match our own UI
     const t = (el.textContent ?? '').trim().replace(/\s+/g, ' ');
-    if (!t.includes(trimmed.slice(0, 48))) return false;
-    if (target.role) {
+    if (!t) return false;
+    if (opts.requireRole && target.role) {
       const role = el.getAttribute('role') ?? el.tagName.toLowerCase();
       if (role !== target.role) return false;
     }
-    return true;
+    if (opts.fuzzy) {
+      // Compare against the live text trimmed to the same window so a long
+      // <main> doesn't always score high on overlap.
+      const liveProbe = t.slice(0, 200);
+      return similarity(liveProbe, fuzzyProbe) >= 0.6;
+    }
+    return t.includes(probe);
   });
+}
+
+// Sørensen–Dice on character bigrams. Cheap, language-agnostic, robust to
+// word reordering and short edits. Returns 0–1.
+function similarity(a: string, b: string): number {
+  const A = a.toLowerCase().replace(/\s+/g, ' ').trim();
+  const B = b.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!A || !B) return 0;
+  if (A === B) return 1;
+  if (A.length < 2 || B.length < 2) return 0;
+  const grams = (s: string): Map<string, number> => {
+    const out = new Map<string, number>();
+    for (let i = 0; i < s.length - 1; i++) {
+      const g = s.slice(i, i + 2);
+      out.set(g, (out.get(g) ?? 0) + 1);
+    }
+    return out;
+  };
+  const ga = grams(A);
+  const gb = grams(B);
+  let common = 0;
+  for (const [g, n] of ga) {
+    const m = gb.get(g);
+    if (m) common += Math.min(n, m);
+  }
+  return (2 * common) / ((A.length - 1) + (B.length - 1));
+}
+
+function pickByFuzzyText(candidates: Element[], text: string): Element | null {
+  if (!text) return null;
+  const trimmed = text.replace(/\.\.\.$/, '').trim();
+  if (!trimmed) return null;
+  const target = trimmed.slice(0, 200);
+  let best: Element | null = null;
+  let bestScore = 0.6; // refuse to recover below this similarity
+  for (const el of candidates) {
+    if (el.closest('[data-margo]')) continue;
+    const live = (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 200);
+    const s = similarity(live, target);
+    if (s > bestScore) { bestScore = s; best = el; }
+  }
+  return best;
+}
+
+// Document-wide search for the captured phrase. Used when the section was
+// restructured and the original container no longer holds the text. Skips
+// our own overlay nodes so a comment quoting the body of another comment
+// can't recurse onto itself.
+function findPhraseAnywhere(anchor: TextAnchor): { el: Element; rects: DOMRect[] } | null {
+  const phrase = anchor.phrase;
+  if (!phrase) return null;
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      const parent = (node as Text).parentElement;
+      if (!parent) return NodeFilter.FILTER_REJECT;
+      if (parent.closest('[data-margo]')) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const segments: { node: Text; start: number }[] = [];
+  let flat = '';
+  let n: Node | null = walker.nextNode();
+  while (n) {
+    const t = n as Text;
+    segments.push({ node: t, start: flat.length });
+    flat += t.nodeValue ?? '';
+    n = walker.nextNode();
+  }
+  if (!flat) return null;
+  const flatNorm = flat.replace(/\s+/g, ' ');
+  const needle = phrase.replace(/\s+/g, ' ');
+  const matches = allIndices(flatNorm, needle);
+  if (matches.length === 0) return null;
+  const flatIdx = pickMatch(flatNorm, matches, needle.length, anchor.before, anchor.after);
+  const rawIdx = mapNormalizedToRaw(flat, flatIdx);
+  const rawEnd = mapNormalizedToRaw(flat, flatIdx + needle.length);
+  const range = rangeFromFlatRange(segments, rawIdx, rawEnd);
+  if (!range) return null;
+  const rects = Array.from(range.getClientRects());
+  const container = range.commonAncestorContainer;
+  const el = (container.nodeType === Node.ELEMENT_NODE
+    ? (container as Element)
+    : container.parentElement) ?? document.body;
+  return { el, rects: rects.length > 0 ? rects : [range.getBoundingClientRect()] };
 }
 
 function pickByCoords(candidates: Element[], target: Target): Element | null {

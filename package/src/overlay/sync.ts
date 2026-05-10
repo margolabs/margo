@@ -1,7 +1,7 @@
 // Subscribe to comment changes streamed by the local margo server.
 // Emits typed events the UI uses to keep its store in sync.
 
-import type { Comment } from '../shared/types.js';
+import type { Comment, GitState } from '../shared/types.js';
 
 export type SyncEvent =
   | { type: 'snapshot'; comments: Comment[] }
@@ -65,6 +65,14 @@ export class SyncClient extends EventTarget {
   async getMe(): Promise<{ email: string; name: string } | null> {
     try {
       const res = await fetch('/__margo/me');
+      if (!res.ok) return null;
+      return await res.json();
+    } catch { return null; }
+  }
+
+  async getGitState(): Promise<GitState | null> {
+    try {
+      const res = await fetch('/__margo/git-state');
       if (!res.ok) return null;
       return await res.json();
     } catch { return null; }

@@ -108,3 +108,31 @@ export async function backgroundPull(cwd: string): Promise<void> {
   // --rebase to avoid generating merge commits inside the comment stream.
   await run(cwd, ['pull', '--rebase', '--quiet']);
 }
+
+/** Short SHA of HEAD, or null if not in a git repo / no commits yet. */
+export async function getCurrentCommit(cwd: string): Promise<string | null> {
+  const { stdout, code } = await run(cwd, ['rev-parse', '--short', 'HEAD']);
+  if (code !== 0) return null;
+  return stdout.trim() || null;
+}
+
+/** Whether the working tree has uncommitted changes, plus how many files. */
+export async function getDirtyState(cwd: string): Promise<{ dirty: boolean; count: number }> {
+  const { stdout, code } = await run(cwd, ['status', '--porcelain']);
+  if (code !== 0) return { dirty: false, count: 0 };
+  const lines = stdout.split('\n').filter((l) => l.trim().length > 0);
+  return { dirty: lines.length > 0, count: lines.length };
+}
+
+/** Commits ahead/behind the upstream tracking branch, or null when none configured. */
+export async function getAheadBehind(cwd: string): Promise<{ ahead: number; behind: number } | null> {
+  // `@{u}` resolves to the configured upstream; if there isn't one, the call
+  // exits non-zero and we treat the repo as having no remote tracking.
+  const { stdout, code } = await run(cwd, ['rev-list', '--left-right', '--count', 'HEAD...@{u}']);
+  if (code !== 0) return null;
+  const [aheadStr, behindStr] = stdout.trim().split(/\s+/);
+  const ahead = Number.parseInt(aheadStr ?? '', 10);
+  const behind = Number.parseInt(behindStr ?? '', 10);
+  if (Number.isNaN(ahead) || Number.isNaN(behind)) return null;
+  return { ahead, behind };
+}
