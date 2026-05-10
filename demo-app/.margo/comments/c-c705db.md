@@ -23,9 +23,15 @@ target:
 
 
 
+
 make the max width to lg
 
 ---
 **ai-reply** — claude-opus-4-7 — 2026-05-09T10:10:00.041Z
 
 Set `<main>` `max-width` to **1024px** (Tailwind's `lg` breakpoint width). Was 720px. Interpreted "lg" as the screen-breakpoint size since your earlier note was "make this wider" — Tailwind's `max-w-lg` (512px) would actually be narrower, opposite of intent. The selector still resolves to `<main>`, no anchor update needed.
+
+---
+**reply** — sxhuan@gmail.com — 2026-05-10T01:59:20.268Z
+
+change back to log
