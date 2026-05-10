@@ -220,7 +220,7 @@ function renderAllPins(
         (el as HTMLElement).classList.toggle('margo-hl-hover', on);
       }
     };
-    pin.addEventListener('mouseenter', () => { setHover(true); showTooltip(pin, tipText); });
+    pin.addEventListener('mouseenter', () => { setHover(true); showTooltip(pin, tipText, c.frontmatter.id); });
     pin.addEventListener('mouseleave', () => { setHover(false); hideTooltip(); });
     pin.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1074,7 +1074,7 @@ function setBusy(row: HTMLElement, busy: boolean): void {
 }
 
 // ——— viewport-clamped tooltip (replaces native `title`) ———
-function showTooltip(anchor: HTMLElement, text: string): void {
+function showTooltip(anchor: HTMLElement, text: string, id?: string): void {
   const root = document.getElementById(ROOT_ID);
   if (!root) return;
   let tip = root.querySelector('.margo-tip') as HTMLElement | null;
@@ -1084,7 +1084,13 @@ function showTooltip(anchor: HTMLElement, text: string): void {
     tip.dataset.margoTip = '';
     root.appendChild(tip);
   }
-  tip.textContent = text;
+  // Render the id as a separate dim/monospace span so it reads as metadata,
+  // not as part of the body. Falls back to plain text when no id is given.
+  if (id) {
+    tip.innerHTML = `<span class="margo-tip-id">${escapeHtml(id)}</span><span class="margo-tip-sep"> · </span>${escapeHtml(text)}`;
+  } else {
+    tip.textContent = text;
+  }
   // Measure with display:block but invisible so the layout is correct before
   // we calculate placement.
   tip.style.display = 'block';
@@ -1589,6 +1595,12 @@ function injectStyles(): void {
       white-space: pre-wrap; word-break: break-word;
       animation: margo-tip-in .12s ease-out;
     }
+    .margo-tip-id {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: hsl(0 0% 70%);
+      font-size: 11px;
+    }
+    .margo-tip-sep { color: hsl(0 0% 50%); }
     @keyframes margo-tip-in { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
     .margo-tip[data-placement="bottom"] { animation-name: margo-tip-in-bottom; }
     @keyframes margo-tip-in-bottom { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
