@@ -41,8 +41,51 @@ export function start(opts: StartOptions): void {
   // decisions is a recurring task, so the user shouldn't have to re-toggle.
   const showResolvedKey = 'margo:showResolved';
   let showResolved = localStorage.getItem(showResolvedKey) === '1';
+  // Hide-pins toggle — flips off pin/highlight/orphan-tray rendering so
+  // the user can review their product without comment dots cluttering it.
+  // The FAB menu and other controls stay visible so the user can still
+  // open the inbox, create new pins, etc. Persisted across reloads.
+  const hidePinsKey = 'margo:hidePins';
+  let hidePins = localStorage.getItem(hidePinsKey) === '1';
+  root.toggleAttribute('data-margo-hidden', hidePins);
+  // Inbox panel — cross-page list of all comments. Open state is persisted
+  // in sessionStorage so cross-page navigation from the inbox doesn't drop
+  // the user out of triage mode. (sessionStorage rather than localStorage:
+  // closing the tab should reset, opening a new one starts fresh.)
+  const inboxOpenKey = 'margo:inboxOpen';
+  let inboxOpen = sessionStorage.getItem(inboxOpenKey) === '1';
+  // When the inbox was open on the previous page and we landed here via a
+  // hard navigation, skip the slide-in animation on the first render — it
+  // wasn't really "opening," it's just continuing from the previous view.
+  // Subsequent toggles (user-initiated) still animate.
+  let suppressInboxEntranceAnim = inboxOpen;
+  // Comments whose anchor on the current route returns lost-anchor. Shared
+  // between renderAllPins (populates) and renderInboxPanel (reads, to badge
+  // the affected rows). Only meaningful for the current route — comments on
+  // other routes can't be checked without navigating.
+  const orphanIds = new Set<string>();
 
-  const renderPins = () => renderAllPins(root, store, sync, opts.mode === 'preview', me, showResolved, gitState);
+  const renderPins = () => {
+    renderAllPins(root, store, sync, opts.mode === 'preview', me, showResolved, gitState, hidePins, orphanIds);
+    renderInbox();
+  };
+  const renderInbox = () => {
+    renderInboxPanel(
+      root, store, sync, inboxOpen, opts.mode === 'preview', showResolved, orphanIds,
+      suppressInboxEntranceAnim,
+      (next) => {
+        // The inbox's "Open" / "All" filter doubles as the global show-resolved
+        // control — there's no value in two separate UIs for the same idea.
+        showResolved = next;
+        localStorage.setItem(showResolvedKey, next ? '1' : '0');
+        renderPins();
+      },
+      () => { inboxOpen = false; sessionStorage.setItem(inboxOpenKey, '0'); renderInbox(); },
+    );
+    // Only the very first render suppresses the entrance animation. Any
+    // subsequent open (user click) animates normally.
+    suppressInboxEntranceAnim = false;
+  };
 
   const refreshGitState = async () => {
     if (opts.mode !== 'dev') return;
@@ -60,7 +103,7 @@ export function start(opts: StartOptions): void {
     // For created / updated / deleted, naive refetch keeps things simple in v0.
     // Optimization (delta fetches) deferred.
     if (e.type === 'created' || e.type === 'updated' || e.type === 'deleted') {
-      void refetchAndRender(sync, store, renderPins);
+      void refetchAndRender(store, renderPins);
       // A new comment file probably means a teammate pushed; their push may
       // have advanced our HEAD via the background pull. Refresh git state too.
       void refreshGitState();
@@ -81,11 +124,63 @@ export function start(opts: StartOptions): void {
   // Toggle is rendered once and lives outside renderAllPins (which clears its
   // own children every cycle). The button mutates `showResolved` and triggers
   // a re-render — no need to re-create the toggle each time.
-  renderShowResolvedToggle(root, showResolved, (next) => {
-    showResolved = next;
-    localStorage.setItem(showResolvedKey, next ? '1' : '0');
+  renderHidePinsToggle(root, hidePins, (next) => {
+    hidePins = next;
+    localStorage.setItem(hidePinsKey, next ? '1' : '0');
+    root.toggleAttribute('data-margo-hidden', next);
     renderPins();
   });
+  renderInboxToggle(root, () => {
+    inboxOpen = !inboxOpen;
+    sessionStorage.setItem(inboxOpenKey, inboxOpen ? '1' : '0');
+    renderInbox();
+    if (inboxOpen) setFabOpen(false); // collapse menu when surfacing the panel
+  });
+
+  // Single primary FAB collapses all the sub-actions (pin, pin gap, inbox,
+  // hide-pins) into one button. State is intentionally NOT persisted —
+  // every page load starts collapsed, the whole point is unobtrusiveness.
+  let fabOpen = false;
+  const setFabOpen = (next: boolean) => {
+    if (next === fabOpen) return;
+    fabOpen = next;
+    root.toggleAttribute('data-margo-fab-open', next);
+    fabMain.setAttribute('aria-expanded', String(next));
+    fabMain.setAttribute('aria-label', next ? 'close margo menu' : 'open margo menu');
+  };
+  const fabMain = document.createElement('button');
+  fabMain.type = 'button';
+  fabMain.className = 'margo-fab-main';
+  fabMain.setAttribute('aria-expanded', 'false');
+  fabMain.setAttribute('aria-label', 'open margo menu');
+  fabMain.title = 'Margo';
+  fabMain.innerHTML = `<span class="margo-fab-main-pin">📌</span><span class="margo-fab-main-label">Pin</span><span class="margo-fab-main-chev" aria-hidden="true">▾</span>`;
+  fabMain.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setFabOpen(!fabOpen);
+  });
+  root.appendChild(fabMain);
+
+  // Bubble-phase click listener. Sub-FAB's own click handler runs first
+  // (target phase); we collapse the menu after, so the close never fights
+  // with the action. Outside-click anywhere → collapse.
+  document.addEventListener('click', (e) => {
+    if (!fabOpen) return;
+    const t = e.target as Element | null;
+    if (!t) return;
+    // The main pill manages its own toggle in its click handler — nothing to
+    // do here when it's the target.
+    if (fabMain.contains(t)) return;
+    setFabOpen(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && fabOpen) setFabOpen(false);
+  });
+
+  // Hash deep-link: `#margo=<id>` makes the overlay scroll to that pin once
+  // it lands. Used by inbox cross-page navigation. Cleared after handling
+  // so it doesn't re-trigger on subsequent renders.
+  handleHashDeepLink();
   installRouteTracker();
   onRouteChange(renderPins);
 
@@ -119,7 +214,6 @@ export function start(opts: StartOptions): void {
 }
 
 async function refetchAndRender(
-  sync: SyncClient,
   store: Map<string, Comment>,
   renderPins: () => void,
 ): Promise<void> {
@@ -139,9 +233,18 @@ function renderAllPins(
   me: { email: string } | null,
   showResolved: boolean,
   gitState: GitState | null,
+  hidePins: boolean,
+  orphanIds: Set<string>,
 ): void {
   // Clear existing pin + highlight + tray + bulk-action nodes (keep the launcher and toggle)
-  for (const el of Array.from(root.querySelectorAll('[data-margo-pin],[data-margo-highlight],[data-margo-tray],[data-margo-bulk]'))) el.remove();
+  for (const el of Array.from(root.querySelectorAll('[data-margo-pin],[data-margo-highlight],[data-margo-tray]'))) el.remove();
+  // Reset for this render — same Set instance so callers (the inbox) see
+  // updates without re-passing.
+  orphanIds.clear();
+  // Focus mode: leave the cleared state — no pins, no tray, no bulk bar.
+  // Other affordances (launcher, show-resolved toggle) are hidden via CSS
+  // on the [data-margo-hidden] root attribute set by start().
+  if (hidePins) return;
   const url = currentRoute();
   const orphans: Comment[] = [];
   const onPage: Comment[] = []; // unresolved-only — bulk resolve operates on these
@@ -152,6 +255,7 @@ function renderAllPins(
     if (result.kind === 'wrong-route') continue;
     if (result.kind === 'lost-anchor') {
       orphans.push(c);
+      orphanIds.add(c.frontmatter.id);
       continue;
     }
     if (!isResolved) onPage.push(c);
@@ -231,29 +335,237 @@ function renderAllPins(
   }
 
   if (orphans.length > 0) renderOrphanTray(root, orphans, sync, readOnly, me, gitState);
-  if (!readOnly && onPage.length > 0) renderPageBulkActions(root, onPage, sync);
+  // The "resolve N on this page" bulk action lives inside the inbox panel
+  // now, so renderAllPins doesn't need to render its own bulk bar.
 }
 
-function renderShowResolvedToggle(
+function renderInboxToggle(root: HTMLElement, onClick: () => void): void {
+  // Stays mounted across renders; the panel itself is rebuilt on demand.
+  // Click toggles the open/closed state via the supplied callback.
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'margo-inbox-toggle';
+  btn.dataset.margoToggle = 'inbox';
+  btn.setAttribute('aria-label', 'open margo inbox');
+  btn.title = 'All comments — across every page';
+  btn.innerHTML = `<span class="margo-eye">📋</span><span>inbox</span>`;
+  btn.addEventListener('click', onClick);
+  root.appendChild(btn);
+}
+
+function renderInboxPanel(
+  root: HTMLElement,
+  store: Map<string, Comment>,
+  sync: SyncClient,
+  open: boolean,
+  readOnly: boolean,
+  showResolved: boolean,
+  orphanIds: Set<string>,
+  suppressEntranceAnim: boolean,
+  onShowResolvedChange: (next: boolean) => void,
+  onClose: () => void,
+): void {
+  let panel = root.querySelector('[data-margo-inbox]') as HTMLElement | null;
+  if (!open) {
+    if (panel) panel.remove();
+    return;
+  }
+  // Reuse the existing panel when present — only the inner content changes
+  // on filter swap / list refresh / SSE events. Avoids the slide-in
+  // animation re-firing and avoids the 1-frame flash that destroy+rebuild
+  // shows. First open (no existing panel) plays the entrance animation
+  // unless the caller asked us to skip it (e.g. session-restored after a
+  // cross-page nav).
+  if (!panel) {
+    panel = document.createElement('aside');
+    panel.dataset.margoInbox = '';
+    panel.className = suppressEntranceAnim ? 'margo-inbox margo-inbox-no-animate' : 'margo-inbox';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', 'margo inbox');
+    root.appendChild(panel);
+  }
+
+  // The "Open" / "All" filter is bound to the global show-resolved state
+  // (see start()), so the inbox doubles as the show-resolved control.
+  const openStatuses: ReadonlySet<string> = new Set(['open', 'in-progress', 'ready-for-review', 'blocked']);
+  const visibleStatuses: ReadonlySet<string> = showResolved
+    ? new Set([...openStatuses, 'resolved', 'wontfix'])
+    : openStatuses;
+  const all = Array.from(store.values())
+    .filter((c) => visibleStatuses.has(c.frontmatter.status))
+    .sort((a, b) => (b.frontmatter.created || '').localeCompare(a.frontmatter.created || ''));
+  const totalOpen = Array.from(store.values()).filter((c) =>
+    openStatuses.has(c.frontmatter.status),
+  ).length;
+  // Unresolved comments anchored to the current page — drives the
+  // contextual "Resolve N on this page" button at the top of the list.
+  const route = currentRoute();
+  const onPage = Array.from(store.values()).filter((c) =>
+    openStatuses.has(c.frontmatter.status) && c.frontmatter.target.url === route,
+  );
+
+  panel.innerHTML = `
+    <header class="margo-inbox-header">
+      <div class="margo-inbox-titlebar">
+        <strong>Inbox</strong>
+        <span class="margo-inbox-count">${all.length} ${all.length === 1 ? 'comment' : 'comments'}</span>
+        <button type="button" class="margo-inbox-close" aria-label="close inbox">×</button>
+      </div>
+      <div class="margo-inbox-filters" role="tablist">
+        <button type="button" role="tab" data-filter="open" aria-selected="${!showResolved}">Open · ${totalOpen}</button>
+        <button type="button" role="tab" data-filter="all" aria-selected="${showResolved}">All · ${store.size}</button>
+      </div>
+    </header>
+    <div class="margo-inbox-list" role="list"></div>
+  `;
+  const list = panel.querySelector('.margo-inbox-list') as HTMLElement;
+
+  // Bulk action: only when there are >1 unresolved on this page (1 is faster
+  // to resolve from the panel directly), and we're not in preview/read-only.
+  if (!readOnly && onPage.length > 1) {
+    const bulk = document.createElement('button');
+    bulk.type = 'button';
+    bulk.className = 'margo-inbox-bulk';
+    bulk.innerHTML = `<span class="margo-bulk-check">✓</span> Resolve ${onPage.length} on this page`;
+    bulk.addEventListener('click', () => bulkResolve(bulk, onPage, sync, 'on this page'));
+    list.appendChild(bulk);
+  }
+
+  if (all.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'margo-inbox-empty';
+    empty.textContent = showResolved
+      ? 'No comments yet. Pin something on the live app.'
+      : 'No open comments. Switch to All to see resolved ones.';
+    list.appendChild(empty);
+  } else {
+    for (const c of all) list.appendChild(renderInboxItem(c, orphanIds.has(c.frontmatter.id)));
+  }
+
+  panel.querySelector('.margo-inbox-close')!.addEventListener('click', onClose);
+  for (const tab of Array.from(panel.querySelectorAll<HTMLElement>('.margo-inbox-filters button'))) {
+    tab.addEventListener('click', () => {
+      const next = (tab.dataset.filter as 'open' | 'all') === 'all';
+      if (next !== showResolved) onShowResolvedChange(next);
+    });
+  }
+}
+
+function renderInboxItem(c: Comment, isOrphan: boolean): HTMLElement {
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'margo-inbox-item';
+  item.dataset.commentId = c.frontmatter.id;
+  item.dataset.status = c.frontmatter.status;
+  if (isOrphan) item.dataset.orphan = '';
+  const url = c.frontmatter.target.url || '/';
+  const preview = (c.body.split(/\n---\n/)[0] || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+  const author = c.frontmatter.authorName || c.frontmatter.author;
+  const orphanBadge = isOrphan ? `<span class="margo-inbox-item-orphan" title="Anchor not found on this view">⚠ anchor lost</span>` : '';
+  item.innerHTML = `
+    <div class="margo-inbox-item-head">
+      <code class="margo-inbox-item-id">${escapeHtml(c.frontmatter.id)}</code>
+      ${orphanBadge}
+      <span class="margo-inbox-item-url">${escapeHtml(url)}</span>
+      <span class="margo-inbox-item-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
+    </div>
+    <div class="margo-inbox-item-body">${escapeHtml(preview) || '<em>(empty)</em>'}</div>
+    <div class="margo-inbox-item-foot">
+      <span>${escapeHtml(author)}</span>
+      <span>${escapeHtml(formatTime(c.frontmatter.created))}</span>
+    </div>
+  `;
+  item.addEventListener('click', () => navigateToComment(c.frontmatter.target.url, c.frontmatter.id));
+  return item;
+}
+
+function navigateToComment(targetUrl: string, commentId: string): void {
+  // Same-route → just scroll. The pin is already in the DOM (or will be on
+  // the next render cycle if it was off-screen).
+  const currentRoute = window.location.pathname + window.location.search;
+  const targetPath = targetUrl.split('#')[0];
+  if (currentRoute === targetPath || currentRoute === targetUrl) {
+    suppressNextPanelAnim = true;
+    scrollToPin(commentId);
+    requestAnimationFrame(() => { suppressNextPanelAnim = false; });
+    return;
+  }
+  // Different route → hard navigation. There's no framework-agnostic way
+  // to trigger SPA navigation from vanilla code (Next.js's router is only
+  // accessible via a React hook; React Router's API is similar). The
+  // overlay's session-restored inbox + suppressed entrance animations on
+  // the new page make the transition as smooth as the platform allows.
+  window.location.assign(`${targetUrl}${targetUrl.includes('#') ? '&' : '#'}margo=${commentId}`);
+}
+
+function scrollToPin(commentId: string): void {
+  // Pin DOM may not be present yet (cross-page SPA nav: framework needs to
+  // render the new page, then the overlay's route tracker re-renders pins).
+  // Retry generously — at 60fps, ~30 frames covers ~480ms which is enough
+  // for typical Next.js / Vite re-render after a pushState.
+  let tries = 0;
+  const attempt = () => {
+    const pin = document.querySelector(`[data-margo-pin="${CSS.escape(commentId)}"]`) as HTMLElement | null;
+    if (pin) {
+      pin.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      pin.classList.add('margo-pin-pulse');
+      setTimeout(() => pin.classList.remove('margo-pin-pulse'), 1500);
+      // Bonus: open the comment panel so the user lands on the body, not just the dot.
+      pin.click();
+      return;
+    }
+    if (++tries < 30) requestAnimationFrame(attempt);
+  };
+  attempt();
+}
+
+// Module-level flag: openCommentPanel reads this on its next call to decide
+// whether to skip the pop-in animation. Used by handleHashDeepLink so that
+// arriving at a new page via inbox cross-page nav doesn't make the panel
+// appear to "render" again — it should feel like a continuation.
+let suppressNextPanelAnim = false;
+
+function handleHashDeepLink(): void {
+  // Format: `#margo=<id>` (or appended after an existing hash via `&`).
+  const hash = window.location.hash;
+  const m = hash.match(/[#&]margo=([\w.-]+)/);
+  if (!m) return;
+  const id = m[1];
+  // Strip the margo segment from the hash so re-renders don't re-trigger.
+  const cleaned = hash.replace(/[#&]margo=[\w.-]+/, '').replace(/^#$/, '');
+  history.replaceState(null, '', window.location.pathname + window.location.search + cleaned);
+  // Defer until the snapshot lands and the resolver has a shot at the pin.
+  setTimeout(() => {
+    suppressNextPanelAnim = true;
+    scrollToPin(id);
+    // If scrollToPin finds the pin, openCommentPanel runs synchronously and
+    // consumes the flag. If not, clear it on the next frame so a later
+    // user-initiated pin click still gets its animation.
+    requestAnimationFrame(() => { suppressNextPanelAnim = false; });
+  }, 400);
+}
+
+function renderHidePinsToggle(
   root: HTMLElement,
   initial: boolean,
   onChange: (next: boolean) => void,
 ): void {
-  // Pill toggle, bottom-left above the orphan tray. Survives renderAllPins
-  // (which only clears its own children) so we don't need to recreate it
-  // every render — just flip the `aria-pressed` + class.
+  // Stays visible at all times — it's the only escape hatch out of focus
+  // mode once the user toggles the rest of the overlay off. The `pinned`
+  // dataset bit raises its z-index/contrast above other overlay UI.
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'margo-show-resolved';
-  btn.dataset.margoToggle = '';
+  btn.className = 'margo-hide-pins';
+  btn.dataset.margoToggle = 'hide-pins';
   let value = initial;
   const refresh = () => {
-    btn.classList.toggle('margo-show-resolved-on', value);
+    btn.classList.toggle('margo-hide-pins-on', value);
     btn.setAttribute('aria-pressed', String(value));
-    btn.innerHTML = `
-      <span class="margo-toggle-pill"><span class="margo-toggle-dot"></span></span>
-      <span>show resolved</span>
-    `;
+    btn.setAttribute('aria-label', value ? 'show margo pins' : 'hide margo pins');
+    btn.title = value ? 'Pins hidden — click to show' : 'Hide pins to view your product without overlay';
+    btn.innerHTML = value
+      ? `<span class="margo-eye">👁</span><span>show pins</span>`
+      : `<span class="margo-eye">⊘</span><span>hide pins</span>`;
   };
   refresh();
   btn.addEventListener('click', () => {
@@ -262,19 +574,6 @@ function renderShowResolvedToggle(
     onChange(value);
   });
   root.appendChild(btn);
-}
-
-function renderPageBulkActions(root: HTMLElement, onPage: Comment[], sync: SyncClient): void {
-  const bar = document.createElement('div');
-  bar.dataset.margoBulk = '';
-  bar.className = 'margo-bulk';
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'margo-bulk-resolve';
-  btn.innerHTML = `<span class="margo-bulk-check">✓</span> resolve ${onPage.length} on this page`;
-  btn.addEventListener('click', () => bulkResolve(btn, onPage, sync, 'on this page'));
-  bar.appendChild(btn);
-  root.appendChild(bar);
 }
 
 async function bulkResolve(
@@ -346,15 +645,28 @@ function renderOrphanTray(
   const list = document.createElement('div');
   list.className = 'margo-tray-list';
   list.hidden = true;
-  if (!readOnly && orphans.length > 1) {
-    const bulk = document.createElement('button');
-    bulk.type = 'button';
-    bulk.className = 'margo-tray-resolve-all';
-    bulk.textContent = `resolve all ${orphans.length}`;
-    bulk.addEventListener('click', () => bulkResolve(bulk, orphans, sync, 'orphans'));
-    list.appendChild(bulk);
-  }
-  for (const c of orphans) list.appendChild(renderOrphanCard(c, sync, readOnly, me, gitState));
+  // Accordion: one orphan expanded at a time. Default to none expanded so
+  // opening the tray gives a quick scannable list, not a wall of cards.
+  let expandedId: string | null = null;
+
+  const renderList = () => {
+    list.innerHTML = '';
+    if (!readOnly && orphans.length > 1) {
+      const bulk = document.createElement('button');
+      bulk.type = 'button';
+      bulk.className = 'margo-tray-resolve-all';
+      bulk.textContent = `resolve all ${orphans.length}`;
+      bulk.addEventListener('click', () => bulkResolve(bulk, orphans, sync, 'orphans'));
+      list.appendChild(bulk);
+    }
+    for (const c of orphans) {
+      list.appendChild(renderOrphanRow(c, expandedId === c.frontmatter.id, sync, readOnly, me, gitState, () => {
+        expandedId = expandedId === c.frontmatter.id ? null : c.frontmatter.id;
+        renderList();
+      }));
+    }
+  };
+  renderList();
   tray.appendChild(list);
 
   toggle.addEventListener('click', () => {
@@ -363,6 +675,40 @@ function renderOrphanTray(
   });
 
   root.appendChild(tray);
+}
+
+function renderOrphanRow(
+  c: Comment,
+  expanded: boolean,
+  sync: SyncClient,
+  readOnly: boolean,
+  me: { email: string } | null,
+  gitState: GitState | null,
+  onToggle: () => void,
+): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'margo-orphan-row';
+  wrap.dataset.commentId = c.frontmatter.id;
+  if (expanded) wrap.dataset.expanded = '';
+
+  const author = c.frontmatter.authorName || c.frontmatter.author;
+  const url = c.frontmatter.target.url || '/';
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'margo-orphan-row-head';
+  head.innerHTML = `
+    <code class="margo-orphan-row-id">${escapeHtml(c.frontmatter.id)}</code>
+    <span class="margo-orphan-row-author">${escapeHtml(author)}</span>
+    <span class="margo-orphan-row-url">${escapeHtml(url)}</span>
+    <span class="margo-orphan-row-chev" aria-hidden="true">${expanded ? '▴' : '▾'}</span>
+  `;
+  head.addEventListener('click', (e) => { e.stopPropagation(); onToggle(); });
+  wrap.appendChild(head);
+
+  // Only build the heavy body when the user actually wants it. Keeps the
+  // tray fast even with many orphans.
+  if (expanded) wrap.appendChild(renderOrphanCard(c, sync, readOnly, me, gitState));
+  return wrap;
 }
 
 function renderOrphanCard(
@@ -532,15 +878,13 @@ function truncate(s: string, max: number): string {
 // most recoverable.
 function diagnoseOrphan(c: Comment, gitState: GitState | null): { label: string; hint: string | null } {
   const target = c.frontmatter.target;
-  if (target.dirty) {
-    return {
-      label: "Pinned with author's uncommitted changes.",
-      hint: 'This element may exist only in their working tree. They\'ll need to commit and push for you to see it.',
-    };
-  }
   if (!gitState) {
     return { label: 'Anchor not found in this view.', hint: null };
   }
+  // Commit mismatch is the dominant signal — when the pin's commit and the
+  // viewer's commit differ, anything else (author-was-dirty, viewer-is-dirty)
+  // is secondary noise. The element legitimately may have been added,
+  // removed, or restructured between commits.
   if (target.commit && gitState.commit && target.commit !== gitState.commit) {
     const behind = gitState.behind ?? 0;
     const hint = behind > 0
@@ -551,10 +895,20 @@ function diagnoseOrphan(c: Comment, gitState: GitState | null): { label: string;
       hint,
     };
   }
+  // Same commit. The viewer's own dirty WT can hide an element that exists
+  // in HEAD — surface that before pointing fingers at the author.
   if (gitState.dirty) {
     return {
       label: `Your working tree has ${gitState.dirtyCount} uncommitted file${gitState.dirtyCount === 1 ? '' : 's'}.`,
       hint: 'This anchor may exist in HEAD but be hidden by your local changes. Stash or revert to re-check.',
+    };
+  }
+  // Same commit, viewer is clean. Now author-was-dirty is a real
+  // explanation: the element only ever existed in their working tree.
+  if (target.dirty) {
+    return {
+      label: "Pinned with author's uncommitted changes.",
+      hint: "This element may have only existed in their working tree at pin time. If they've committed since, try git pull.",
     };
   }
   return {
@@ -853,10 +1207,20 @@ function openCommentPanel(
   me: { email: string } | null,
   anchor?: Element,
 ): void {
-  const existing = root.querySelector('.margo-panel');
-  if (existing) existing.remove();
-  const panel = document.createElement('div');
-  panel.className = 'margo-panel';
+  // Reuse the existing panel element when present so swapping between
+  // comments (clicking through the inbox) doesn't destroy + rebuild the
+  // DOM. Only the inner content + handlers + position get updated.
+  let panel = root.querySelector('.margo-panel') as HTMLElement | null;
+  const isUpdate = !!panel;
+  if (!panel) {
+    panel = document.createElement('div');
+    // Skip the entrance animation when the deep-link handler set the flag.
+    // The user already feels mid-flow (just clicked from inbox + crossed
+    // page); a pop-in here reads as a re-render.
+    panel.className = suppressNextPanelAnim ? 'margo-panel margo-panel-no-animate' : 'margo-panel';
+    suppressNextPanelAnim = false;
+    root.appendChild(panel);
+  }
   panel.innerHTML = `
     <header>
       <div class="margo-panel-titlebar">
@@ -872,29 +1236,40 @@ function openCommentPanel(
     ${readOnly ? '<p class="margo-readonly">read-only — run <code>npm run dev</code> locally to reply</p>' : ''}
   `;
 
-  const close = () => panel.remove();
+  const close = () => panel!.remove();
   panel.querySelector('.margo-close')!.addEventListener('click', close);
-  // Esc closes the panel.
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
-  };
-  document.addEventListener('keydown', onKey);
+  // Esc closes the panel — wire only on first open. The handler queries
+  // the live DOM, so it correctly closes whichever comment is currently in
+  // the panel even after swaps.
+  if (!isUpdate) {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        const live = document.querySelector('.margo-panel');
+        if (live) live.remove();
+        document.removeEventListener('keydown', onKey);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+  }
 
   if (!readOnly) {
     panel.appendChild(makeActionRow(c, sync, close, me));
   }
   panel.appendChild(makeIdFooter(c.frontmatter.id));
-  root.appendChild(panel);
-  // Anchor the panel near the pin (or fall back to the bottom-right corner
-  // when there's no anchor — e.g. opened programmatically). Done after
-  // appending so we can measure the rendered panel's height.
+  // Anchor the panel near the pin. Done after content is in place so
+  // we can measure the final panel size for placement.
   if (anchor) positionPanelNearAnchor(panel, anchor);
 }
 
 function positionPanelNearAnchor(panel: HTMLElement, anchor: Element): void {
   const a = anchor.getBoundingClientRect();
   const PAD = 8;
-  const vw = window.innerWidth;
+  // The inbox is the one fixed margo affordance that takes meaningful screen
+  // real estate. When it's open we treat its left edge as the right edge of
+  // the placement viewport so the comment panel never lands behind it.
+  const inbox = document.querySelector('[data-margo-inbox]') as HTMLElement | null;
+  const inboxRect = inbox ? inbox.getBoundingClientRect() : null;
+  const rightLimit = inboxRect ? inboxRect.left - PAD : window.innerWidth - PAD;
   const vh = window.innerHeight;
   // Force position-fixed + measure rendered size. The panel was rendered
   // with the default bottom-right CSS, but those rules are overridden here.
@@ -907,12 +1282,12 @@ function positionPanelNearAnchor(panel: HTMLElement, anchor: Element): void {
 
   // Prefer right of pin → left of pin → centered above/below if neither fits.
   let left: number;
-  if (a.right + PAD + pw <= vw - PAD) {
+  if (a.right + PAD + pw <= rightLimit) {
     left = a.right + PAD;
   } else if (a.left - PAD - pw >= PAD) {
     left = a.left - PAD - pw;
   } else {
-    left = Math.max(PAD, Math.min(vw - pw - PAD, a.left - pw / 2 + a.width / 2));
+    left = Math.max(PAD, Math.min(rightLimit - pw, a.left - pw / 2 + a.width / 2));
   }
   // Prefer aligning panel's top with pin's top, but clamp to viewport so
   // the panel never overflows top/bottom.
@@ -1914,23 +2289,18 @@ function injectStyles(): void {
       word-break: break-all;
     }
     .margo-orphan .margo-body { font-size: 13px; max-height: 160px; padding: 12px 16px 0; }
-    /* ——— page-level bulk resolve (above the show-resolved toggle) ——— */
-    .margo-bulk {
-      position: fixed; bottom: 104px; right: 16px; z-index: 999999;
-    }
-    .margo-bulk-resolve {
-      display: inline-flex; align-items: center; gap: 6px;
-      height: 32px; padding: 0 12px;
-      background: var(--margo-bg); color: var(--margo-fg);
-      border: 1px solid var(--margo-border); border-radius: 9999px;
+    /* ——— inbox-internal "Resolve N on this page" bulk action ——— */
+    .margo-inbox-bulk {
+      display: flex; align-items: center; gap: 6px;
+      width: 100%; height: 36px; padding: 0 12px; margin: 4px 0 8px;
+      background: var(--margo-muted); color: var(--margo-fg);
+      border: 1px solid var(--margo-border); border-radius: 8px;
       font: inherit; font-size: 12px; font-weight: 500;
       cursor: pointer;
-      box-shadow: 0 1px 2px rgb(0 0 0 / .08), 0 4px 12px rgb(0 0 0 / .08);
-      transition: background-color .12s, border-color .12s;
+      transition: background-color .12s;
     }
-    .margo-bulk-resolve:hover { background: var(--margo-muted); }
-    .margo-bulk-resolve:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
-    .margo-bulk-resolve:disabled { opacity: .6; cursor: not-allowed; }
+    .margo-inbox-bulk:hover { background: hsl(140 30% 92%); border-color: hsl(160 84% 60%); }
+    .margo-inbox-bulk:disabled { opacity: .6; cursor: not-allowed; }
     .margo-bulk-check { color: hsl(160 84% 39%); font-weight: 700; }
     /* ——— orphan tray "resolve all" (sticky inside the list) ——— */
     .margo-tray-resolve-all {
@@ -1945,36 +2315,236 @@ function injectStyles(): void {
     .margo-tray-resolve-all:hover { background: hsl(240 5.9% 18%); }
     .margo-tray-resolve-all:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
     .margo-tray-resolve-all:disabled { opacity: .6; cursor: not-allowed; }
-    /* ——— show-resolved toggle (bottom-right, above the launcher) ——— */
-    .margo-show-resolved {
-      position: fixed; bottom: 60px; right: 16px; z-index: 999999;
-      display: inline-flex; align-items: center; gap: 8px;
-      height: 32px; padding: 0 12px 0 6px;
+    /* ——— inbox toggle (sits above hide-pins) ——— */
+    .margo-inbox-toggle {
+      position: fixed; bottom: 104px; right: 16px; z-index: 1000000;
+      display: inline-flex; align-items: center; gap: 6px;
+      height: 32px; padding: 0 12px;
       background: var(--margo-bg); color: var(--margo-muted-fg);
       border: 1px solid var(--margo-border); border-radius: 9999px;
       font: inherit; font-size: 12px; font-weight: 500;
       cursor: pointer;
-      box-shadow: 0 1px 2px rgb(0 0 0 / .06);
+      box-shadow: 0 2px 6px rgb(0 0 0 / .08);
       transition: color .12s, background-color .12s, border-color .12s;
     }
-    .margo-show-resolved:hover { background: var(--margo-muted); }
-    .margo-show-resolved:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
-    .margo-toggle-pill {
-      width: 24px; height: 14px; border-radius: 9999px;
-      background: var(--margo-border);
-      position: relative; flex: 0 0 auto;
-      transition: background-color .12s;
+    .margo-inbox-toggle:hover { background: var(--margo-muted); color: var(--margo-fg); }
+    .margo-inbox-toggle:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
+    /* ——— hide-pins (focus-mode) toggle ——— */
+    .margo-hide-pins {
+      position: fixed; bottom: 60px; right: 16px; z-index: 1000000;
+      display: inline-flex; align-items: center; gap: 6px;
+      height: 32px; padding: 0 12px;
+      background: var(--margo-bg); color: var(--margo-muted-fg);
+      border: 1px solid var(--margo-border); border-radius: 9999px;
+      font: inherit; font-size: 12px; font-weight: 500;
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgb(0 0 0 / .08);
+      transition: color .12s, background-color .12s, border-color .12s;
     }
-    .margo-toggle-dot {
-      position: absolute; top: 2px; left: 2px;
-      width: 10px; height: 10px; border-radius: 9999px;
-      background: var(--margo-bg);
-      box-shadow: 0 1px 2px rgb(0 0 0 / .2);
-      transition: transform .12s ease;
+    .margo-hide-pins:hover { background: var(--margo-muted); color: var(--margo-fg); }
+    .margo-hide-pins:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
+    .margo-hide-pins .margo-eye { font-size: 14px; line-height: 1; }
+    .margo-hide-pins-on { color: var(--margo-fg); border-color: var(--margo-ring); background: var(--margo-muted); }
+    /* When focus mode is on, hide every other margo affordance — pins,
+       highlights, the orphan tray, the bulk-resolve bar, the launcher,
+       and the show-resolved toggle. The hide-pins button itself stays
+       so the user can leave focus mode. */
+    /* Hide-pins toggles ONLY the pin/highlight/tray rendering — the FAB
+       menu, launcher, inbox, and hide-pins button itself stay visible so
+       the user can still create comments, browse the inbox, etc. */
+    [data-margo-hidden] [data-margo-pin],
+    [data-margo-hidden] [data-margo-highlight],
+    [data-margo-hidden] [data-margo-tray] { display: none !important; }
+    /* ——— main FAB (pill, always visible) ——— */
+    .margo-fab-main {
+      position: fixed; bottom: 16px; right: 16px; z-index: 1000002;
+      height: 40px; padding: 0 14px 0 12px;
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--margo-primary); color: var(--margo-primary-fg);
+      border: 0; border-radius: 9999px; cursor: pointer;
+      font: inherit; font-size: 13px; font-weight: 500;
+      box-shadow: 0 4px 14px rgb(0 0 0 / .18);
+      transition: background-color .12s, box-shadow .12s;
     }
-    .margo-show-resolved-on { color: var(--margo-fg); border-color: var(--margo-ring); }
-    .margo-show-resolved-on .margo-toggle-pill { background: var(--margo-primary); }
-    .margo-show-resolved-on .margo-toggle-dot { transform: translateX(10px); }
+    .margo-fab-main:hover { box-shadow: 0 6px 18px rgb(0 0 0 / .22); }
+    .margo-fab-main:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 3px; }
+    .margo-fab-main-pin { font-size: 14px; line-height: 1; }
+    .margo-fab-main-label { line-height: 1; }
+    .margo-fab-main-chev {
+      font-size: 10px; opacity: .8; line-height: 1;
+      transition: transform .18s ease;
+    }
+    [data-margo-fab-open] .margo-fab-main-chev { transform: rotate(180deg); }
+    /* Sub-FABs are hidden by default and revealed when the menu opens.
+       Position is set both at base and open states to the *same* coords
+       so opacity is the only thing that animates — otherwise the items
+       fade-in while sliding from their old default position, which reads
+       as flicker. visibility delay matches the fade so they don't
+       intercept clicks while invisible. */
+    .margo-launcher,
+    .margo-launcher-gap,
+    .margo-inbox-toggle,
+    .margo-hide-pins {
+      visibility: hidden;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .14s ease, visibility 0s linear .14s;
+    }
+    [data-margo-fab-open] .margo-launcher,
+    [data-margo-fab-open] .margo-launcher-gap,
+    [data-margo-fab-open] .margo-inbox-toggle,
+    [data-margo-fab-open] .margo-hide-pins {
+      visibility: visible;
+      opacity: 1;
+      pointer-events: auto;
+      transition: opacity .14s ease, visibility 0s linear 0s;
+    }
+    /* Single source of truth for menu-item positions — applied unconditionally
+       so opening doesn't trigger position transitions. */
+    .margo-launcher       { bottom: 64px;  right: 16px; }
+    .margo-launcher-gap   { bottom: 112px; right: 16px; }
+    .margo-inbox-toggle   { bottom: 160px; right: 16px; }
+    .margo-hide-pins      { bottom: 208px; right: 16px; }
+    /* ——— inbox panel (slides in from the right) ——— */
+    .margo-inbox {
+      position: fixed; top: 16px; right: 16px; bottom: 16px;
+      width: min(380px, calc(100vw - 32px));
+      z-index: 1000001;
+      background: var(--margo-bg); color: var(--margo-fg);
+      border: 1px solid var(--margo-border); border-radius: 12px;
+      box-shadow: 0 12px 40px rgb(0 0 0 / .18);
+      display: flex; flex-direction: column;
+      animation: margo-inbox-in .16s ease-out;
+      overflow: hidden;
+    }
+    @keyframes margo-inbox-in {
+      from { opacity: 0; transform: translateX(8px); }
+      to { opacity: 1; transform: none; }
+    }
+    .margo-inbox.margo-inbox-no-animate { animation: none; }
+    .margo-panel.margo-panel-no-animate { animation: none; }
+    .margo-inbox-header {
+      padding: 12px 14px 8px; border-bottom: 1px solid var(--margo-border);
+      flex: 0 0 auto;
+    }
+    .margo-inbox-titlebar {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+    }
+    .margo-inbox-titlebar strong { font-size: 14px; }
+    .margo-inbox-count {
+      font-size: 12px; color: var(--margo-muted-fg); flex: 1;
+    }
+    .margo-inbox-close {
+      background: transparent; border: 0; color: var(--margo-muted-fg);
+      font-size: 20px; line-height: 1; cursor: pointer;
+      width: 24px; height: 24px; border-radius: 6px;
+    }
+    .margo-inbox-close:hover { background: var(--margo-muted); color: var(--margo-fg); }
+    .margo-inbox-filters {
+      display: flex; gap: 4px;
+    }
+    .margo-inbox-filters button {
+      background: transparent; border: 0;
+      padding: 4px 10px; border-radius: 6px;
+      font: inherit; font-size: 12px; color: var(--margo-muted-fg);
+      cursor: pointer;
+    }
+    .margo-inbox-filters button:hover { background: var(--margo-muted); }
+    .margo-inbox-filters button[aria-selected="true"] {
+      background: var(--margo-muted); color: var(--margo-fg); font-weight: 500;
+    }
+    .margo-inbox-list {
+      flex: 1; overflow-y: auto; padding: 6px;
+    }
+    .margo-inbox-empty {
+      padding: 24px 16px; text-align: center;
+      color: var(--margo-muted-fg); font-size: 13px; line-height: 1.5;
+    }
+    .margo-inbox-item {
+      display: block; width: 100%; text-align: left;
+      background: transparent; border: 0;
+      padding: 10px 12px; margin: 2px 0; border-radius: 8px;
+      cursor: pointer; font: inherit;
+      transition: background-color .1s;
+    }
+    .margo-inbox-item:hover { background: var(--margo-muted); }
+    .margo-inbox-item:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: -2px; }
+    .margo-inbox-item-head {
+      display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
+    }
+    .margo-inbox-item-id {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; color: var(--margo-muted-fg);
+    }
+    .margo-inbox-item-orphan {
+      font-size: 10px; padding: 1px 6px; border-radius: 9999px;
+      background: hsl(28 80% 92%); color: hsl(28 80% 30%);
+      text-transform: uppercase; letter-spacing: .03em; font-weight: 500;
+      white-space: nowrap;
+    }
+    .margo-inbox-item[data-orphan] {
+      border-left: 2px solid hsl(28 80% 60%);
+      padding-left: 10px;
+    }
+    /* ——— compact orphan rows (accordion) ——— */
+    .margo-orphan-row { border-top: 1px solid var(--margo-border); }
+    .margo-orphan-row:first-of-type { border-top: 0; }
+    .margo-orphan-row-head {
+      display: flex; align-items: center; gap: 8px;
+      width: 100%; padding: 10px 12px;
+      background: transparent; border: 0; cursor: pointer;
+      font: inherit; text-align: left;
+      transition: background-color .1s;
+    }
+    .margo-orphan-row-head:hover { background: var(--margo-muted); }
+    .margo-orphan-row-head:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: -2px; }
+    .margo-orphan-row-id {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; color: var(--margo-muted-fg);
+    }
+    .margo-orphan-row-author {
+      font-size: 13px; font-weight: 500; flex: 0 0 auto;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px;
+    }
+    .margo-orphan-row-url {
+      font-size: 11px; color: var(--margo-muted-fg);
+      flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .margo-orphan-row-chev { font-size: 10px; color: var(--margo-muted-fg); }
+    .margo-orphan-row[data-expanded] .margo-orphan-row-head { background: var(--margo-muted); }
+    .margo-orphan-row[data-expanded] .margo-orphan { border: 0; border-radius: 0; }
+    .margo-inbox-item-url {
+      font-size: 11px; color: var(--margo-muted-fg);
+      flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .margo-inbox-item-status {
+      font-size: 10px; padding: 1px 6px; border-radius: 9999px;
+      background: var(--margo-muted); color: var(--margo-muted-fg);
+      text-transform: uppercase; letter-spacing: .03em; font-weight: 500;
+    }
+    .margo-inbox-item-status[data-status="ready-for-review"] { background: hsl(45 90% 92%); color: hsl(28 80% 32%); }
+    .margo-inbox-item-status[data-status="blocked"] { background: hsl(0 60% 94%); color: hsl(0 60% 35%); }
+    .margo-inbox-item-status[data-status="resolved"],
+    .margo-inbox-item-status[data-status="wontfix"] { background: hsl(140 40% 92%); color: hsl(140 40% 28%); }
+    .margo-inbox-item-body {
+      font-size: 13px; color: var(--margo-fg); line-height: 1.4;
+      overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+    .margo-inbox-item-foot {
+      display: flex; justify-content: space-between;
+      margin-top: 6px;
+      font-size: 11px; color: var(--margo-muted-fg);
+    }
+    /* ——— pulse for the pin we just navigated to ——— */
+    .margo-pin-pulse {
+      animation: margo-pin-pulse 1.4s ease-out;
+    }
+    @keyframes margo-pin-pulse {
+      0% { box-shadow: 0 0 0 0 hsl(214 95% 60% / .55); transform: scale(1); }
+      40% { box-shadow: 0 0 0 16px hsl(214 95% 60% / 0); transform: scale(1.25); }
+      100% { box-shadow: 0 0 0 0 hsl(214 95% 60% / 0); transform: scale(1); }
+    }
     /* ——— muted styling for resolved pins / highlights / orphan cards ——— */
     .margo-pin[data-resolved] { opacity: .5; filter: grayscale(.45); }
     .margo-pin[data-resolved]:hover { opacity: .9; }
