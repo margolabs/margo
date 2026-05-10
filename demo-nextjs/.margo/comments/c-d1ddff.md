@@ -5,7 +5,7 @@ author: sxhuan@gmail.com
 authorName: Stanley Song
 branch: main
 created: '2026-05-10T06:50:24.404Z'
-status: open
+status: resolved
 target:
   url: /contact
   selector: main:nth-of-type(1) > section:nth-of-type(2) > p:nth-of-type(1)
@@ -24,5 +24,6 @@ target:
   commit: 3d80615
   dirty: true
 ---
+
 
 need it?
