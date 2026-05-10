@@ -141,8 +141,10 @@ async function detectFramework(cwd: string): Promise<'vite' | 'next' | 'unknown'
   const hasNextDep = !!allDeps['next'];
   const hasViteDep = !!allDeps['vite'];
 
-  const hasAppDir = await pathExists(path.join(cwd, 'app'));
-  const hasPagesDir = await pathExists(path.join(cwd, 'pages'));
+  const hasAppDir = await pathExists(path.join(cwd, 'app'))
+    || await pathExists(path.join(cwd, 'src', 'app'));
+  const hasPagesDir = await pathExists(path.join(cwd, 'pages'))
+    || await pathExists(path.join(cwd, 'src', 'pages'));
   const hasViteConfig = await pathExists(path.join(cwd, 'vite.config.ts'))
     || await pathExists(path.join(cwd, 'vite.config.js'))
     || await pathExists(path.join(cwd, 'vite.config.mjs'));
@@ -152,15 +154,26 @@ async function detectFramework(cwd: string): Promise<'vite' | 'next' | 'unknown'
   return 'unknown';
 }
 
+// Next.js supports both `app/` and `src/app/`. Pick the one the project
+// actually uses; if neither exists yet, default to `app`.
+async function detectNextAppRoot(cwd: string): Promise<string> {
+  if (await pathExists(path.join(cwd, 'src', 'app'))) return path.join('src', 'app');
+  if (await pathExists(path.join(cwd, 'app'))) return 'app';
+  if (await pathExists(path.join(cwd, 'src', 'pages'))) return path.join('src', 'app');
+  return 'app';
+}
+
 async function pathExists(p: string): Promise<boolean> {
   try { await fs.access(p); return true; } catch { return false; }
 }
 
 async function patchNextProject(cwd: string, overwrite = false): Promise<void> {
-  // 1. Drop the catch-all Route Handler at app/margo-runtime/[[...path]]/route.ts.
+  const appRoot = await detectNextAppRoot(cwd);
+
+  // 1. Drop the catch-all Route Handler at <appRoot>/margo-runtime/[[...path]]/route.ts.
   //    The folder name has no leading underscore so it isn't private; the
   //    public URL stays /__margo/* via a rewrite in next.config.*.
-  const routeDir = path.join(cwd, 'app', 'margo-runtime', '[[...path]]');
+  const routeDir = path.join(cwd, appRoot, 'margo-runtime', '[[...path]]');
   await fs.mkdir(routeDir, { recursive: true });
   const routeFile = path.join(routeDir, 'route.ts');
   if (overwrite || !(await pathExists(routeFile))) {
@@ -170,8 +183,8 @@ async function patchNextProject(cwd: string, overwrite = false): Promise<void> {
   // 2. Patch next.config.{ts,js,mjs} — add serverExternalPackages + rewrite.
   await patchNextConfig(cwd);
 
-  // 3. Insert <MargoScript /> into app/layout.tsx.
-  await patchNextLayout(cwd);
+  // 3. Insert <MargoScript /> into <appRoot>/layout.tsx.
+  await patchNextLayout(cwd, appRoot);
 }
 
 const NEXT_ROUTE_FILE = `// Catch-all Route Handler for margo's /__margo/* surface (App Router).
@@ -238,14 +251,15 @@ async function patchNextConfig(cwd: string): Promise<void> {
   await fs.writeFile(target, next, 'utf8');
 }
 
-async function patchNextLayout(cwd: string): Promise<void> {
-  const candidates = ['app/layout.tsx', 'app/layout.jsx', 'app/layout.ts', 'app/layout.js'];
+async function patchNextLayout(cwd: string, appRoot: string): Promise<void> {
+  const exts = ['tsx', 'jsx', 'ts', 'js'];
+  const candidates = exts.map((e) => path.join(appRoot, `layout.${e}`));
   let target: string | undefined;
   for (const c of candidates) {
     if (await pathExists(path.join(cwd, c))) { target = path.join(cwd, c); break; }
   }
   if (!target) {
-    console.log('[margo] no app/layout.* found — add manually to your root layout:');
+    console.log(`[margo] no ${appRoot}/layout.* found — add manually to your root layout:`);
     console.log("       import { MargoScript } from 'margo-dev/next';");
     console.log('       <body>{children}<MargoScript /></body>');
     return;
