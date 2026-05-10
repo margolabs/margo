@@ -1,5 +1,5 @@
 import { defineConfig } from 'vite';
-import margo from '@margo/dev';
+import margo from 'margo-dev';
 
 export default defineConfig({
   plugins: [margo()],

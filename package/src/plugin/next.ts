@@ -5,18 +5,18 @@
 // Usage in a Next.js app:
 //
 //   // app/margo-runtime/[[...path]]/route.ts (init CLI creates this)
-//   import { handlers } from '@margo/dev/next';
+//   import { handlers } from 'margo-dev/next';
 //   export const { GET, POST, PATCH, DELETE } = handlers;
 //   export const runtime = 'nodejs';
 //   export const dynamic = 'force-dynamic';
 //
 //   // app/layout.tsx
-//   import { MargoScript } from '@margo/dev/next';
+//   import { MargoScript } from 'margo-dev/next';
 //   ...
 //   <body>{children}<MargoScript /></body>
 //
 //   // next.config.ts
-//   import { withMargo } from '@margo/dev/next';
+//   import { withMargo } from 'margo-dev/next';
 //   export default withMargo(nextConfig);
 //
 // Production safety: behavior is gated by NODE_ENV. When NODE_ENV=production
@@ -186,7 +186,7 @@ function serveOverlay(routeOrPath: string): Response {
   const isMap = routeOrPath.endsWith('overlay.js.map');
   const file = isMap ? OVERLAY_MAP_PATH : OVERLAY_BUNDLE_PATH;
   if (!fs.existsSync(file)) {
-    return new Response('overlay bundle missing — run `npm run build` in @margo/dev', { status: 404 });
+    return new Response('overlay bundle missing — run `npm run build` in margo-dev', { status: 404 });
   }
   // Read into memory: the bundle is small (~90 KB) and dev-only, so
   // streaming through Web Streams is overkill compared to a single buffer.
@@ -245,7 +245,7 @@ export const handlers = {
 };
 
 // Re-export the next-config wrapper so users have a single import path.
-// Sub-sub-paths like '@margo/dev/next/config' tripped Next.js's config
+// Sub-sub-paths like 'margo-dev/next/config' tripped Next.js's config
 // loader (ERR_PACKAGE_PATH_NOT_EXPORTED) even though Node resolved them
 // fine — flatter is safer.
 export { withMargo } from './next-config.js';

@@ -14,7 +14,7 @@
     "react-dom": "19.2.4"
   },
   "devDependencies": {
-    "@margo/dev": "file:../package/margo-dev-0.0.1.tgz",
+    "margo-dev": "file:../package",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

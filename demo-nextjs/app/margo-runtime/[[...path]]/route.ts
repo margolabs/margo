@@ -1,6 +1,6 @@
 // Catch-all Route Handler for margo's /__margo/* surface (App Router).
 // All four methods point to the same dispatcher; it inspects path + method.
-import { handlers } from '@margo/dev/next';
+import { handlers } from 'margo-dev/next';
 
 export const { GET, POST, PATCH, DELETE } = handlers;
 

@@ -2,7 +2,7 @@
 
 *Feedback in the margins. AI does the work.*
 
-> v0 spec is complete. A working scaffold of `@margo/dev` lives in [package/](./package/). Build status is tracked in [IMPLEMENTATION.md](./IMPLEMENTATION.md).
+> v0 spec is complete. A working scaffold of `margo-dev` lives in [package/](./package/). Build status is tracked in [IMPLEMENTATION.md](./IMPLEMENTATION.md).
 
 ## The pitch
 
@@ -14,7 +14,7 @@ Today, the ticket-to-code path is a human bottleneck: a PM writes a Linear ticke
 
 ## How it works (sketch)
 
-1. A developer asks Claude Code: `add margo to this project`. Claude installs `@margo/dev` as a dev dependency, wires it into the build config (Vite / Next.js plugin), and creates `.margo/` in the repo with a config file.
+1. A developer asks Claude Code: `add margo to this project`. Claude installs `margo-dev` as a dev dependency, wires it into the build config (Vite / Next.js plugin), and creates `.margo/` in the repo with a config file.
 2. Every team member who wants to comment clones the repo and runs `npm run dev` themselves. The dev server boots with the margo overlay automatically active.
 3. A commenter clicks an element in the running UI, types a comment, hits enter. The overlay POSTs to a tiny local endpoint (`/__margo/comment`) exposed by the dev plugin.
 4. The plugin writes the comment as a file under `.margo/comments/<id>.md`, then runs local `git` to auto-commit (`margo: comment by jane on /pricing`) and auto-push to the repo's existing remote.
@@ -63,7 +63,7 @@ Agreed on green. For the hover, can we use the standard token rather than a new 
 ## Decided
 
 - **First user: small product team.** Implies role hints (PM / designer / dev) for AI inbox triage. Real-time multiplayer is *not* required for v0 — git sync is the propagation mechanism.
-- **Attach mechanism: dev-time package** (Vite / Next.js plugin). Installed as a dev dependency by Claude Code itself (`npm install -D @margo/dev` + plugin wired into the build config). Overlay activates automatically when the dev server launches. Production builds do not include it.
+- **Attach mechanism: dev-time package** (Vite / Next.js plugin). Installed as a dev dependency by Claude Code itself (`npm install -D margo-dev` + plugin wired into the build config). Overlay activates automatically when the dev server launches. Production builds do not include it.
   - Distribution piggybacks on Claude Code: `claude "add margo to this project"` is the entire onboarding. The AI tool the team already uses *is* the install flow.
   - SDK rejected as too heavy on dev setup. Browser extension rejected because per-commenter install is unnecessary friction when the same package can serve everyone via the dev server.
 - **Reach for non-dev teammates: same package activates on staging / preview deploys** (Vercel previews, Netlify deploys, etc.) when a margo env var is set. Covers the "designer reviewing a preview URL" case without building a tunnel for v0.
@@ -72,7 +72,7 @@ Agreed on green. For the hover, can we use the standard token rather than a new 
 - **Write path: local-only, auto-commit-and-push.** Every commenter runs `npm run dev` against their local clone. The plugin POST-receives the comment, writes the file under `.margo/comments/`, then runs local `git` CLI to add / commit (with a `margo:` prefix on the message) / push to whatever remote the repo points at. Naturally host-agnostic. Preview deploys are read-only viewers in v0.
 - **Author identity: local `git config user.name / user.email`.** No separate login or auth system. Role hint (PM / designer / dev) comes from the workspace config in `.margo/config.json`.
 - **Trigger model: implicit-by-default.** Every new comment has `type: task` in its frontmatter, meaning AI treats it as an instruction. Two opt-outs: `type: discussion` (humans only — AI ignores) and `type: question` (AI answers in-thread but doesn't modify code). `@ai` mentions are allowed but cosmetic — they bump priority, not semantics.
-- **AI discoverability: project-level Claude Code skill.** The `@margo/dev` package drops a skill at `.claude/skills/margo.md` on install, giving the dev a `/margo` command that lists and works through the open inbox. AI consumes comments via normal repo-file reads — no MCP server, no magic context injection.
+- **AI discoverability: project-level Claude Code skill.** The `margo-dev` package drops a skill at `.claude/skills/margo.md` on install, giving the dev a `/margo` command that lists and works through the open inbox. AI consumes comments via normal repo-file reads — no MCP server, no magic context injection.
 - **AI reply protocol.** When AI processes a `type: task` comment, it appends a reply (`**ai-reply** — claude-opus-4-7 — <ts>`) to the same file and updates `status` to one of: `ready-for-review` (confident fix landed), `blocked` (with reason), or leaves `open` (clarification asked). Humans mark `resolved` after review.
 - **Pin anchoring: hybrid, captured-at-comment-time.** The plugin captures the following when a comment is pinned: CSS selector (best-effort), full text content of the element, ARIA role + label, and viewport-relative coords. At view time, the overlay resolves the pin in priority order: text + role match → selector → coords (with a "may have moved" indicator) → orphaned (still listed in `/margo` inbox, not rendered as a pin). When AI modifies code that affects a pinned element, AI is responsible for updating the comment's anchor fields in the same edit. (Screenshot-based recovery deferred to v0.1.)
 - **Conflict handling.** One file per comment (UUID filename) eliminates 99% of conflict cases. Plugin auto-pulls before pushing and retries on remote-update rejection. Status changes use last-writer-wins, with the more-advanced status winning ties (`resolved` > `ready-for-review` > `in-progress` > `open`). Replies are append-only with timestamps, so concurrent replies merge cleanly. Real conflicts (rare) surface in the overlay UI with a "review and choose" prompt.
@@ -85,7 +85,7 @@ After the v0 spec was assembled, a critical pass surfaced these refinements (all
 
 - **Branch model: comments live on whichever branch the commenter is on.** Natural git semantics — when branches merge, comments merge. The default expectation: PMs and designers run `npm run dev` from `main` (or the team's default branch), giving feedback on the latest stable code. To comment on in-progress work, a non-dev explicitly checks out the dev's feature branch (`git checkout feature/x`). The overlay surfaces the current branch and warns when commenting on a non-default branch.
 - **Screenshots are skipped in v0.** Anchor recovery uses text + role + selector + viewport coords only. Inline base64 bloats files and external storage adds infrastructure. Add screenshot-based recovery in v0.1 if anchor failures turn out to matter in practice.
-- **Onboarding uses an explicit CLI command, not a postinstall hook.** Postinstall hooks are increasingly disabled by package managers (npm `--ignore-scripts`, pnpm allow-list). Claude runs `npx @margo/dev init` explicitly during the "add margo" flow. Idempotent: safe to re-run.
+- **Onboarding uses an explicit CLI command, not a postinstall hook.** Postinstall hooks are increasingly disabled by package managers (npm `--ignore-scripts`, pnpm allow-list). Claude runs `npx margo-dev init` explicitly during the "add margo" flow. Idempotent: safe to re-run.
 - **Root `CLAUDE.md` reference is added on install.** A subdirectory `.margo/CLAUDE.md` is not always auto-loaded by Claude Code in every session. The init command appends a delimited block to the project's root `CLAUDE.md` (creating it if missing):
 
   ```

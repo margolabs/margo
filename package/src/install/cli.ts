@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// `npx @margo/dev <command>` — explicit init / update / uninstall.
+// `npx margo-dev <command>` — explicit init / update / uninstall.
 // Idempotent. Designed to be invoked by Claude Code during the
 // `claude "add margo to this project"` flow.
 
@@ -176,7 +176,7 @@ async function patchNextProject(cwd: string, overwrite = false): Promise<void> {
 
 const NEXT_ROUTE_FILE = `// Catch-all Route Handler for margo's /__margo/* surface (App Router).
 // All four methods point to the same dispatcher; it inspects path + method.
-import { handlers } from '@margo/dev/next';
+import { handlers } from 'margo-dev/next';
 
 export const { GET, POST, PATCH, DELETE } = handlers;
 
@@ -198,7 +198,7 @@ async function patchNextConfig(cwd: string): Promise<void> {
   }
   if (!target) {
     console.log('[margo] no next.config.* found — add this to your config:');
-    console.log("       import { withMargo } from '@margo/dev/next';");
+    console.log("       import { withMargo } from 'margo-dev/next';");
     console.log('       export default withMargo(nextConfig);');
     return;
   }
@@ -211,7 +211,7 @@ async function patchNextConfig(cwd: string): Promise<void> {
   const exportMatch = original.match(/export\s+default\s+([^;\n]+);?/);
   if (!exportMatch || exportMatch.index === undefined) {
     console.log(`[margo] could not auto-wrap ${target}.`);
-    console.log("       Add: import { withMargo } from '@margo/dev/next/config';");
+    console.log("       Add: import { withMargo } from 'margo-dev/next/config';");
     console.log('       And change `export default nextConfig;` to `export default withMargo(nextConfig);`');
     return;
   }
@@ -220,7 +220,7 @@ async function patchNextConfig(cwd: string): Promise<void> {
 
   // Insert our import after the last existing import line, or at the top
   // if there are none.
-  const importStmt = `import { withMargo } from '@margo/dev/next';`;
+  const importStmt = `import { withMargo } from 'margo-dev/next';`;
   const importLines = [...original.matchAll(/^import .+;$/gm)];
   const lastImport = importLines[importLines.length - 1];
   let next: string;
@@ -246,18 +246,18 @@ async function patchNextLayout(cwd: string): Promise<void> {
   }
   if (!target) {
     console.log('[margo] no app/layout.* found — add manually to your root layout:');
-    console.log("       import { MargoScript } from '@margo/dev/next';");
+    console.log("       import { MargoScript } from 'margo-dev/next';");
     console.log('       <body>{children}<MargoScript /></body>');
     return;
   }
   const original = await fs.readFile(target, 'utf8');
-  if (original.includes('@margo/dev/next') || original.includes('MargoScript')) return;
+  if (original.includes('margo-dev/next') || original.includes('MargoScript')) return;
 
   // Add the import after the last existing import line.
   const importLines = [...original.matchAll(/^import .+;$/gm)];
   const lastImport = importLines[importLines.length - 1];
   let next = original;
-  const importStmt = `import { MargoScript } from '@margo/dev/next';`;
+  const importStmt = `import { MargoScript } from 'margo-dev/next';`;
   if (lastImport && lastImport.index !== undefined) {
     const end = lastImport.index + lastImport[0].length;
     next = original.slice(0, end) + `\n${importStmt}` + original.slice(end);
@@ -285,14 +285,14 @@ async function patchViteConfig(cwd: string): Promise<void> {
   }
   if (!target) {
     console.log('[margo] no vite.config.* found — add this manually if you use Vite:');
-    console.log("       import margo from '@margo/dev';");
+    console.log("       import margo from 'margo-dev';");
     console.log('       export default { plugins: [margo()] };');
     return;
   }
   const original = await fs.readFile(target, 'utf8');
-  if (original.includes('@margo/dev')) return; // already wired
+  if (original.includes('margo-dev')) return; // already wired
   // Naive injection: prepend import, then attempt to add to first plugins: array.
-  const importLine = `import margo from '@margo/dev';\n`;
+  const importLine = `import margo from 'margo-dev';\n`;
   let next = importLine + original;
   if (/plugins\s*:\s*\[/.test(next)) {
     next = next.replace(/plugins\s*:\s*\[/, (m) => `${m}margo(), `);

@@ -148,7 +148,7 @@ function serveOverlay(reqUrl: string, res: ServerResponse): void {
   const isMap = reqUrl === '/__margo/overlay.js.map';
   const file = isMap ? OVERLAY_MAP_PATH : OVERLAY_BUNDLE_PATH;
   if (!fs.existsSync(file)) {
-    res.writeHead(404).end('overlay bundle missing — run `npm run build` in @margo/dev');
+    res.writeHead(404).end('overlay bundle missing — run `npm run build` in margo-dev');
     return;
   }
   const stream = fs.createReadStream(file);

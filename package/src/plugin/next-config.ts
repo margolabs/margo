@@ -9,7 +9,7 @@
 //
 //   // next.config.ts
 //   import type { NextConfig } from 'next';
-//   import { withMargo } from '@margo/dev/next/config';
+//   import { withMargo } from 'margo-dev/next/config';
 //
 //   const nextConfig: NextConfig = { /* your stuff */ };
 //   export default withMargo(nextConfig);
@@ -38,7 +38,7 @@ const MARGO_REWRITE: NextRewrite = {
   destination: '/margo-runtime/:path*',
 };
 
-const MARGO_PACKAGE = '@margo/dev';
+const MARGO_PACKAGE = 'margo-dev';
 
 export function withMargo<T extends MinimalNextConfig>(config: T = {} as T): T {
   // Preserve any external packages the user already configured; only add

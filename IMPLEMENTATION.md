@@ -2,7 +2,7 @@
 
 ## Build status
 
-The `package/` directory contains a working scaffold of `@margo/dev`. The skeleton compiles, the architecture is wired, and the API surface matches the spec. Remaining work to reach a runnable demo is real but bounded:
+The `package/` directory contains a working scaffold of `margo-dev`. The skeleton compiles, the architecture is wired, and the API surface matches the spec. Remaining work to reach a runnable demo is real but bounded:
 
 | Area | Status | Notes |
 | --- | --- | --- |
@@ -26,12 +26,12 @@ The `package/` directory contains a working scaffold of `@margo/dev`. The skelet
 
 The big remaining lift is bundling the overlay (~1 day with esbuild) and wiring the panel actions to the PATCH endpoint (~1 day). Everything else is scaffolded.
 
-## Package: `@margo/dev`
+## Package: `margo-dev`
 
 Single npm package, dev dependency only. Targets Vite first; Next.js plugin in v0.1.
 
 ```
-@margo/dev/
+margo-dev/
 ├── package.json
 ├── README.md
 ├── src/
@@ -58,7 +58,7 @@ Single npm package, dev dependency only. Targets Vite first; Next.js plugin in v
 2. **Local server endpoints** (`server/endpoints.ts`). POST `/__margo/comment` writes a file; GET `/__margo/list` returns the inbox. Mounted by the Vite plugin in dev. No auth (local-only).
 3. **Git wrapper** (`server/git.ts`). `add` + `commit` (with `margo:` prefix) + `pull --rebase` + `push`. Shells out to local `git`. Honor `.margo/config.json` flags.
 4. **Vite plugin** (`plugin/vite.ts`). Mounts the server endpoints in dev mode; injects the overlay script tag into served HTML; activates on preview deploys when `MARGO_ENABLED=1`.
-5. **Init CLI** (`install/cli.ts`). Exposed as `npx @margo/dev init` (NOT a postinstall hook — those are increasingly disabled). Idempotent. Drops `.margo/config.json`, `.margo/CLAUDE.md`, `.margo/comments/.gitkeep`, `.claude/skills/margo.md`, appends a `<!-- margo:start --> ... <!-- margo:end -->` block to root `CLAUDE.md` (creating it if missing), and patches `vite.config.*` to add the plugin import + entry. Other CLI subcommands: `update`, `uninstall`.
+5. **Init CLI** (`install/cli.ts`). Exposed as `npx margo-dev init` (NOT a postinstall hook — those are increasingly disabled). Idempotent. Drops `.margo/config.json`, `.margo/CLAUDE.md`, `.margo/comments/.gitkeep`, `.claude/skills/margo.md`, appends a `<!-- margo:start --> ... <!-- margo:end -->` block to root `CLAUDE.md` (creating it if missing), and patches `vite.config.*` to add the plugin import + entry. Other CLI subcommands: `update`, `uninstall`.
 6. **Overlay UI** (`overlay/`). Pin-and-comment UI. Captures the hybrid anchor on click. POSTs to `/__margo/comment`. Subscribes to SSE for live updates. **Read-only mode** when running on a preview deploy — composer disabled, pins still render, replies and status changes blocked. **SPA route tracking**: patches `pushState` / `replaceState` and listens for `popstate` so `target.url` reflects client-side route changes.
 7. **Sync loop** (`overlay/sync.ts` + `server/sync.ts`). On focus / on visibility / every 30s: server-side triggers `git pull --rebase`, then SSE-pushes any new comment files to all connected overlays.
 
@@ -67,7 +67,7 @@ Single npm package, dev dependency only. Targets Vite first; Next.js plugin in v
 - **Overlay refresh cadence**: SSE from the local server pushes any change to `.margo/comments/` (file watcher). Plus a periodic `git pull --rebase` (default 30s, configurable) so remote comments arrive without manual pull. No fancy realtime infra — just polling at the git layer.
 - **Resolved comments stay in place**: file remains at `.margo/comments/<id>.md` with `status: resolved`. Preserves git blame, AI keeps it as context for related future comments, avoids rename-detection noise. Overlay filters resolved out by default.
 - **Branch model**: comments live on whichever branch the commenter is on. Overlay surfaces the current branch and warns when commenting on a non-default branch. Default expectation is `main`.
-- **Init reliability**: `npx @margo/dev init` is idempotent and explicit. No postinstall hook. Patches `vite.config.*` via AST when possible, falls back to a clear "add this line" prompt if patching fails.
+- **Init reliability**: `npx margo-dev init` is idempotent and explicit. No postinstall hook. Patches `vite.config.*` via AST when possible, falls back to a clear "add this line" prompt if patching fails.
 - **Root `CLAUDE.md` integration**: init writes a delimited block to root `CLAUDE.md`. Markers (`<!-- margo:start -->` / `<!-- margo:end -->`) make rewrite and uninstall safe.
 
 ## Out of scope for v0

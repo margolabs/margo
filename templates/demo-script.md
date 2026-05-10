@@ -10,7 +10,7 @@ Sam runs once, in a fresh project:
 $ claude "add margo to this project"
 ```
 
-Under the hood, Claude runs `npm install -D @margo/dev` then `npx @margo/dev init`. The init step wires the Vite plugin, drops `.margo/config.json` and `.margo/CLAUDE.md` and `.claude/skills/margo.md`, appends a margo block to root `CLAUDE.md`, scaffolds an empty `.margo/comments/`, then commits and pushes.
+Under the hood, Claude runs `npm install -D margo-dev` then `npx margo-dev init`. The init step wires the Vite plugin, drops `.margo/config.json` and `.margo/CLAUDE.md` and `.claude/skills/margo.md`, appends a margo block to root `CLAUDE.md`, scaffolds an empty `.margo/comments/`, then commits and pushes.
 
 Alex and Jane `git pull`. Done. (All on `main`.)
 
