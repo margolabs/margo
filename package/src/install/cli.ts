@@ -53,7 +53,14 @@ async function init(cwd: string, opts: { overwriteTemplates?: boolean } = {}): P
   await ensureGitkeep(path.join(margoDir, 'comments'));
 
   await ensureRootClaudeBlock(cwd);
-  await patchViteConfig(cwd);
+  // Pick the first integration that matches the project. We don't try both —
+  // a project that mixes Vite + Next.js is unusual enough to handle by hand.
+  const framework = await detectFramework(cwd);
+  if (framework === 'next') {
+    await patchNextProject(cwd, opts.overwriteTemplates);
+  } else {
+    await patchViteConfig(cwd);
+  }
 
   console.log('[margo] init complete.');
   console.log('       Review .margo/config.json (especially the roster) and run `npm run dev`.');
@@ -120,6 +127,127 @@ async function removeRootClaudeBlock(cwd: string): Promise<void> {
   const re = new RegExp(`\\n*${escapeRe(MARGO_BLOCK_START)}[\\s\\S]*?${escapeRe(MARGO_BLOCK_END)}\\n*`);
   const next = existing.replace(re, '\n');
   await fs.writeFile(file, next, 'utf8');
+}
+
+async function detectFramework(cwd: string): Promise<'vite' | 'next' | 'unknown'> {
+  // Look at package.json deps + the on-disk shape. We trust the deps first;
+  // the file checks are a fallback for unusual setups (e.g. monorepos that
+  // hoist deps to a parent package.json).
+  let pkg: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> } = {};
+  try {
+    pkg = JSON.parse(await fs.readFile(path.join(cwd, 'package.json'), 'utf8'));
+  } catch { /* no package.json — neither framework */ }
+  const allDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
+  const hasNextDep = !!allDeps['next'];
+  const hasViteDep = !!allDeps['vite'];
+
+  const hasAppDir = await pathExists(path.join(cwd, 'app'));
+  const hasPagesDir = await pathExists(path.join(cwd, 'pages'));
+  const hasViteConfig = await pathExists(path.join(cwd, 'vite.config.ts'))
+    || await pathExists(path.join(cwd, 'vite.config.js'))
+    || await pathExists(path.join(cwd, 'vite.config.mjs'));
+
+  if (hasNextDep || hasAppDir || hasPagesDir) return 'next';
+  if (hasViteDep || hasViteConfig) return 'vite';
+  return 'unknown';
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try { await fs.access(p); return true; } catch { return false; }
+}
+
+async function patchNextProject(cwd: string, overwrite = false): Promise<void> {
+  // 1. Drop the catch-all Route Handler at app/margo-runtime/[[...path]]/route.ts.
+  //    The folder name has no leading underscore so it isn't private; the
+  //    public URL stays /__margo/* via a rewrite in next.config.*.
+  const routeDir = path.join(cwd, 'app', 'margo-runtime', '[[...path]]');
+  await fs.mkdir(routeDir, { recursive: true });
+  const routeFile = path.join(routeDir, 'route.ts');
+  if (overwrite || !(await pathExists(routeFile))) {
+    await fs.writeFile(routeFile, NEXT_ROUTE_FILE, 'utf8');
+  }
+
+  // 2. Patch next.config.{ts,js,mjs} — add serverExternalPackages + rewrite.
+  await patchNextConfig(cwd);
+
+  // 3. Insert <MargoScript /> into app/layout.tsx.
+  await patchNextLayout(cwd);
+}
+
+const NEXT_ROUTE_FILE = `// Catch-all Route Handler for margo's /__margo/* surface (App Router).
+// All four methods point to the same dispatcher; it inspects path + method.
+import { handlers } from '@margo/dev/next';
+
+export const { GET, POST, PATCH, DELETE } = handlers;
+
+// Node runtime is required: handlers shell out to git and use chokidar.
+export const runtime = 'nodejs';
+// Never cache — comment writes and SSE streams must hit the live handler.
+export const dynamic = 'force-dynamic';
+`;
+
+async function patchNextConfig(cwd: string): Promise<void> {
+  const candidates = ['next.config.ts', 'next.config.mjs', 'next.config.js'];
+  let target: string | undefined;
+  for (const c of candidates) {
+    if (await pathExists(path.join(cwd, c))) { target = path.join(cwd, c); break; }
+  }
+  if (!target) {
+    console.log('[margo] no next.config.* found — add this to your config:');
+    console.log("       serverExternalPackages: ['@margo/dev'],");
+    console.log("       async rewrites() { return [{ source: '/__margo/:path*', destination: '/margo-runtime/:path*' }]; }");
+    return;
+  }
+  const original = await fs.readFile(target, 'utf8');
+  if (original.includes('@margo/dev') || original.includes('margo-runtime')) return; // already wired
+
+  // Naive but readable insertion: find the first object literal `{` after a
+  // `NextConfig =` (TS) or `module.exports =` (JS), and inject our keys.
+  const anchor = original.match(/(?:NextConfig\s*=\s*|module\.exports\s*=\s*)\{/);
+  if (!anchor || anchor.index === undefined) {
+    console.log(`[margo] could not auto-patch ${target}.`);
+    console.log("       Add: serverExternalPackages: ['@margo/dev'], and a rewrite from /__margo/:path* to /margo-runtime/:path*");
+    return;
+  }
+  const insertAt = anchor.index + anchor[0].length;
+  const inject = `\n  serverExternalPackages: ['@margo/dev'],\n  async rewrites() {\n    return [{ source: '/__margo/:path*', destination: '/margo-runtime/:path*' }];\n  },\n`;
+  const next = original.slice(0, insertAt) + inject + original.slice(insertAt);
+  await fs.writeFile(target, next, 'utf8');
+}
+
+async function patchNextLayout(cwd: string): Promise<void> {
+  const candidates = ['app/layout.tsx', 'app/layout.jsx', 'app/layout.ts', 'app/layout.js'];
+  let target: string | undefined;
+  for (const c of candidates) {
+    if (await pathExists(path.join(cwd, c))) { target = path.join(cwd, c); break; }
+  }
+  if (!target) {
+    console.log('[margo] no app/layout.* found — add manually to your root layout:');
+    console.log("       import { MargoScript } from '@margo/dev/next';");
+    console.log('       <body>{children}<MargoScript /></body>');
+    return;
+  }
+  const original = await fs.readFile(target, 'utf8');
+  if (original.includes('@margo/dev/next') || original.includes('MargoScript')) return;
+
+  // Add the import after the last existing import line.
+  const importLines = [...original.matchAll(/^import .+;$/gm)];
+  const lastImport = importLines[importLines.length - 1];
+  let next = original;
+  const importStmt = `import { MargoScript } from '@margo/dev/next';`;
+  if (lastImport && lastImport.index !== undefined) {
+    const end = lastImport.index + lastImport[0].length;
+    next = original.slice(0, end) + `\n${importStmt}` + original.slice(end);
+  } else {
+    next = `${importStmt}\n${original}`;
+  }
+  // Insert <MargoScript /> just before the closing </body>.
+  if (next.includes('</body>')) {
+    next = next.replace('</body>', '<MargoScript /></body>');
+  } else {
+    console.log(`[margo] inserted import into ${target}, but couldn't find </body> — add <MargoScript /> manually.`);
+  }
+  await fs.writeFile(target, next, 'utf8');
 }
 
 async function patchViteConfig(cwd: string): Promise<void> {

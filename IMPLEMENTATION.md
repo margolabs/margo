@@ -22,7 +22,7 @@ The `package/` directory contains a working scaffold of `@margo/dev`. The skelet
 | Reply / status-change UX (in panel) | ⬜ stub | actions row exists; click handlers TODO |
 | Conflict-resolution UI | ⬜ TODO | overlay banner when `git pull --rebase` fails |
 | Tests | ⬜ TODO | vitest configured; no specs yet |
-| Next.js plugin | ⬜ deferred | v0.1 |
+| Next.js plugin | ✅ written | App Router Route Handler + `<MargoScript />`; init CLI patches `next.config.*` and `app/layout.tsx`. Public URL stays `/__margo/*` via a rewrite to `/margo-runtime/*` because Next.js treats `_`-prefixed folders as private. |
 
 The big remaining lift is bundling the overlay (~1 day with esbuild) and wiring the panel actions to the PATCH endpoint (~1 day). Everything else is scaffolded.
 
@@ -72,7 +72,6 @@ Single npm package, dev dependency only. Targets Vite first; Next.js plugin in v
 
 ## Out of scope for v0
 
-- Next.js plugin (v0.1)
 - Webpack / generic middleware (v0.2)
 - React Native / mobile (later)
 - OAuth-based write path for preview deploys (v1)

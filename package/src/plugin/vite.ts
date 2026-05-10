@@ -12,6 +12,7 @@ import * as url from 'node:url';
 import type { ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
 import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } from '../server/endpoints.js';
+import type { SseClient } from '../server/handlers.js';
 import { CommentWatcher } from '../server/watcher.js';
 import { backgroundPull } from '../server/git.js';
 import type { MargoConfig } from '../shared/types.js';
@@ -45,7 +46,7 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
   let margoDir = '';
   let commentsDir = '';
   let config: MargoConfig = DEFAULTS;
-  const sseClients = new Set<ServerResponse>();
+  const sseClients = new Set<SseClient>();
   let watcher: CommentWatcher | undefined;
   let pullTimer: NodeJS.Timeout | undefined;
 
