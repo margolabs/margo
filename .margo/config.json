@@ -1,0 +1,27 @@
+{
+  "$schema": "https://margo.dev/schema/config.v0.json",
+  "workspace": {
+    "name": "acme-product",
+    "appUrl": {
+      "dev": "http://localhost:3000",
+      "preview": null
+    }
+  },
+  "roster": [
+    { "email": "jane@team.com", "role": "pm",       "displayName": "Jane Liu" },
+    { "email": "alex@team.com", "role": "designer", "displayName": "Alex Park" },
+    { "email": "sam@team.com",  "role": "dev",      "displayName": "Sam Chen" }
+  ],
+  "git": {
+    "autoCommit": true,
+    "autoPush":   true,
+    "commitPrefix": "margo:",
+    "branchPolicy": "current",
+    "pullBeforePush": true,
+    "remotePollIntervalMs": 60000
+  },
+  "ai": {
+    "implicitTaskTrigger": true,
+    "proactiveInboxSummaryAtSessionStart": true
+  }
+}
