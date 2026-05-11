@@ -10,7 +10,104 @@
 //   viewport   — at-time-of-pin viewport size (so coords are interpretable)
 //   textAnchor — optional phrase/before/after, when the click landed on a text node
 
-import type { GapAnchor, Target, TextAnchor } from '../shared/types.js';
+import type { GapAnchor, Target, TextAnchor, ViewContext } from '../shared/types.js';
+
+// Tag names that announce "I'm a view container" — capturing one means we'll
+// snap pin disambiguation to whichever instance of it is currently visible.
+// `dialog` and `nav` are intentionally included because users frequently pin
+// inside open modals or expandable navs that share a URL with the page below.
+const PANEL_ROLES = new Set(['tabpanel', 'dialog', 'region', 'article']);
+
+// Attributes that say "I'm the currently active instance among my siblings".
+// Captured as-is and compared verbatim at resolve — we don't try to interpret
+// the values, just check that the live element exposes the same value the
+// pinned element did.
+const STATE_ATTRS = [
+  'aria-current',
+  'aria-selected',
+  'aria-expanded',
+  'aria-pressed',
+  'data-state',
+  'data-step',
+];
+
+/**
+ * Build a `ViewContext` snapshot describing which "view" the element belongs
+ * to at capture time. Returns `undefined` if no useful signal exists — the
+ * resolver then skips view filtering for this pin and behaves exactly as it
+ * did before this feature shipped.
+ *
+ * Walks the ancestor chain once, collecting:
+ *   - the closest named panel (tabpanel/dialog/region/article with a label)
+ *   - the closest occurrence of each "active state" attribute
+ *   - the closest preceding heading text (last-resort identifier)
+ */
+export function captureViewContext(el: Element): ViewContext | undefined {
+  const ctx: ViewContext = {};
+  const state: Record<string, string> = {};
+  let cur: Element | null = el;
+  while (cur && cur !== document.body) {
+    if (cur.closest('[data-margo]') === cur) {
+      // never let our own overlay UI bleed into the signature
+      cur = cur.parentElement;
+      continue;
+    }
+    if (!ctx.panel) {
+      const role = cur.getAttribute('role');
+      if (role && PANEL_ROLES.has(role)) {
+        const labelledBy = cur.getAttribute('aria-labelledby') ?? undefined;
+        const labelEl = labelledBy ? cur.ownerDocument?.getElementById(labelledBy) : null;
+        const label = labelEl?.textContent?.trim() || undefined;
+        ctx.panel = {
+          role,
+          id: (cur as HTMLElement).id || undefined,
+          labelledBy,
+          label,
+        };
+      }
+    }
+    for (const attr of STATE_ATTRS) {
+      if (state[attr] !== undefined) continue;
+      const v = cur.getAttribute(attr);
+      if (v != null) state[attr] = v;
+    }
+    cur = cur.parentElement;
+  }
+  if (Object.keys(state).length > 0) ctx.state = state;
+  const heading = findNearestHeading(el);
+  if (heading) ctx.nearestHeading = heading;
+  if (!ctx.panel && !ctx.state && !ctx.nearestHeading) return undefined;
+  return ctx;
+}
+
+// Find the closest preceding heading (h1-h6) in document order. Search
+// backwards from the element through previous siblings and parent's previous
+// siblings, etc. Stops at the document body. Captures the heading text
+// trimmed and length-capped — a long article title shouldn't bloat every pin.
+function findNearestHeading(el: Element): string | undefined {
+  const isHeading = (n: Element | null): n is HTMLElement =>
+    !!n && /^H[1-6]$/.test(n.tagName);
+  let cur: Element | null = el;
+  while (cur && cur !== document.body) {
+    // Walk previous siblings looking for a heading or a container with one.
+    let sib: Element | null = cur.previousElementSibling;
+    while (sib) {
+      if (isHeading(sib)) {
+        const t = sib.textContent?.trim().replace(/\s+/g, ' ') ?? '';
+        if (t) return t.length > 80 ? t.slice(0, 77) + '...' : t;
+      }
+      // Look one level deep — common pattern is <header><h1>…</h1></header>
+      const inner = sib.querySelector('h1, h2, h3, h4, h5, h6');
+      if (inner) {
+        const t = inner.textContent?.trim().replace(/\s+/g, ' ') ?? '';
+        if (t) return t.length > 80 ? t.slice(0, 77) + '...' : t;
+      }
+      sib = sib.previousElementSibling;
+    }
+    cur = cur.parentElement;
+  }
+  return undefined;
+}
 
 
 export function captureTargetFromGap(first: Element, second: Element, currentUrl: string): Target {
@@ -39,6 +136,7 @@ export function captureTargetFromGap(first: Element, second: Element, currentUrl
     second: descriptor(bottomOrRight),
     axis,
   };
+  const viewContext = captureViewContext(topOrLeft);
   return {
     url: currentUrl,
     selector: shortSelector(topOrLeft),
@@ -47,6 +145,7 @@ export function captureTargetFromGap(first: Element, second: Element, currentUrl
     viewport: { w: window.innerWidth, h: window.innerHeight },
     coords: { x: Math.round(gap.left + gap.width / 2), y: Math.round(gap.top + gap.height / 2) },
     gapAnchor: anchor,
+    ...(viewContext ? { viewContext } : {}),
   };
 }
 
@@ -114,6 +213,7 @@ export function captureTargetFromRange(range: Range, currentUrl: string): Target
   const anchor = buildTextAnchor(containerEl, phrase);
   const rects = range.getClientRects();
   const r = rects.length > 0 ? rects[0]! : range.getBoundingClientRect();
+  const viewContext = captureViewContext(containerEl);
   return {
     url: currentUrl,
     selector: shortSelector(containerEl),
@@ -122,11 +222,13 @@ export function captureTargetFromRange(range: Range, currentUrl: string): Target
     viewport: { w: window.innerWidth, h: window.innerHeight },
     coords: { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) },
     textAnchor: anchor,
+    ...(viewContext ? { viewContext } : {}),
   };
 }
 
 export function captureTarget(el: Element, currentUrl: string): Target {
   const rect = el.getBoundingClientRect();
+  const viewContext = captureViewContext(el);
   return {
     url: currentUrl,
     selector: shortSelector(el),
@@ -134,6 +236,7 @@ export function captureTarget(el: Element, currentUrl: string): Target {
     role: ariaRoleOrTag(el),
     viewport: { w: window.innerWidth, h: window.innerHeight },
     coords: { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) },
+    ...(viewContext ? { viewContext } : {}),
   };
 }
 

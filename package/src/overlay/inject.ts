@@ -285,6 +285,11 @@ function renderAllPins(
     if (isResolved && !showResolved) continue;
     const result = resolveTarget(c.frontmatter.target, url);
     if (result.kind === 'wrong-route') continue;
+    // wrong-view: comment is for THIS route but a different view state
+    // (other tab, other wizard step, etc.). Suppress the pin without
+    // orphaning — the user can navigate back to the original view to
+    // see the pin again, and the comment stays visible in the inbox.
+    if (result.kind === 'wrong-view') continue;
     if (result.kind === 'lost-anchor') {
       orphans.push(c);
       orphanIds.add(c.frontmatter.id);

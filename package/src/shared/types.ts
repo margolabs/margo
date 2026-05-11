@@ -41,6 +41,39 @@ export interface Target {
   // pinned. Pin may anchor to DOM that only exists in their local edits;
   // viewers won't see it even on the same commit.
   dirty?: boolean;
+  // Snapshot of which "view state" the page was in at pin time. Used to
+  // disambiguate pins on pages where the URL stays the same but content
+  // swaps — tabs, wizards, accordions, modals, conditional renders. Without
+  // this, a selector built from structural paths (`main > section >
+  // article:nth-of-type(3)`) matches the corresponding container in any
+  // active view and the resolver dots the wrong element. Optional — old
+  // comments and pages with no detectable view markers skip view filtering.
+  viewContext?: ViewContext;
+}
+
+export interface ViewContext {
+  // Closest "named view" ancestor — covers role="tabpanel", role="dialog",
+  // role="region", role="article" with an aria-labelledby reference. Both
+  // the id reference AND the resolved label text are stored: ids can rotate
+  // across builds, the human-visible label tends to be stable.
+  panel?: {
+    role?: string;       // tabpanel | dialog | region | article | ...
+    id?: string;         // panel element's own id, if any
+    labelledBy?: string; // value of the panel's aria-labelledby
+    label?: string;      // resolved text of the labelledBy target
+  };
+  // "Currently active" state markers gathered from the ancestor chain.
+  // Keys are the attribute names (aria-current, aria-selected, aria-expanded,
+  // aria-pressed, data-state, data-step); values are the live attribute
+  // values at capture time. At resolve, the candidate's chain must surface
+  // the same values for any keys recorded here.
+  state?: Record<string, string>;
+  // Text of the closest preceding heading (h1-h6) inside the same panel,
+  // or just up the ancestor chain when no panel is found. Last-resort
+  // signal for UIs that use no ARIA and no data-state attributes — the
+  // user almost always pinned near a visible heading, and headings tend
+  // to identify "which screen am I on" better than anything else available.
+  nearestHeading?: string;
 }
 
 export interface CommentFrontmatter {

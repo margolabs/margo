@@ -12,7 +12,7 @@
 // Returns 'orphaned' if nothing reasonable resolves; the caller should surface
 // the comment in the inbox without rendering a pin.
 
-import type { GapAnchor, Target, TextAnchor } from '../shared/types.js';
+import type { GapAnchor, Target, TextAnchor, ViewContext } from '../shared/types.js';
 import { computeGapRect } from './pin.js';
 
 export type ResolveResult =
@@ -20,6 +20,12 @@ export type ResolveResult =
   | { kind: 'moved'; el: Element; rects: DOMRect[] }
   // Comment is for a different route — don't surface on this page at all.
   | { kind: 'wrong-route' }
+  // Comment is for THIS route but the view state (tab/wizard step/accordion
+  // panel/etc.) the user pinned on isn't currently shown. The anchor still
+  // exists somewhere in the document; the user just hasn't navigated back
+  // to that state. Treated like 'wrong-route' by the renderer — pin hidden,
+  // comment stays in the inbox, NOT orphaned.
+  | { kind: 'wrong-view' }
   // Comment is for THIS route but the anchored element/text no longer exists.
   // Surface in the orphan tray so the commenter knows their context was edited away.
   | { kind: 'lost-anchor' };
@@ -41,11 +47,46 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
   // tag swaps, section moves) so they don't end up in the orphan tray. Only
   // genuine deletions should fail through to lost-anchor.
 
+  // Pre-filter helpers. Two guards run on every candidate set before we
+  // consider it a match:
+  //
+  //   - visibility: drop elements that aren't actually rendered (display:none,
+  //     0×0 rect, detached). They can't be pin anchors regardless of which
+  //     resolution step found them, and including them was the proximate
+  //     cause of pins being misplaced on hidden tab/wizard panels.
+  //   - view-context: when target.viewContext is present, drop elements that
+  //     don't belong to the same view state (different tab, different wizard
+  //     step, etc.). Comments without a viewContext skip this filter and
+  //     behave exactly as before — old pins keep working.
+  const filterByContext = (els: Element[]): Element[] => {
+    let out = els.filter(isVisible);
+    if (target.viewContext) {
+      // Strict filter — drop candidates that don't reproduce the captured
+      // view signature. If this empties the candidate pool but there were
+      // visible candidates in foreign views, `sawForeignViewCandidates`
+      // (set by noteForeignView before this filter ran) tells the outer
+      // function to return 'wrong-view' instead of 'lost-anchor'.
+      out = out.filter((el) => viewContextMatches(el, target.viewContext!));
+    }
+    return out;
+  };
+  // True when the only candidates we found live in a different view than
+  // the comment was pinned on. Used to short-circuit later resolution steps
+  // and report 'wrong-view' instead of 'lost-anchor'.
+  let sawForeignViewCandidates = false;
+  const noteForeignView = (els: Element[]) => {
+    if (!target.viewContext) return;
+    if (els.some((el) => isVisible(el) && !viewContextMatches(el, target.viewContext!))) {
+      sawForeignViewCandidates = true;
+    }
+  };
+
   // 1. Selector match — exact text (highest confidence)
   let selectorMatches: Element[] = [];
   try {
     selectorMatches = Array.from(document.querySelectorAll(target.selector));
-    const exact = selectorMatches.filter((el) => matchesText(el, target.text));
+    noteForeignView(selectorMatches);
+    const exact = filterByContext(selectorMatches).filter((el) => matchesText(el, target.text));
     if (exact.length === 1) {
       return { kind: 'exact', el: exact[0], rects: rectsFor(exact[0], target.textAnchor) };
     }
@@ -60,17 +101,22 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
   // 2. Selector still resolves but the visible text changed. Common case:
   //    a designer/dev renamed a button label or tweaked copy. The element
   //    itself is the same; we just can't text-match it anymore.
-  if (selectorMatches.length === 1) {
-    return { kind: 'moved', el: selectorMatches[0], rects: rectsFor(selectorMatches[0], target.textAnchor) };
+  const visibleSelectorMatches = filterByContext(selectorMatches);
+  if (visibleSelectorMatches.length === 1) {
+    return { kind: 'moved', el: visibleSelectorMatches[0], rects: rectsFor(visibleSelectorMatches[0], target.textAnchor) };
   }
-  if (selectorMatches.length > 1) {
-    const fuzzy = pickByFuzzyText(selectorMatches, target.text) ?? pickByCoords(selectorMatches, target) ?? selectorMatches[0];
+  if (visibleSelectorMatches.length > 1) {
+    const fuzzy = pickByFuzzyText(visibleSelectorMatches, target.text)
+      ?? pickByCoords(visibleSelectorMatches, target)
+      ?? visibleSelectorMatches[0];
     return { kind: 'moved', el: fuzzy, rects: rectsFor(fuzzy, target.textAnchor) };
   }
 
   // 3. Text + role exact (scan candidates)
   if (target.text) {
-    const exactTextRole = textCandidates(target, { fuzzy: false, requireRole: true });
+    const exactTextRoleRaw = textCandidates(target, { fuzzy: false, requireRole: true });
+    noteForeignView(exactTextRoleRaw);
+    const exactTextRole = filterByContext(exactTextRoleRaw);
     if (exactTextRole.length === 1) {
       return { kind: 'exact', el: exactTextRole[0], rects: rectsFor(exactTextRole[0], target.textAnchor) };
     }
@@ -81,7 +127,9 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
 
     // 4. Text exact, role relaxed. Catches tag swaps (h2→h1, span→p),
     //    role-attribute removals, button → link conversions etc.
-    const exactTextNoRole = textCandidates(target, { fuzzy: false, requireRole: false });
+    const exactTextNoRoleRaw = textCandidates(target, { fuzzy: false, requireRole: false });
+    noteForeignView(exactTextNoRoleRaw);
+    const exactTextNoRole = filterByContext(exactTextNoRoleRaw);
     if (exactTextNoRole.length >= 1) {
       const best = pickByCoords(exactTextNoRole, target) ?? exactTextNoRole[0];
       return { kind: 'moved', el: best, rects: rectsFor(best, target.textAnchor) };
@@ -89,7 +137,9 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
 
     // 5. Fuzzy text (Sørensen–Dice ≥ 0.6), role relaxed. Catches paraphrasing,
     //    typo fixes, translation, copy editing.
-    const fuzzyText = textCandidates(target, { fuzzy: true, requireRole: false });
+    const fuzzyTextRaw = textCandidates(target, { fuzzy: true, requireRole: false });
+    noteForeignView(fuzzyTextRaw);
+    const fuzzyText = filterByContext(fuzzyTextRaw);
     if (fuzzyText.length >= 1) {
       const best = pickByCoords(fuzzyText, target) ?? fuzzyText[0];
       return { kind: 'moved', el: best, rects: rectsFor(best, target.textAnchor) };
@@ -101,15 +151,28 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
   //    so the captured selector + container both miss.
   if (target.textAnchor?.phrase) {
     const wide = findPhraseAnywhere(target.textAnchor);
-    if (wide) {
+    if (wide && isVisible(wide.el) && (!target.viewContext || viewContextMatches(wide.el, target.viewContext))) {
       return { kind: 'moved', el: wide.el, rects: wide.rects };
+    }
+    if (wide && target.viewContext && !viewContextMatches(wide.el, target.viewContext)) {
+      sawForeignViewCandidates = true;
     }
   }
 
   // 7. Coord-based fallback (existing behavior)
   const atCoords = elementAtScaledCoords(target);
-  if (atCoords) return { kind: 'moved', el: atCoords, rects: rectsFor(atCoords, target.textAnchor) };
+  if (atCoords && (!target.viewContext || viewContextMatches(atCoords, target.viewContext))) {
+    return { kind: 'moved', el: atCoords, rects: rectsFor(atCoords, target.textAnchor) };
+  }
+  if (atCoords && target.viewContext && !viewContextMatches(atCoords, target.viewContext)) {
+    sawForeignViewCandidates = true;
+  }
 
+  // Nothing matched in the current view. If we saw matches in OTHER views
+  // (different tab, different wizard step), the anchor isn't lost — just
+  // currently hidden. Tell the caller so the comment stays in the inbox
+  // without polluting the orphan tray.
+  if (sawForeignViewCandidates) return { kind: 'wrong-view' };
   return { kind: 'lost-anchor' };
 }
 
@@ -415,6 +478,114 @@ function findPhraseAnywhere(anchor: TextAnchor): { el: Element; rects: DOMRect[]
     ? (container as Element)
     : container.parentElement) ?? document.body;
   return { el, rects: rects.length > 0 ? rects : [range.getBoundingClientRect()] };
+}
+
+// Visibility — drop elements that aren't actually rendered. Caught:
+//   - display:none (rect is 0×0)
+//   - detached from DOM (rect is 0×0)
+//   - hidden attribute (rect is 0×0 via the UA stylesheet)
+// Not caught: visibility:hidden (element still occupies layout space).
+// That's intentional — tab UIs almost never use visibility:hidden for
+// panels, and dropping otherwise-visible elements based on a CSS property
+// is more brittle than useful.
+function isVisible(el: Element): boolean {
+  if (el.closest('[data-margo]')) return false; // never anchor onto our own UI
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+}
+
+// Compare the candidate's live ancestor chain against a captured ViewContext.
+// Returns true when:
+//   - the captured panel (tabpanel/dialog/region) is reachable from the
+//     candidate AND its label matches (or its id, as a weaker fallback), AND
+//   - every state attribute captured on an ancestor of the original element
+//     is still set to the same value somewhere up the candidate's chain.
+//
+// Permissive by design: missing signals are treated as "doesn't disqualify"
+// rather than "doesn't match", because the live DOM may not reproduce every
+// signal we captured (an aria-expanded ancestor might collapse, etc.). We
+// only reject when a captured signal contradicts the live one.
+function viewContextMatches(el: Element, ctx: ViewContext): boolean {
+  // Panel check — most discriminating signal when present.
+  if (ctx.panel) {
+    const want = ctx.panel;
+    // The panel ancestor we're looking for: same role, ideally same id or
+    // labelledBy or resolved label.
+    let panelMatch = false;
+    let cur: Element | null = el;
+    while (cur && cur !== document.body) {
+      const role = cur.getAttribute('role');
+      if (role && (want.role ? role === want.role : true)) {
+        const id = (cur as HTMLElement).id;
+        const labelledBy = cur.getAttribute('aria-labelledby');
+        let liveLabel: string | undefined;
+        if (labelledBy) {
+          const labelEl = cur.ownerDocument?.getElementById(labelledBy);
+          liveLabel = labelEl?.textContent?.trim() || undefined;
+        }
+        const matchById = !!want.id && !!id && id === want.id;
+        const matchByLabelledBy = !!want.labelledBy && !!labelledBy && labelledBy === want.labelledBy;
+        const matchByLabel = !!want.label && !!liveLabel && liveLabel === want.label;
+        if (matchById || matchByLabelledBy || matchByLabel) {
+          panelMatch = true;
+          break;
+        }
+        // Same role but different identity — a sibling panel. Keep walking
+        // up in case there's a nesting (panel-in-dialog etc.); if none, the
+        // outer loop will eventually fall off the document.
+      }
+      cur = cur.parentElement;
+    }
+    if (!panelMatch) return false;
+  }
+
+  // State check — every captured attribute must surface with the same value
+  // somewhere on the ancestor chain. Missing the attribute entirely is also
+  // a fail (the captured state has been lost).
+  if (ctx.state) {
+    for (const [attr, want] of Object.entries(ctx.state)) {
+      let found = false;
+      let cur: Element | null = el;
+      while (cur && cur !== document.body) {
+        const v = cur.getAttribute(attr);
+        if (v === want) { found = true; break; }
+        cur = cur.parentElement;
+      }
+      if (!found) return false;
+    }
+  }
+
+  // Heading is a last-resort, weak signal. Don't reject solely because the
+  // heading drifted — accept the match if panel + state passed (or were
+  // absent). This lets copy edits to nearby headings not break anchoring,
+  // while still letting heading text serve as the discriminator when it's
+  // the only thing captured (no panel, no state).
+  if (!ctx.panel && !ctx.state && ctx.nearestHeading) {
+    const live = findNearestHeadingText(el);
+    if (live && live !== ctx.nearestHeading) return false;
+  }
+  return true;
+}
+
+function findNearestHeadingText(el: Element): string | undefined {
+  let cur: Element | null = el;
+  while (cur && cur !== document.body) {
+    let sib: Element | null = cur.previousElementSibling;
+    while (sib) {
+      if (/^H[1-6]$/.test(sib.tagName)) {
+        const t = sib.textContent?.trim().replace(/\s+/g, ' ');
+        if (t) return t.length > 80 ? t.slice(0, 77) + '...' : t;
+      }
+      const inner = sib.querySelector('h1, h2, h3, h4, h5, h6');
+      if (inner) {
+        const t = inner.textContent?.trim().replace(/\s+/g, ' ');
+        if (t) return t.length > 80 ? t.slice(0, 77) + '...' : t;
+      }
+      sib = sib.previousElementSibling;
+    }
+    cur = cur.parentElement;
+  }
+  return undefined;
 }
 
 function pickByCoords(candidates: Element[], target: Target): Element | null {
