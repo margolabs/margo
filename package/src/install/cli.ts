@@ -29,7 +29,7 @@ async function main(): Promise<void> {
   const cmd = process.argv[2] ?? 'init';
   // Always operate on the git repo root, not the cwd. In a monorepo, running
   // `margo init` from `apps/web/` would otherwise drop `.margo/` and the
-  // `.claude/skills/margo.md` skill into the subdir — comments would still
+  // `.claude/skills/margo/` skill into the subdir — comments would still
   // get committed but be invisible to teammates using sparse checkouts, and
   // Claude Code wouldn't register `/margo` as a workspace-level slash
   // command. Always anchor at the repo root for consistency.
@@ -57,7 +57,7 @@ async function main(): Promise<void> {
  * margo's storage model assumes `.margo/comments/*.md` is at a single
  * stable location synced by git pull/push. Installing in a subdirectory
  * surfaces three symptoms:
- *   - `.claude/skills/margo.md` nested under `<repo>/apps/web/.claude/`
+ *   - `.claude/skills/margo/SKILL.md` nested under `<repo>/apps/web/.claude/`
  *     isn't picked up as a workspace slash command (Claude Code looks
  *     at the workspace root)
  *   - teammates with sparse checkouts of only the root miss the comments
@@ -88,13 +88,20 @@ export async function resolveInstallRoot(cwd: string): Promise<string> {
 
 async function init(cwd: string, opts: { overwriteTemplates?: boolean } = {}): Promise<void> {
   const margoDir = path.join(cwd, '.margo');
-  const claudeSkillsDir = path.join(cwd, '.claude', 'skills');
+  // Claude Code skills register from a per-skill DIRECTORY containing a
+  // SKILL.md file (`.claude/skills/<name>/SKILL.md`), not from a flat
+  // `<name>.md` file. The flat form is silently ignored — the skill won't
+  // appear as a slash command. Discovery is live; once the file is at
+  // the right path the user gets `/margo` without restarting their
+  // Claude Code session.
+  const claudeSkillDir = path.join(cwd, '.claude', 'skills', 'margo');
   await fs.mkdir(path.join(margoDir, 'comments'), { recursive: true });
-  await fs.mkdir(claudeSkillsDir, { recursive: true });
+  await fs.mkdir(claudeSkillDir, { recursive: true });
 
   await copyTemplate('config.json', path.join(margoDir, 'config.json'), opts.overwriteTemplates);
   await copyTemplate('CLAUDE.md', path.join(margoDir, 'CLAUDE.md'), opts.overwriteTemplates);
-  await copyTemplate('claude-skill.md', path.join(claudeSkillsDir, 'margo.md'), opts.overwriteTemplates);
+  await copyTemplate('claude-skill.md', path.join(claudeSkillDir, 'SKILL.md'), opts.overwriteTemplates);
+  await migrateLegacySkillPath(cwd);
   await ensureGitkeep(path.join(margoDir, 'comments'));
 
   await ensureRootClaudeBlock(cwd);
@@ -115,7 +122,31 @@ async function uninstall(cwd: string): Promise<void> {
   await removeRootClaudeBlock(cwd);
   // We deliberately do NOT delete .margo/ — comment history may still be wanted.
   console.log('[margo] removed root CLAUDE.md block. .margo/ left in place.');
-  console.log('       To remove fully: `rm -r .margo .claude/skills/margo.md` and uninstall the package.');
+  console.log('       To remove fully: `rm -r .margo .claude/skills/margo` and uninstall the package.');
+}
+
+/**
+ * Older versions of `margo init` (≤ 0.0.6) wrote the Claude Code skill to
+ * the flat path `.claude/skills/margo.md`. Claude Code only registers
+ * skills from per-skill directories (`.claude/skills/<name>/SKILL.md`),
+ * so the flat file silently fails to appear as a slash command. On every
+ * init/update, sweep any stale flat file aside so `/margo` actually shows
+ * up. Best-effort: errors are swallowed (the user might not have the old
+ * file at all, or might have removed it manually).
+ */
+async function migrateLegacySkillPath(cwd: string): Promise<void> {
+  const legacy = path.join(cwd, '.claude', 'skills', 'margo.md');
+  try {
+    await fs.access(legacy);
+  } catch {
+    return;
+  }
+  try {
+    await fs.unlink(legacy);
+    console.log('[margo] removed legacy .claude/skills/margo.md — superseded by .claude/skills/margo/SKILL.md');
+  } catch {
+    // ignore — user may have read-only filesystem or permissions issue
+  }
 }
 
 async function copyTemplate(name: string, dest: string, overwrite = false): Promise<void> {
