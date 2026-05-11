@@ -189,7 +189,12 @@ async function patchNextProject(cwd: string, overwrite = false): Promise<void> {
 
 const NEXT_ROUTE_FILE = `// Catch-all Route Handler for margo's /__margo/* surface (App Router).
 // All four methods point to the same dispatcher; it inspects path + method.
-import { handlers } from 'margo-dev/next';
+//
+// Imported from 'margo-dev/next/server' (not 'margo-dev/next') because
+// withMargo() externalizes that exact subpath via serverExternalPackages.
+// The umbrella 'margo-dev/next' must stay bundleable so <MargoScript />
+// resolves React to next/dist/compiled/react.
+import { handlers } from 'margo-dev/next/server';
 
 export const { GET, POST, PATCH, DELETE } = handlers;
 
@@ -260,18 +265,21 @@ async function patchNextLayout(cwd: string, appRoot: string): Promise<void> {
   }
   if (!target) {
     console.log(`[margo] no ${appRoot}/layout.* found — add manually to your root layout:`);
-    console.log("       import { MargoScript } from 'margo-dev/next';");
+    console.log("       import { MargoScript } from 'margo-dev/next/client-script';");
     console.log('       <body>{children}<MargoScript /></body>');
     return;
   }
   const original = await fs.readFile(target, 'utf8');
-  if (original.includes('margo-dev/next') || original.includes('MargoScript')) return;
+  if (original.includes('margo-dev/next/client-script') || original.includes('MargoScript')) return;
 
   // Add the import after the last existing import line.
   const importLines = [...original.matchAll(/^import .+;$/gm)];
   const lastImport = importLines[importLines.length - 1];
   let next = original;
-  const importStmt = `import { MargoScript } from 'margo-dev/next';`;
+  // Use the dedicated client-script subpath, NOT 'margo-dev/next'. The
+  // umbrella stays bundleable today, but pinning the subpath here makes
+  // the intent explicit and survives future changes to the umbrella.
+  const importStmt = `import { MargoScript } from 'margo-dev/next/client-script';`;
   if (lastImport && lastImport.index !== undefined) {
     const end = lastImport.index + lastImport[0].length;
     next = original.slice(0, end) + `\n${importStmt}` + original.slice(end);

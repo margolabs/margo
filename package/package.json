@@ -1,6 +1,6 @@
 {
   "name": "margo-dev",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Live-app feedback layer for AI-coding teams. Comments live as files in your repo; AI works through them.",
   "author": "Stanley Song <sxhuan@gmail.com>",
   "homepage": "https://gitlab.com/metaleap/margo#readme",
@@ -31,6 +31,16 @@
       "types": "./dist/plugin/next.d.ts",
       "import": "./dist/plugin/next.js",
       "default": "./dist/plugin/next.js"
+    },
+    "./next/server": {
+      "types": "./next/server/index.d.ts",
+      "import": "./next/server/index.js",
+      "default": "./next/server/index.js"
+    },
+    "./next/client-script": {
+      "types": "./next/client-script/index.d.ts",
+      "import": "./next/client-script/index.js",
+      "default": "./next/client-script/index.js"
     }
   },
   "bin": {
@@ -38,10 +48,11 @@
   },
   "files": [
     "dist",
+    "next",
     "src/templates"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-overlay.mjs",
+    "build": "tsc -p tsconfig.json && node scripts/copy-overlay.mjs && node scripts/build-subpath-shims.mjs",
     "dev": "tsc -w -p tsconfig.json",
     "test": "vitest",
     "prepublishOnly": "npm run build"
