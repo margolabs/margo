@@ -12,14 +12,16 @@ import { withMargo } from '../next-config.js';
 import { MargoScript } from '../next-client-script.js';
 import { handlers } from '../next-server.js';
 
-describe('withMargo — serverExternalPackages scoped to the server subpath', () => {
-  it("adds 'margo-dev/next/server', NOT the whole 'margo-dev' package", () => {
+describe('withMargo — serverExternalPackages externalizes chokidar only', () => {
+  it("adds 'chokidar' — NOT the whole 'margo-dev' package, NOT a margo subpath", () => {
     const out = withMargo({});
-    expect(out.serverExternalPackages).toContain('margo-dev/next/server');
-    // The whole-package form was the bug — externalizing it caught MargoScript
-    // and triggered the React-duplication SSR error. Make sure we don't
-    // accidentally regress to it.
+    expect(out.serverExternalPackages).toContain('chokidar');
+    // The original bug was externalizing 'margo-dev' itself, which caught
+    // MargoScript and triggered the React-duplication SSR error.
     expect(out.serverExternalPackages).not.toContain('margo-dev');
+    // No margo subpath should be externalized either — Turbopack's path-based
+    // matching doesn't cooperate with nested subpath keys anyway.
+    expect(out.serverExternalPackages!.some((p) => p.startsWith('margo-dev/'))).toBe(false);
   });
 
   it('preserves the user-supplied serverExternalPackages', () => {
@@ -27,14 +29,14 @@ describe('withMargo — serverExternalPackages scoped to the server subpath', ()
     expect(out.serverExternalPackages).toEqual([
       'better-sqlite3',
       '@prisma/client',
-      'margo-dev/next/server',
+      'chokidar',
     ]);
   });
 
   it('is idempotent — calling withMargo twice does not duplicate the entry', () => {
     const once = withMargo({});
     const twice = withMargo(once);
-    const occurrences = twice.serverExternalPackages!.filter((p) => p === 'margo-dev/next/server').length;
+    const occurrences = twice.serverExternalPackages!.filter((p) => p === 'chokidar').length;
     expect(occurrences).toBe(1);
   });
 

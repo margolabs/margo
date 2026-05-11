@@ -9,7 +9,7 @@
 //
 //   // next.config.ts
 //   import type { NextConfig } from 'next';
-//   import { withMargo } from 'margo-dev/next/config';
+//   import { withMargo } from 'margo-dev/next-config';
 //
 //   const nextConfig: NextConfig = { /* your stuff */ };
 //   export default withMargo(nextConfig);
@@ -38,31 +38,39 @@ const MARGO_REWRITE: NextRewrite = {
   destination: '/margo-runtime/:path*',
 };
 
-// Only the server subpath is externalized — never the whole 'margo-dev'
-// package. Externalizing the whole package also caught margo-dev/next
-// (the umbrella) and margo-dev/next/client-script, forcing <MargoScript />
-// to resolve `react` from node_modules/react while Next SSR uses
-// next/dist/compiled/react. Two React instances collided and SSR threw
-// "A React Element from an older version of React was rendered."
+// Externalize chokidar specifically — NOT the whole 'margo-dev' package.
 //
-// Next matches serverExternalPackages entries against the resolved
-// file path with a regex like [/\\]node_modules[/\\]margo-dev[/\\]next[/\\]server[/\\]
-// (see next/dist/build/webpack-config.js — optOutBundlingPackageRegex).
-// To make that match work, the build emits a thin shim at
-// node_modules/margo-dev/next/server/index.js that re-exports the real
-// compiled module from dist/ — see scripts/build-subpath-shims.mjs.
-// Only the entry path needs to match; transitive imports inside an
-// externalized module are resolved by Node at runtime, not by webpack.
-const MARGO_SERVER_PACKAGE = 'margo-dev/next/server';
+// Earlier versions did `serverExternalPackages: ['margo-dev']`, which
+// externalized <MargoScript /> too. Externalized modules resolve their own
+// dependencies — including `react` — against the package's own node_modules,
+// while Next SSR uses next/dist/compiled/react. Two React instances collided
+// and SSR threw "A React Element from an older version of React was rendered."
+//
+// The reason externalization existed at all was chokidar's optional native
+// dep (fsevents.node on macOS) — webpack bundles the binary as raw bytes and
+// fails with "ModuleParseError: Unexpected character". Externalizing chokidar
+// directly (not the whole margo-dev) keeps that binary out of the bundle
+// without touching any React-bearing code in margo. Turbopack is fine with
+// chokidar bundled, but webpack mode needs this.
+const EXTERNALIZED: readonly string[] = ['chokidar'];
 
-export function withMargo<T extends MinimalNextConfig>(config: T = {} as T): T {
+// Return type explicitly merges in the properties we always set, so callers
+// like withMargo({}) get a result whose `serverExternalPackages` and
+// `rewrites` fields are visible to the type system rather than narrowed away.
+type WithMargoResult<T extends MinimalNextConfig> = T & {
+  serverExternalPackages: string[];
+  rewrites: NonNullable<MinimalNextConfig['rewrites']>;
+};
+
+export function withMargo<T extends MinimalNextConfig>(config: T = {} as T): WithMargoResult<T> {
   // Preserve any external packages the user already configured; only add
-  // ours if it's missing. Same for the rewrite — wrapped via composition
-  // so the user's own rewrites still run.
+  // ours if missing. Same for the rewrite — composed so the user's own
+  // rewrites still run.
   const userExternals = config.serverExternalPackages ?? [];
-  const serverExternalPackages = userExternals.includes(MARGO_SERVER_PACKAGE)
-    ? userExternals
-    : [...userExternals, MARGO_SERVER_PACKAGE];
+  const serverExternalPackages = [
+    ...userExternals,
+    ...EXTERNALIZED.filter((p) => !userExternals.includes(p)),
+  ];
 
   const userRewrites = config.rewrites;
   const rewrites: MinimalNextConfig['rewrites'] = async () => {

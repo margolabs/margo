@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { MargoScript } from "margo-dev/next/client-script";
+import { MargoScript } from "margo-dev/next-client-script";
 import { Nav } from "./components/Nav";
 
 const geistSans = Geist({

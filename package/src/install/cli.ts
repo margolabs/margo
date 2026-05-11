@@ -190,11 +190,11 @@ async function patchNextProject(cwd: string, overwrite = false): Promise<void> {
 const NEXT_ROUTE_FILE = `// Catch-all Route Handler for margo's /__margo/* surface (App Router).
 // All four methods point to the same dispatcher; it inspects path + method.
 //
-// Imported from 'margo-dev/next/server' (not 'margo-dev/next') because
-// withMargo() externalizes that exact subpath via serverExternalPackages.
-// The umbrella 'margo-dev/next' must stay bundleable so <MargoScript />
-// resolves React to next/dist/compiled/react.
-import { handlers } from 'margo-dev/next/server';
+// Imported from 'margo-dev/next-server' (not 'margo-dev/next'). The umbrella
+// re-exports MargoScript + withMargo only; pulling handlers through it would
+// drag chokidar through Next's compiled bundle for callers that don't need
+// the route handler.
+import { handlers } from 'margo-dev/next-server';
 
 export const { GET, POST, PATCH, DELETE } = handlers;
 
@@ -216,7 +216,7 @@ async function patchNextConfig(cwd: string): Promise<void> {
   }
   if (!target) {
     console.log('[margo] no next.config.* found — add this to your config:');
-    console.log("       import { withMargo } from 'margo-dev/next';");
+    console.log("       import { withMargo } from 'margo-dev/next-config';");
     console.log('       export default withMargo(nextConfig);');
     return;
   }
@@ -229,7 +229,7 @@ async function patchNextConfig(cwd: string): Promise<void> {
   const exportMatch = original.match(/export\s+default\s+([^;\n]+);?/);
   if (!exportMatch || exportMatch.index === undefined) {
     console.log(`[margo] could not auto-wrap ${target}.`);
-    console.log("       Add: import { withMargo } from 'margo-dev/next/config';");
+    console.log("       Add: import { withMargo } from 'margo-dev/next-config';");
     console.log('       And change `export default nextConfig;` to `export default withMargo(nextConfig);`');
     return;
   }
@@ -238,7 +238,7 @@ async function patchNextConfig(cwd: string): Promise<void> {
 
   // Insert our import after the last existing import line, or at the top
   // if there are none.
-  const importStmt = `import { withMargo } from 'margo-dev/next';`;
+  const importStmt = `import { withMargo } from 'margo-dev/next-config';`;
   const importLines = [...original.matchAll(/^import .+;$/gm)];
   const lastImport = importLines[importLines.length - 1];
   let next: string;
@@ -265,21 +265,22 @@ async function patchNextLayout(cwd: string, appRoot: string): Promise<void> {
   }
   if (!target) {
     console.log(`[margo] no ${appRoot}/layout.* found — add manually to your root layout:`);
-    console.log("       import { MargoScript } from 'margo-dev/next/client-script';");
+    console.log("       import { MargoScript } from 'margo-dev/next-client-script';");
     console.log('       <body>{children}<MargoScript /></body>');
     return;
   }
   const original = await fs.readFile(target, 'utf8');
-  if (original.includes('margo-dev/next/client-script') || original.includes('MargoScript')) return;
+  if (original.includes('margo-dev/next-client-script') || original.includes('MargoScript')) return;
 
   // Add the import after the last existing import line.
   const importLines = [...original.matchAll(/^import .+;$/gm)];
   const lastImport = importLines[importLines.length - 1];
   let next = original;
-  // Use the dedicated client-script subpath, NOT 'margo-dev/next'. The
-  // umbrella stays bundleable today, but pinning the subpath here makes
-  // the intent explicit and survives future changes to the umbrella.
-  const importStmt = `import { MargoScript } from 'margo-dev/next/client-script';`;
+  // Use the dedicated -client-script subpath rather than the umbrella.
+  // The umbrella works too (it re-exports MargoScript), but pinning the
+  // subpath makes the intent explicit and gives Turbopack the simplest
+  // possible resolution.
+  const importStmt = `import { MargoScript } from 'margo-dev/next-client-script';`;
   if (lastImport && lastImport.index !== undefined) {
     const end = lastImport.index + lastImport[0].length;
     next = original.slice(0, end) + `\n${importStmt}` + original.slice(end);

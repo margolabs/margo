@@ -2,17 +2,14 @@
 // Emits a single <script type="module"> that lazy-imports the overlay bundle
 // from /__margo/overlay.js. Renders null in production unless MARGO_ENABLED=1.
 //
-// This module lives at margo-dev/next/client-script (not margo-dev/next or
-// margo-dev/next/server) for a specific reason: withMargo() externalizes
-// margo-dev/next/server via Next.js's serverExternalPackages so chokidar/git
-// can do `require()` at runtime instead of being bundled. But externalized
-// modules resolve their own dependencies — including `react` — against the
-// package's own node_modules, while Next's SSR pipeline uses
-// next/dist/compiled/react. Two React instances collide and SSR throws
-// digest:'…' / "A React Element from an older version of React was rendered."
-//
-// Keeping MargoScript in a sibling subpath that is NOT externalized lets
-// Next bundle it normally, so its `react` import resolves to the same
+// Lives at margo-dev/next-client-script (separate subpath from the route
+// handler at margo-dev/next-server). The earlier React-instance bug came
+// from packing everything under one externalized export — the externalized
+// React component resolved `react` from the package's own node_modules
+// while Next SSR used next/dist/compiled/react, causing every page render
+// to throw "A React Element from an older version of React was rendered."
+// Keeping the component in its own subpath ensures it's bundled by Next
+// (not externalized) and so its `react` import resolves to the same
 // compiled React Next is using for rendering.
 
 import { createElement, type ReactElement } from 'react';

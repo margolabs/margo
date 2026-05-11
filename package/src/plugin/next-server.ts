@@ -3,17 +3,17 @@
 // SSE stream, and overlay-bundle static asset.
 //
 // This file is intentionally React-free. The <MargoScript /> component lives
-// at margo-dev/next/client-script so Next.js can bundle it normally (and
-// thereby resolve `react` to next/dist/compiled/react, the version SSR uses).
-// If React were imported from here, then withMargo's externalization of this
-// subpath would force `react` to resolve against margo-dev's own node_modules
-// — two React instances, and SSR throws "A React Element from an older
-// version of React was rendered."
+// at margo-dev/next-client-script — a separate subpath export — so that any
+// future externalization rules on the server module never sweep React along
+// with them. The original Next-integration bug was exactly that: an
+// externalized server module pulled `react` from its own node_modules while
+// Next SSR used next/dist/compiled/react, and the two React instances
+// collided on every page render.
 //
 // Usage:
 //
 //   // app/margo-runtime/[[...path]]/route.ts (init CLI creates this)
-//   import { handlers } from 'margo-dev/next/server';
+//   import { handlers } from 'margo-dev/next-server';
 //   export const { GET, POST, PATCH, DELETE } = handlers;
 //   export const runtime = 'nodejs';
 //   export const dynamic = 'force-dynamic';
