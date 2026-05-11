@@ -228,17 +228,40 @@ export function start(opts: StartOptions): void {
   if (typeof ResizeObserver !== 'undefined') {
     new ResizeObserver(schedule).observe(document.documentElement);
   }
-  // Catch DOM mutations (font load, async content) that change phrase positions.
+  // Catch DOM mutations (font load, async content, tab/wizard panel swaps)
+  // that change phrase positions or which view is currently shown. We watch
+  // attribute changes too — toggling `hidden`, `aria-selected`, `aria-current`,
+  // `aria-expanded`, `data-state`, `style`, or `class` is how almost every
+  // tab/wizard/accordion UI signals a view change, and those are attribute
+  // mutations (no children added/removed). Without attributes:true the pin
+  // resolver never re-fires after the user clicks a tab, and the stale
+  // "previous view" pin stays drawn forever.
+  //
   // Skip mutations inside the overlay itself, otherwise rendering pins triggers
   // the observer and we infinite-loop.
+  const RELEVANT_ATTRS = [
+    'hidden', 'aria-selected', 'aria-current', 'aria-expanded',
+    'aria-hidden', 'aria-pressed', 'data-state', 'data-step',
+    'style', 'class',
+  ];
   new MutationObserver((records) => {
     for (const m of records) {
       const t = m.target as Node;
       if (t.nodeType === Node.ELEMENT_NODE && (t as Element).closest('[data-margo]')) continue;
+      // For attribute changes, only react to ones that plausibly affect
+      // visibility / which view is active. Otherwise every focus ring or
+      // input event would re-render pins.
+      if (m.type === 'attributes' && (!m.attributeName || !RELEVANT_ATTRS.includes(m.attributeName))) continue;
       schedule();
       return;
     }
-  }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  }).observe(document.body, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: RELEVANT_ATTRS,
+  });
 
   if (opts.mode === 'dev') {
     enablePinComposer(root, sync, renderPins);

@@ -70,14 +70,30 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
     }
     return out;
   };
-  // True when the only candidates we found live in a different view than
-  // the comment was pinned on. Used to short-circuit later resolution steps
-  // and report 'wrong-view' instead of 'lost-anchor'.
+  // Two signals that the comment belongs to a view that isn't currently
+  // shown — both should report 'wrong-view' instead of 'lost-anchor' so
+  // the inbox keeps the comment as a normal entry rather than orphaning it:
+  //
+  //   1. A candidate is visible but doesn't match the captured viewContext
+  //      (some other view is currently active in the same slot).
+  //   2. A candidate matches the captured viewContext but is hidden (the
+  //      captured view is in the DOM but the user has navigated away from
+  //      it — e.g. switched to a different tab, advanced the wizard, etc).
+  //      This was the missing case: with the captured panel hidden, the
+  //      visibility filter zeroed the candidate pool and the resolver
+  //      fell through to 'lost-anchor', causing the inbox to mark the
+  //      comment as orphaned even though its anchor was perfectly fine.
   let sawForeignViewCandidates = false;
   const noteForeignView = (els: Element[]) => {
     if (!target.viewContext) return;
-    if (els.some((el) => isVisible(el) && !viewContextMatches(el, target.viewContext!))) {
-      sawForeignViewCandidates = true;
+    if (sawForeignViewCandidates) return;
+    for (const el of els) {
+      const matches = viewContextMatches(el, target.viewContext);
+      const visible = isVisible(el);
+      if ((matches && !visible) || (!matches && visible)) {
+        sawForeignViewCandidates = true;
+        return;
+      }
     }
   };
 
@@ -481,15 +497,41 @@ function findPhraseAnywhere(anchor: TextAnchor): { el: Element; rects: DOMRect[]
 }
 
 // Visibility — drop elements that aren't actually rendered. Caught:
-//   - display:none (rect is 0×0)
+//   - display:none on the element itself or any ancestor (offsetParent === null
+//     when the element or an ancestor is display:none, except for fixed-position
+//     and body, both of which we handle below)
+//   - the `hidden` HTML attribute on the element or any ancestor (browsers
+//     style [hidden] { display: none }, but checking the attribute is more
+//     robust than waiting on a getBoundingClientRect that might still be
+//     populated from a previous layout pass — observed in Chrome + Turbopack
+//     when toggling tab panels via React state)
 //   - detached from DOM (rect is 0×0)
-//   - hidden attribute (rect is 0×0 via the UA stylesheet)
-// Not caught: visibility:hidden (element still occupies layout space).
-// That's intentional — tab UIs almost never use visibility:hidden for
-// panels, and dropping otherwise-visible elements based on a CSS property
-// is more brittle than useful.
+// Not caught: visibility:hidden (element still occupies layout space) and
+// `aria-hidden="true"`, which is a semantic signal that doesn't necessarily
+// imply the element is invisible to sighted users. Tab UIs almost never use
+// either for hiding panel content.
 function isVisible(el: Element): boolean {
   if (el.closest('[data-margo]')) return false; // never anchor onto our own UI
+  // Walk the ancestor chain once, checking every signal that means
+  // "this element isn't shown to the user." Stop at body. We have to walk
+  // explicitly (instead of relying on closest('[hidden]') + a single
+  // getComputedStyle on `el`) because:
+  //   - closest('[hidden]') only sees the HTML attribute, not the JS
+  //     `hidden` property if a framework set it without reflecting.
+  //   - getComputedStyle on `el` returns the element's own display, which
+  //     can be 'block' even when an ancestor is display:none — the element
+  //     simply doesn't render in that case. Walking ancestors catches it.
+  let cur: Element | null = el;
+  while (cur && cur !== document.body) {
+    if ((cur as HTMLElement).hidden) return false;
+    const win = cur.ownerDocument?.defaultView;
+    if (win) {
+      const cs = win.getComputedStyle(cur);
+      if (cs.display === 'none') return false;
+      if (cs.visibility === 'hidden' || cs.visibility === 'collapse') return false;
+    }
+    cur = cur.parentElement;
+  }
   const r = el.getBoundingClientRect();
   return r.width > 0 && r.height > 0;
 }

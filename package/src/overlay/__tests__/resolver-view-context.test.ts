@@ -163,6 +163,75 @@ describe('resolveTarget — tab/wizard disambiguation', () => {
     }
   });
 
+  it('repro: both panels in DOM, inactive uses [hidden]; pin must not surface on the visible panel', () => {
+    // Mirrors the demo-nextjs /tabs-test page after the user clicks
+    // Features. Plans panel is still in the DOM, just `hidden`. Features
+    // panel is visible. Both panels' middle cards have a button labeled
+    // "Start free trial" — which is a substring of the captured Team card
+    // textContent. That substring overlap was triggering the coord
+    // fallback's hasTextualRelation() check and resolving the pin onto
+    // the visible Features → Reports card.
+    document.body.innerHTML = `
+      <div role="tablist">
+        <button id="tab-plans" role="tab">Plans</button>
+        <button id="tab-features" role="tab">Features</button>
+      </div>
+      <div role="tabpanel" id="panel-plans" aria-labelledby="tab-plans" hidden>
+        <section>
+          <article data-testid="plans-starter"><h2>Starter</h2><p>$0</p><button>Start free</button></article>
+          <article data-testid="plans-team"><h2>Team</h2><p>$12/seat / mo</p><ul><li>Unlimited seats</li><li>SSO + audit log</li><li>Priority support</li></ul><button>Start free trial</button></article>
+          <article data-testid="plans-enterprise"><h2>Enterprise</h2><p>Custom</p><button>Talk to sales</button></article>
+        </section>
+      </div>
+      <div role="tabpanel" id="panel-features" aria-labelledby="tab-features">
+        <section>
+          <article data-testid="features-billing"><h2>Billing</h2><p>Auto</p><button>Start free</button></article>
+          <article data-testid="features-reports"><h2>Reports</h2><p>Weekly summaries</p><ul><li>Email digests</li><li>Trend charts</li><li>Export CSV</li></ul><button>Start free trial</button></article>
+          <article data-testid="features-integrations"><h2>Integrations</h2><p>Custom</p><button>Talk to sales</button></article>
+        </section>
+      </div>
+    `;
+    // Hidden panel: zero out every descendant's rect (mirrors UA stylesheet
+    // applying display:none from the hidden attribute).
+    for (const el of Array.from(document.querySelector('[hidden]')!.querySelectorAll('*'))) {
+      (el as HTMLElement).getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
+    }
+    (document.querySelector('[hidden]') as HTMLElement).getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
+    // Visible panel: each card gets a real rect.
+    makeVisible(document.getElementById('panel-features')!, { x: 0, y: 100, w: 1200, h: 400 });
+    for (const a of Array.from(document.querySelectorAll('#panel-features article'))) {
+      (a as HTMLElement).getBoundingClientRect = () => new DOMRect(400, 200, 300, 200);
+      // Buttons inside Features → Reports must be hit-testable at the captured coords.
+      const btn = a.querySelector('button');
+      if (btn) (btn as HTMLElement).getBoundingClientRect = () => new DOMRect(500, 350, 120, 36);
+    }
+    // happy-dom doesn't implement layout, so document.elementFromPoint is a
+    // no-op by default. In a real browser, the captured coords (which after
+    // scaling land roughly over the Features → Reports button "Start free
+    // trial") would hit that button, and hasTextualRelation would see
+    // "Start free trial" as a substring of the captured Team card text —
+    // tripping the coord fallback. Mirror that here so we exercise the
+    // path that was actually triggering the bug in the live demo.
+    const reportsButton = document.querySelector('#panel-features article[data-testid="features-reports"] button');
+    (document as Document & { elementFromPoint: typeof document.elementFromPoint }).elementFromPoint = () => reportsButton ?? null;
+
+    // The actual target captured from the user's pin on Plans → Team:
+    const target = {
+      url: 'http://localhost/tabs-test',
+      selector: 'div#panel-plans > section:nth-of-type(1) > article[data-testid="plans-team"]',
+      text: 'Team$12/seat / moUnlimited seatsSSO + audit logPriority supportStart free trial',
+      role: 'article',
+      viewport: { w: 2560, h: 1318 },
+      coords: { x: 1390, y: 321 },
+      viewContext: {
+        panel: { role: 'tabpanel', id: 'panel-plans', labelledBy: 'tab-plans', label: 'Plans' },
+        nearestHeading: 'Starter',
+      },
+    };
+    const result = resolveTarget(target, 'http://localhost/tabs-test');
+    expect(result.kind).toBe('wrong-view');
+  });
+
   it('hides pins on display:none panels even when selectors match', () => {
     document.body.innerHTML = `
       <div role="tabpanel" id="panel-a" aria-labelledby="tab-a">
@@ -212,6 +281,49 @@ describe('resolveTarget — tab/wizard disambiguation', () => {
     delete (target as Partial<typeof target>).viewContext;
     const result = resolveTarget(target, URL_HERE);
     expect(result.kind).toBe('exact');
+  });
+
+  it('returns wrong-view (not lost-anchor) when the captured panel is hidden — even with no foreign-view candidates', () => {
+    // Regression for the inbox-orphan bug: when the captured panel is the
+    // only place the selector matches, AND it's currently hidden, the
+    // visibility filter zeroed the candidate pool and the resolver fell
+    // through to 'lost-anchor', which the inbox treats as orphaned. The
+    // anchor is fine — the user has just navigated to a different view.
+    document.body.innerHTML = `
+      <div role="tablist">
+        <button id="tab-plans" role="tab" aria-selected="false">Plans</button>
+        <button id="tab-features" role="tab" aria-selected="true">Features</button>
+      </div>
+      <div role="tabpanel" id="panel-plans" aria-labelledby="tab-plans" hidden>
+        <article data-testid="plans-team"><h2>Team</h2><button>Start free trial</button></article>
+      </div>
+      <div role="tabpanel" id="panel-features" aria-labelledby="tab-features">
+        <article data-testid="features-reports"><h2>Reports</h2><button>Different copy</button></article>
+      </div>
+    `;
+    // Plans panel hidden: zero rects everywhere inside.
+    for (const el of Array.from(document.querySelector('#panel-plans')!.querySelectorAll('*'))) {
+      (el as HTMLElement).getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
+    }
+    (document.getElementById('panel-plans') as HTMLElement).getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
+    makeVisible(document.getElementById('panel-features')!, { x: 0, y: 100, w: 800, h: 400 });
+
+    const target = {
+      url: 'http://localhost/tabs-test',
+      selector: 'div#panel-plans > article[data-testid="plans-team"]',
+      text: 'Team Start free trial',
+      role: 'article',
+      viewport: { w: 1440, h: 900 },
+      coords: { x: 500, y: 300 },
+      viewContext: {
+        panel: { role: 'tabpanel', id: 'panel-plans', labelledBy: 'tab-plans', label: 'Plans' },
+      },
+    };
+    const result = resolveTarget(target, 'http://localhost/tabs-test');
+    // Anchor exists, just hidden. Must be wrong-view, NOT lost-anchor —
+    // the inbox uses lost-anchor to surface "your context was edited away"
+    // which would mis-message to the user.
+    expect(result.kind).toBe('wrong-view');
   });
 
   it('returns lost-anchor (not wrong-view) when the anchor really is gone', () => {
