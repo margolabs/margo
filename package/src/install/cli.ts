@@ -3,9 +3,13 @@
 // Idempotent. Designed to be invoked by Claude Code during the
 // `claude "add margo to this project"` flow.
 
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as url from 'node:url';
+import { promisify } from 'node:util';
+
+const execFileP = promisify(execFile);
 
 const HERE = path.dirname(url.fileURLToPath(import.meta.url));
 // When built, templates ship at <package>/src/templates relative to compiled CLI.
@@ -23,22 +27,63 @@ ${MARGO_BLOCK_END}`;
 
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? 'init';
-  const cwd = process.cwd();
+  // Always operate on the git repo root, not the cwd. In a monorepo, running
+  // `margo init` from `apps/web/` would otherwise drop `.margo/` and the
+  // `.claude/skills/margo.md` skill into the subdir — comments would still
+  // get committed but be invisible to teammates using sparse checkouts, and
+  // Claude Code wouldn't register `/margo` as a workspace-level slash
+  // command. Always anchor at the repo root for consistency.
+  const installRoot = await resolveInstallRoot(process.cwd());
   switch (cmd) {
     case 'init':
-      await init(cwd);
+      await init(installRoot);
       break;
     case 'update':
-      await init(cwd, { overwriteTemplates: true });
+      await init(installRoot, { overwriteTemplates: true });
       break;
     case 'uninstall':
-      await uninstall(cwd);
+      await uninstall(installRoot);
       break;
     default:
       console.error(`unknown command: ${cmd}`);
       console.error('usage: margo <init|update|uninstall>');
       process.exit(1);
   }
+}
+
+/**
+ * Resolve where margo should install. Always the git repo root.
+ *
+ * margo's storage model assumes `.margo/comments/*.md` is at a single
+ * stable location synced by git pull/push. Installing in a subdirectory
+ * surfaces three symptoms:
+ *   - `.claude/skills/margo.md` nested under `<repo>/apps/web/.claude/`
+ *     isn't picked up as a workspace slash command (Claude Code looks
+ *     at the workspace root)
+ *   - teammates with sparse checkouts of only the root miss the comments
+ *   - `.margo/config.json` and the handler's app-root assumptions
+ *     diverge silently
+ *
+ * If the user isn't in a git repo at all, we refuse rather than guess.
+ * Running margo outside a git repo would just defer this same confusion
+ * to the first time the user wonders why their comments aren't syncing.
+ */
+export async function resolveInstallRoot(cwd: string): Promise<string> {
+  let root: string;
+  try {
+    const { stdout } = await execFileP('git', ['rev-parse', '--show-toplevel'], { cwd });
+    root = stdout.trim();
+    if (!root) throw new Error('empty git rev-parse output');
+  } catch {
+    console.error('[margo] not inside a git repository.');
+    console.error('       margo stores comments as files synced by git — `cd` into a repo (or `git init`) and try again.');
+    process.exit(1);
+  }
+  if (path.resolve(root) !== path.resolve(cwd)) {
+    console.log(`[margo] resolving to git repo root: ${root}`);
+    console.log(`        (invoked from ${cwd})`);
+  }
+  return root;
 }
 
 async function init(cwd: string, opts: { overwriteTemplates?: boolean } = {}): Promise<void> {

@@ -18,6 +18,7 @@ This repo uses **margo** — a live-app feedback layer where teammates pin comme
 - `type: task` → AI may modify code in response.
 - `type: discussion` → humans only. Never modify code in response. You may read for context.
 - `type: question` → answer in-thread. Do not modify code.
+- `status: resolved`, `status: wontfix` → **do not process or modify code in response**. You may read these for historical context (e.g., to avoid re-proposing something the team already declined), but never re-open them or treat them as actionable. The `wontfix` status is what the UI calls "Dismiss" — an explicit "we considered this and aren't going to act on it." Reversible via Reopen if the team changes its mind.
 - Never set `status: resolved`. Only humans do that. Your terminal states are `ready-for-review` and `blocked`.
 - When you change code that affects a pinned element, update the comment's `target` fields in the same edit so the pin still resolves.
 - Commit message convention: `margo: <description>` for any commit that touches `.margo/`.

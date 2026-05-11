@@ -911,7 +911,8 @@ function renderOrphanCard(
           ...(summary ? { decisionSummary: summary } : {}),
         });
       }));
-      actions.appendChild(makeOrphanButton('wontfix', "won't fix", async (btn) => {
+      // Same status as the in-panel "Dismiss" action — label kept in sync.
+      actions.appendChild(makeOrphanButton('wontfix', 'dismiss', async (btn) => {
         btn.disabled = true;
         await sync.patchComment(c.frontmatter.id, { status: 'wontfix' });
       }));
@@ -1318,15 +1319,26 @@ function openCommentPanel(
     suppressNextPanelAnim = false;
     root.appendChild(panel);
   }
+  // Header layout: author + status on the left, primary action (Resolve /
+  // Reopen) + ⋯ overflow + close on the right. This keeps actions inline
+  // with the comment identity, mirroring Slack / Linear / Zeplin, and saves
+  // a whole horizontal row below the thread.
+  // Prefer a friendly display name in the header — full email is verbose
+  // and forces the toolbar buttons off the visible row. Hovering surfaces
+  // the canonical email for cases where two teammates share a first name.
+  const displayName = displayNameOf(c.frontmatter);
   panel.innerHTML = `
     <header>
       <div class="margo-panel-titlebar">
-        <strong class="margo-panel-author">${escapeHtml(c.frontmatter.author)}</strong>
+        <div class="margo-panel-identity">
+          <strong class="margo-panel-author" title="${escapeHtml(c.frontmatter.author)}">${escapeHtml(displayName)}</strong>
+          <div class="margo-panel-meta">
+            ${c.frontmatter.role ? `<span class="margo-role">${escapeHtml(c.frontmatter.role)}</span>` : ''}
+            <span class="margo-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
+          </div>
+        </div>
+        <div class="margo-panel-toolbar" data-margo-toolbar></div>
         <button class="margo-close" type="button" aria-label="close">×</button>
-      </div>
-      <div class="margo-panel-meta">
-        ${c.frontmatter.role ? `<span class="margo-role">${escapeHtml(c.frontmatter.role)}</span>` : ''}
-        <span class="margo-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
       </div>
     </header>
     ${renderThread(c)}
@@ -1350,7 +1362,10 @@ function openCommentPanel(
   }
 
   if (!readOnly) {
-    panel.appendChild(makeActionRow(c, sync, close, me));
+    const toolbar = panel.querySelector('[data-margo-toolbar]') as HTMLElement;
+    for (const el of buildHeaderActions(c, sync, close, me)) toolbar.appendChild(el);
+    const replyForm = buildReplyForm(c, sync, close);
+    if (replyForm) panel.appendChild(replyForm);
   }
   panel.appendChild(makeIdFooter(c.frontmatter.id));
   // Anchor the panel near the pin. Done after content is in place so
@@ -1411,81 +1426,75 @@ function makeIdFooter(id: string): HTMLElement {
   return footer;
 }
 
-function makeActionRow(
+/**
+ * Header toolbar — primary actions live here next to the close button,
+ * inline with the comment identity. Saves the entire action-row that
+ * used to sit between the thread and the footer.
+ *
+ *   open: [Reply] [Resolve] [⋯]
+ *   resolved/wontfix: [Reopen] [⋯]
+ *
+ * Reply doesn't post directly — it reveals the inline reply form below
+ * the thread. This keeps the textarea hidden by default so the panel
+ * stays compact, then expands when the user actually wants to type.
+ */
+function buildHeaderActions(
   c: Comment,
   sync: SyncClient,
   close: () => void,
   me: { email: string } | null,
-): HTMLElement {
-  const row = document.createElement('div');
-  row.className = 'margo-actions';
-  row.dataset.commentId = c.frontmatter.id;
-
+): HTMLElement[] {
   const isResolved = c.frontmatter.status === 'resolved' || c.frontmatter.status === 'wontfix';
+  const buttons: HTMLElement[] = [];
+
   if (isResolved) {
     const reopen = document.createElement('button');
+    reopen.type = 'button';
     reopen.dataset.margoAction = 'reopen';
-    reopen.textContent = 'reopen';
+    reopen.className = 'margo-btn margo-btn-primary';
+    reopen.textContent = 'Reopen';
     reopen.addEventListener('click', async () => {
-      setBusy(row, true);
+      reopen.disabled = true;
       try {
         await sync.patchComment(c.frontmatter.id, { status: 'open' });
         close();
       } catch (err) {
-        setBusy(row, false);
+        reopen.disabled = false;
         await uiAlert((err as Error).message, 'Reopen failed');
       }
     });
-    row.appendChild(reopen);
-    if (canDelete(c, me)) {
-      const del = document.createElement('button');
-      del.dataset.margoAction = 'delete';
-      del.textContent = 'delete';
-      del.title = 'Permanently remove this comment file (git history retains it)';
-      del.addEventListener('click', async () => {
-        if (!(await confirmDelete(c))) return;
-        setBusy(row, true);
-        try {
-          await sync.deleteComment(c.frontmatter.id);
-          close();
-        } catch (err) {
-          setBusy(row, false);
-          await uiAlert((err as Error).message, 'Delete failed');
-        }
-      });
-      row.appendChild(del);
-    }
-    return row;
+    buttons.push(reopen);
+    buttons.push(makeOverflowMenu(buildOverflowItems(c, sync, close, me, /* showDismiss */ false)));
+    return buttons;
   }
 
-  const reply = document.createElement('button');
-  reply.dataset.margoAction = 'reply';
-  reply.textContent = 'reply';
-  reply.addEventListener('click', async () => {
-    const body = await uiPrompt({
-      title: 'Reply',
-      placeholder: 'Add a note for the thread…',
-      multiline: true,
-      confirmLabel: 'Post reply',
-    });
-    if (!body || !body.trim()) return;
-    setBusy(row, true);
-    try {
-      await sync.patchComment(c.frontmatter.id, { reply: { body: body.trim() } });
-      close();
-    } catch (err) {
-      setBusy(row, false);
-      await uiAlert((err as Error).message, 'Reply failed');
-    }
+  // Reply toggle — reveals the inline form. We look the form up by its
+  // data-attribute rather than holding a reference, so this button works
+  // even if openCommentPanel rebuilds the panel for a different comment
+  // and the form is recreated.
+  const replyBtn = document.createElement('button');
+  replyBtn.type = 'button';
+  replyBtn.dataset.margoAction = 'reply-toggle';
+  replyBtn.className = 'margo-btn';
+  replyBtn.textContent = 'Reply';
+  replyBtn.addEventListener('click', () => {
+    const form = document.querySelector('[data-margo-reply-form]') as HTMLElement | null;
+    if (!form) return;
+    const willOpen = form.hidden;
+    form.hidden = !willOpen;
+    if (willOpen) form.querySelector('textarea')?.focus();
   });
+  buttons.push(replyBtn);
 
   const resolve = document.createElement('button');
+  resolve.type = 'button';
   resolve.dataset.margoAction = 'resolve';
-  resolve.textContent = 'mark resolved';
+  resolve.className = 'margo-btn margo-btn-primary';
+  resolve.innerHTML = '<span class="margo-btn-icon-inline" aria-hidden="true">✓</span><span>Resolve</span>';
   resolve.addEventListener('click', async () => {
     const summary = await promptDecisionSummary(c);
-    if (summary === null) return; // user cancelled
-    setBusy(row, true);
+    if (summary === null) return;
+    resolve.disabled = true;
     try {
       await sync.patchComment(c.frontmatter.id, {
         status: 'resolved',
@@ -1493,34 +1502,221 @@ function makeActionRow(
       });
       close();
     } catch (err) {
-      setBusy(row, false);
+      resolve.disabled = false;
       await uiAlert((err as Error).message, 'Resolve failed');
     }
   });
+  buttons.push(resolve);
 
-  row.appendChild(reply);
-  row.appendChild(resolve);
+  buttons.push(makeOverflowMenu(buildOverflowItems(c, sync, close, me, /* showDismiss */ true)));
+  return buttons;
+}
 
-  if (canDelete(c, me)) {
-    const del = document.createElement('button');
-    del.dataset.margoAction = 'delete';
-    del.textContent = 'delete';
-    del.title = 'Delete this comment (own + open/wontfix only)';
-    del.addEventListener('click', async () => {
-      if (!(await confirmDelete(c))) return;
-      setBusy(row, true);
-      try {
-        await sync.deleteComment(c.frontmatter.id);
-        close();
-      } catch (err) {
-        setBusy(row, false);
-        await uiAlert((err as Error).message, 'Delete failed');
-      }
+/**
+ * The collapsible reply form. Hidden by default; revealed by the Reply
+ * button in the header toolbar. Returns null for resolved/wontfix
+ * comments (no replying once a thread is closed) and for read-only mode.
+ */
+function buildReplyForm(c: Comment, sync: SyncClient, close: () => void): HTMLElement | null {
+  const isResolved = c.frontmatter.status === 'resolved' || c.frontmatter.status === 'wontfix';
+  if (isResolved) return null;
+
+  const form = document.createElement('form');
+  form.className = 'margo-reply-form';
+  form.dataset.margoReplyForm = '';
+  form.hidden = true;
+
+  const ta = document.createElement('textarea');
+  ta.className = 'margo-reply-input';
+  ta.placeholder = 'Reply…';
+  ta.rows = 2;
+
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.className = 'margo-btn margo-reply-submit';
+  submit.textContent = 'Reply';
+  submit.disabled = true;
+
+  ta.addEventListener('input', () => {
+    submit.disabled = !ta.value.trim();
+    ta.style.height = 'auto';
+    ta.style.height = `${ta.scrollHeight}px`;
+  });
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+    if (e.key === 'Escape') {
+      form.hidden = true;
+      ta.value = '';
+      submit.disabled = true;
+    }
+  });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = ta.value.trim();
+    if (!body) return;
+    submit.disabled = true;
+    ta.disabled = true;
+    try {
+      await sync.patchComment(c.frontmatter.id, { reply: { body } });
+      close();
+    } catch (err) {
+      submit.disabled = false;
+      ta.disabled = false;
+      await uiAlert((err as Error).message, 'Reply failed');
+    }
+  });
+
+  form.appendChild(ta);
+  form.appendChild(submit);
+  return form;
+}
+
+/** Build the list of items that go into the ⋯ overflow menu. */
+function buildOverflowItems(
+  c: Comment,
+  sync: SyncClient,
+  close: () => void,
+  me: { email: string } | null,
+  showDismiss: boolean,
+): OverflowItem[] {
+  const items: OverflowItem[] = [];
+
+  if (showDismiss) {
+    items.push({
+      // "Dismiss" reads softer than Reject and more decisive than Archive
+      // for a feedback tool. Internally the status remains 'wontfix' — same
+      // bug-tracker convention, same AI-skip rule. The UI label is the
+      // human-facing knob; the persisted status is the machine-facing one.
+      label: 'Dismiss',
+      hint: 'AI skips dismissed comments. Reversible via Reopen.',
+      onSelect: async () => {
+        try {
+          await sync.patchComment(c.frontmatter.id, { status: 'wontfix' });
+          close();
+        } catch (err) {
+          await uiAlert((err as Error).message, 'Dismiss failed');
+        }
+      },
     });
-    row.appendChild(del);
   }
 
-  return row;
+  items.push({
+    label: 'Copy link',
+    hint: 'Direct link to this comment — paste in PR / Slack',
+    onSelect: async () => {
+      // The overlay already handles `#margo=<id>` on load (scrolls to the
+      // pin + opens this panel). Build that URL against the captured page
+      // URL so the link works across the user's local + preview environments.
+      const base = (() => {
+        try { return new URL(c.frontmatter.target.url, window.location.origin).toString(); }
+        catch { return window.location.origin + c.frontmatter.target.url; }
+      })();
+      const href = `${base}${base.includes('#') ? '&' : '#'}margo=${encodeURIComponent(c.frontmatter.id)}`;
+      try {
+        await navigator.clipboard.writeText(href);
+      } catch {
+        // Some browsers refuse writeText without a user gesture or over http;
+        // surface the link so the user can copy manually.
+        await uiAlert(href, 'Copy this link');
+      }
+    },
+  });
+
+  if (canDelete(c, me)) {
+    items.push({
+      label: 'Delete comment',
+      hint: 'Hard delete (removes the file). Prefer Dismiss — this is for accidental commits.',
+      destructive: true,
+      onSelect: async () => {
+        if (!(await confirmDelete(c))) return;
+        try {
+          await sync.deleteComment(c.frontmatter.id);
+          close();
+        } catch (err) {
+          await uiAlert((err as Error).message, 'Delete failed');
+        }
+      },
+    });
+  }
+
+  return items;
+}
+
+interface OverflowItem {
+  label: string;
+  hint?: string;
+  destructive?: boolean;
+  onSelect: () => void | Promise<void>;
+}
+
+/**
+ * Compact "⋯" button that toggles a small popover menu. Anchored to its
+ * button; opens left of the button (matches Zeplin's placement) so it
+ * stays inside the comment panel. Closes on outside-click and Escape.
+ */
+function makeOverflowMenu(items: OverflowItem[]): HTMLElement {
+  const container = document.createElement('div');
+  container.className = 'margo-overflow';
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'margo-btn margo-btn-icon margo-overflow-trigger';
+  trigger.setAttribute('aria-label', 'More actions');
+  trigger.setAttribute('aria-haspopup', 'menu');
+  trigger.setAttribute('aria-expanded', 'false');
+  trigger.innerHTML = '<span aria-hidden="true">⋯</span>';
+  container.appendChild(trigger);
+
+  const menu = document.createElement('div');
+  menu.className = 'margo-overflow-menu';
+  menu.setAttribute('role', 'menu');
+  menu.hidden = true;
+
+  for (const it of items) {
+    const mi = document.createElement('button');
+    mi.type = 'button';
+    mi.className = 'margo-overflow-item' + (it.destructive ? ' margo-overflow-item-destructive' : '');
+    mi.setAttribute('role', 'menuitem');
+    mi.textContent = it.label;
+    if (it.hint) mi.title = it.hint;
+    mi.addEventListener('click', async () => {
+      close();
+      await it.onSelect();
+    });
+    menu.appendChild(mi);
+  }
+  container.appendChild(menu);
+
+  const open = () => {
+    menu.hidden = false;
+    trigger.setAttribute('aria-expanded', 'true');
+    setTimeout(() => {
+      document.addEventListener('click', onDocClick, { capture: true });
+      document.addEventListener('keydown', onKey);
+    }, 0);
+  };
+  const close = () => {
+    menu.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('click', onDocClick, { capture: true });
+    document.removeEventListener('keydown', onKey);
+  };
+  const onDocClick = (e: Event) => {
+    if (!container.contains(e.target as Node)) close();
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') close();
+  };
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.hidden) open();
+    else close();
+  });
+
+  return container;
 }
 
 // Own-only: matches what the backend enforces. Status doesn't matter — the
@@ -1665,10 +1861,15 @@ function renderHumanMessage(m: Message): string {
   `;
 }
 
-// Fallback chain: frontmatter.authorName → email local-part (title-cased
+// Fallback chain: explicit authorName → email local-part (title-cased
 // when the local part has dot/underscore separators, otherwise kept as-is
 // since slack-style usernames are typically lowercase) → full email.
-function displayNameOf(m: Message): string {
+//
+// Accepts any shape with `author` + optional `authorName` so the same logic
+// works for Message (thread entries) and Comment.frontmatter (panel header).
+// Showing a full email in the panel header was loud — "xhsong" or "Stanley
+// Song" reads as a name; "xhsong@fortinet.com" reads as metadata.
+function displayNameOf(m: { author: string; authorName?: string }): string {
   if (m.authorName && m.authorName.trim()) return m.authorName.trim();
   const local = (m.author.split('@')[0] ?? m.author).trim();
   if (!local) return m.author;
@@ -2150,19 +2351,25 @@ function injectStyles(): void {
     }
     /* CardHeader */
     .margo-panel header {
-      display: flex; flex-direction: column; gap: 6px;
-      padding: 14px 16px;
+      padding: 12px 12px 12px 16px;
       border-bottom: 1px solid var(--margo-border);
     }
     .margo-panel-titlebar {
       display: flex; align-items: center; gap: 8px;
     }
+    .margo-panel-identity {
+      flex: 1; min-width: 0;
+      display: flex; flex-direction: column; gap: 4px;
+    }
     .margo-panel-author {
       font-weight: 600; font-size: 13px; line-height: 1.3;
-      flex: 1; min-width: 0;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .margo-panel-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+    .margo-panel-toolbar {
+      display: flex; align-items: center; gap: 6px;
+      flex-shrink: 0;
+    }
     /* CardContent */
     .margo-body {
       white-space: pre-wrap; margin: 0;
@@ -2229,12 +2436,133 @@ function injectStyles(): void {
       background: linear-gradient(180deg, hsl(217 91% 97%), hsl(280 70% 97%));
       border-color: hsl(217 91% 88%);
     }
-    /* ——— action row (sits between thread and footer) ——— */
-    .margo-actions {
-      display: flex; gap: 8px; align-items: center;
-      padding: 12px 16px 14px;
-      border-top: 1px solid var(--margo-border);
+    /* ——— button family ——— */
+    .margo-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      box-sizing: border-box;
+      height: 28px;
+      padding: 0 10px;
+      border-radius: 6px; border: 1px solid var(--margo-border);
+      background: white; color: var(--margo-fg);
+      font-family: inherit; font-size: 12px; font-weight: 500; line-height: 1;
+      cursor: pointer;
+      transition: background-color .12s, border-color .12s, color .12s, box-shadow .12s;
     }
+    .margo-btn:hover { background: var(--margo-bg); border-color: hsl(240 4% 78%); }
+    .margo-btn:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
+    .margo-btn:disabled { opacity: .45; cursor: not-allowed; background: white; border-color: var(--margo-border); }
+    .margo-btn-primary {
+      background: var(--margo-fg); color: white; border-color: var(--margo-fg);
+    }
+    .margo-btn-primary:hover { background: hsl(240 4% 18%); border-color: hsl(240 4% 18%); }
+    .margo-btn-primary .margo-btn-icon-inline { opacity: .85; }
+    .margo-btn-icon {
+      width: 28px; padding: 0; justify-content: center;
+      color: var(--margo-muted-fg);
+      font-size: 16px;
+    }
+    .margo-btn-icon:hover { color: var(--margo-fg); }
+    .margo-btn-icon[aria-expanded="true"] {
+      background: var(--margo-bg); border-color: hsl(240 4% 78%); color: var(--margo-fg);
+    }
+    .margo-btn-icon-inline {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 13px; height: 13px; line-height: 1;
+      font-size: 11px;
+    }
+    /* ——— ⋯ overflow menu ——— */
+    .margo-overflow { position: relative; margin-left: auto; }
+    .margo-overflow-menu {
+      position: absolute; right: 0; top: calc(100% + 6px);
+      min-width: 184px;
+      padding: 4px;
+      background: white;
+      border: 1px solid hsl(240 4% 88%); border-radius: 10px;
+      box-shadow:
+        0 12px 28px hsl(240 4% 0% / .10),
+        0 2px 8px hsl(240 4% 0% / .06);
+      z-index: 999999;
+      animation: margo-overflow-in .12s ease-out;
+    }
+    @keyframes margo-overflow-in {
+      from { opacity: 0; transform: translateY(-2px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .margo-overflow-item {
+      display: flex; align-items: center;
+      width: 100%; box-sizing: border-box;
+      padding: 7px 10px;
+      background: transparent;
+      border: 0; /* explicit — overrides UA + page styles */
+      border-radius: 6px;
+      box-shadow: none;
+      font-family: inherit; font-size: 13px; font-weight: 400;
+      color: var(--margo-fg);
+      text-align: left; line-height: 1.3;
+      cursor: pointer;
+      transition: background-color .1s, color .1s;
+    }
+    .margo-overflow-item + .margo-overflow-item { margin-top: 1px; }
+    .margo-overflow-item:hover { background: hsl(240 5% 96%); }
+    .margo-overflow-item:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: -2px; }
+    .margo-overflow-item-destructive { color: hsl(0 72% 42%); }
+    .margo-overflow-item-destructive:hover { background: hsl(0 84% 97%); color: hsl(0 72% 36%); }
+    /* Optional thin divider before the destructive item — separates it visually
+       from the safe actions above, matching how Linear / Notion render. */
+    .margo-overflow-item-destructive { margin-top: 4px; position: relative; }
+    .margo-overflow-item-destructive::before {
+      content: ''; position: absolute; left: 8px; right: 8px; top: -3px;
+      height: 1px; background: hsl(240 5% 92%);
+    }
+    /* ——— inline reply form (hidden until Reply button clicked) ——— */
+    .margo-reply-form {
+      position: relative;
+      margin: 0 16px 12px;
+      border: 1px solid var(--margo-border);
+      border-radius: 8px;
+      background: white;
+      transition: border-color .12s, box-shadow .12s;
+      animation: margo-reply-in .14s ease-out;
+    }
+    @keyframes margo-reply-in {
+      from { opacity: 0; transform: translateY(-4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .margo-reply-form:focus-within {
+      border-color: var(--margo-ring);
+      box-shadow: 0 0 0 3px hsl(217 91% 60% / .12);
+    }
+    .margo-reply-input {
+      display: block; width: 100%; box-sizing: border-box;
+      min-height: 56px; max-height: 168px;
+      padding: 9px 12px 32px;
+      border: 0;
+      background: transparent; color: var(--margo-fg);
+      font-family: inherit; font-size: 13px; line-height: 1.45;
+      resize: none;
+    }
+    .margo-reply-input:focus { outline: none; }
+    .margo-reply-input::placeholder { color: var(--margo-muted-fg); }
+    .margo-reply-submit {
+      position: absolute; right: 6px; bottom: 6px;
+      height: 24px; padding: 0 10px;
+      font-size: 12px; font-weight: 600;
+      background: var(--margo-fg); color: white; border-color: var(--margo-fg);
+    }
+    .margo-reply-submit:hover { background: hsl(240 4% 18%); border-color: hsl(240 4% 18%); }
+    .margo-reply-submit:disabled {
+      background: hsl(240 5% 94%); color: var(--margo-muted-fg);
+      border-color: hsl(240 5% 92%);
+    }
+    /* keyboard hint, only visible on focus */
+    .margo-reply-form::after {
+      content: '⌘↵';
+      position: absolute; right: 70px; bottom: 9px;
+      font-size: 11px; color: var(--margo-muted-fg);
+      opacity: 0; pointer-events: none;
+      transition: opacity .12s;
+    }
+    .margo-reply-form:focus-within::after { opacity: .6; }
     /* ——— Badge (variant=secondary, status-aware) ——— */
     .margo-role, .margo-status {
       display: inline-flex; align-items: center;
