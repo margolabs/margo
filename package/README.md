@@ -4,17 +4,31 @@ Live-app feedback layer for AI-coding teams. Designers, PMs, and devs leave comm
 
 ## Install
 
+`cd` into your app directory (wherever `package.json` lives) and run:
+
 ```sh
 npm install -D margo-dev
 npx margo-dev init
 ```
 
-The `init` command:
+The `init` command scaffolds the runtime state — non-negotiable, this is what margo needs to run:
 
-- Scaffolds `.margo/` (config, CLAUDE.md, comments folder)
-- Drops a `/margo` Claude Code skill at `.claude/skills/margo.md`
-- Adds a margo block to your project's root `CLAUDE.md`
+- Creates `.margo/` **in the current directory** (config, CLAUDE.md, comments folder)
 - Wires the plugin into your build config (Vite or Next.js, auto-detected)
+
+In a monorepo, run `init` once per app you want margo on — each gets its own inbox under that app's directory. A git repo is required (margo syncs comments via git).
+
+### Claude Code integration (optional)
+
+If you use Claude Code, install the `/margo` skill from the same directory:
+
+```sh
+npx margo-dev install-skill             # default: commits .claude/skills/margo/ to this repo
+npx margo-dev install-skill --project   # same as above, explicit
+npx margo-dev install-skill --user      # installs at ~/.claude/skills/ instead (not committed)
+```
+
+The skill lives at the git repo root (Claude Code only discovers project skills at workspace root), but the `CLAUDE.md` reference block goes next to your `.margo/` — so a monorepo with multiple apps gets per-app references, not one global one.
 
 The whole flow is what `claude "add margo to this project"` runs for you.
 

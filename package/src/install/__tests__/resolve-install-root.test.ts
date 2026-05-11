@@ -1,17 +1,19 @@
-// Verifies `margo init` (and update/uninstall) anchors at the git repo
-// root regardless of which subdirectory the user invoked it from. The
-// previous behavior dropped `.margo/` and `.claude/skills/margo.md` at
-// `process.cwd()`, which surfaced three symptoms in monorepo setups —
-// missed slash command, sparse-checkout invisibility, config drift.
+// Verifies the install-time path resolution:
+//   - `resolveGitRoot` returns the git repo root regardless of CWD subdir
+//     depth. Used for skill placement (Claude Code only discovers project
+//     skills at workspace root) and the git-repo-present precondition.
+//   - `findMargoDir` walks up from CWD to find the nearest `.margo/` parent.
+//     This is what lets `install-skill` / `update` / `uninstall` be run from
+//     any subdirectory of a margo-enabled project. Returns `null` if none.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { resolveInstallRoot } from '../cli.js';
+import { findMargoDir, resolveGitRoot } from '../cli.js';
 
-describe('resolveInstallRoot', () => {
+describe('resolveGitRoot', () => {
   let repoRoot: string;
 
   beforeEach(async () => {
@@ -26,24 +28,55 @@ describe('resolveInstallRoot', () => {
   });
 
   it('returns the repo root when invoked from the repo root', async () => {
-    const root = await resolveInstallRoot(repoRoot);
-    expect(root).toBe(repoRoot);
+    expect(await resolveGitRoot(repoRoot)).toBe(repoRoot);
   });
 
-  it('returns the repo root when invoked from a nested subdir (the monorepo case)', async () => {
+  it('returns the repo root when invoked from a nested subdir', async () => {
     const sub = path.join(repoRoot, 'apps', 'web');
     await fs.mkdir(sub, { recursive: true });
-    const root = await resolveInstallRoot(sub);
-    // The whole point of the function: install where margo can be found
-    // by every teammate, not where one developer happened to run the CLI.
-    expect(root).toBe(repoRoot);
-    expect(root).not.toBe(sub);
+    expect(await resolveGitRoot(sub)).toBe(repoRoot);
+  });
+});
+
+describe('findMargoDir', () => {
+  let tmp: string;
+
+  beforeEach(async () => {
+    tmp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'margo-find-')));
   });
 
-  it('returns the repo root when invoked from a deeply nested subdir', async () => {
-    const sub = path.join(repoRoot, 'a', 'b', 'c', 'd');
+  afterEach(async () => {
+    await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  it('returns null when no .margo/ is found anywhere upward', async () => {
+    const sub = path.join(tmp, 'apps', 'web');
     await fs.mkdir(sub, { recursive: true });
-    const root = await resolveInstallRoot(sub);
-    expect(root).toBe(repoRoot);
+    expect(await findMargoDir(sub)).toBeNull();
+  });
+
+  it('returns the same dir when .margo/ is right there', async () => {
+    await fs.mkdir(path.join(tmp, '.margo'), { recursive: true });
+    expect(await findMargoDir(tmp)).toBe(tmp);
+  });
+
+  it('walks up to find an ancestor .margo/', async () => {
+    // .margo/ at the app level; CWD inside a deeply nested subdir of that app.
+    // This is the "user ran install-skill from src/components/foo" case.
+    const app = path.join(tmp, 'apps', 'web');
+    await fs.mkdir(path.join(app, '.margo'), { recursive: true });
+    const deep = path.join(app, 'src', 'components', 'foo');
+    await fs.mkdir(deep, { recursive: true });
+    expect(await findMargoDir(deep)).toBe(app);
+  });
+
+  it('picks the nearest .margo/ when multiple exist on the path', async () => {
+    // Monorepo case: both git root and per-app have `.margo/` (e.g. a legacy
+    // root-level inbox plus a newer per-app inbox). The nearer one wins —
+    // that's the project the user is currently working in.
+    await fs.mkdir(path.join(tmp, '.margo'), { recursive: true });
+    const app = path.join(tmp, 'apps', 'web');
+    await fs.mkdir(path.join(app, '.margo'), { recursive: true });
+    expect(await findMargoDir(app)).toBe(app);
   });
 });

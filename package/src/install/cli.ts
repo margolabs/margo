@@ -1,8 +1,17 @@
 #!/usr/bin/env node
-// `npx margo-dev <command>` — explicit init / update / uninstall.
+// `npx margo-dev <command>` — explicit init / install-skill / update / uninstall.
 // Idempotent. Designed to be invoked by Claude Code during the
 // `claude "add margo to this project"` flow.
+//
+// Split of concerns:
+//   - `init` handles the runtime requirements: `.margo/` scaffold + framework
+//     wiring. Not negotiable — without this margo doesn't run.
+//   - `install-skill` handles the optional Claude Code integration: drops
+//     the `/margo` skill + a root `CLAUDE.md` reference block. Opt-in;
+//     not every user runs Claude Code, and some prefer the skill at user
+//     scope (`~/.claude/skills/`) rather than committed per-repo.
 
+import * as os from 'node:os';
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -25,86 +34,111 @@ const ROOT_CLAUDE_BLOCK = `${MARGO_BLOCK_START}
 This project uses margo for live-app feedback. See \`.margo/CLAUDE.md\` for how AI should engage with the comment inbox. The \`/margo\` skill triages and processes the open inbox.
 ${MARGO_BLOCK_END}`;
 
+const USAGE = 'usage: margo <init|install-skill|update|uninstall> [--user|--project]';
+
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? 'init';
-  // Always operate on the git repo root, not the cwd. In a monorepo, running
-  // `margo init` from `apps/web/` would otherwise drop `.margo/` and the
-  // `.claude/skills/margo/` skill into the subdir — comments would still
-  // get committed but be invisible to teammates using sparse checkouts, and
-  // Claude Code wouldn't register `/margo` as a workspace-level slash
-  // command. Always anchor at the repo root for consistency.
-  const installRoot = await resolveInstallRoot(process.cwd());
+  const flags = parseFlags(process.argv.slice(3));
+  const cwd = process.cwd();
   switch (cmd) {
     case 'init':
-      await init(installRoot);
+      await init(cwd);
+      break;
+    case 'install-skill':
+      await installSkill(cwd, { scope: flags.scope });
       break;
     case 'update':
-      await init(installRoot, { overwriteTemplates: true });
+      await update(cwd);
       break;
     case 'uninstall':
-      await uninstall(installRoot);
+      await uninstall(cwd);
       break;
     default:
       console.error(`unknown command: ${cmd}`);
-      console.error('usage: margo <init|update|uninstall>');
+      console.error(USAGE);
       process.exit(1);
   }
 }
 
+function parseFlags(args: string[]): { scope: 'project' | 'user' } {
+  const user = args.includes('--user');
+  const project = args.includes('--project');
+  if (user && project) {
+    console.error('[margo] cannot combine --user and --project; pick one.');
+    process.exit(1);
+  }
+  return { scope: user ? 'user' : 'project' };
+}
+
 /**
- * Resolve where margo should install. Always the git repo root.
- *
- * margo's storage model assumes `.margo/comments/*.md` is at a single
- * stable location synced by git pull/push. Installing in a subdirectory
- * surfaces three symptoms:
- *   - `.claude/skills/margo/SKILL.md` nested under `<repo>/apps/web/.claude/`
- *     isn't picked up as a workspace slash command (Claude Code looks
- *     at the workspace root)
- *   - teammates with sparse checkouts of only the root miss the comments
- *   - `.margo/config.json` and the handler's app-root assumptions
- *     diverge silently
- *
- * If the user isn't in a git repo at all, we refuse rather than guess.
- * Running margo outside a git repo would just defer this same confusion
- * to the first time the user wonders why their comments aren't syncing.
+ * Resolve the git repo root for `cwd`. Used for skill placement (Claude
+ * Code only discovers project skills at `<git-root>/.claude/skills/`) and
+ * to verify the user is inside a git repo at all — margo's comment-sync
+ * model relies on git, so we refuse to operate outside one rather than
+ * silently scaffold something that won't sync.
  */
-export async function resolveInstallRoot(cwd: string): Promise<string> {
-  let root: string;
+export async function resolveGitRoot(cwd: string): Promise<string> {
   try {
     const { stdout } = await execFileP('git', ['rev-parse', '--show-toplevel'], { cwd });
-    root = stdout.trim();
+    const root = stdout.trim();
     if (!root) throw new Error('empty git rev-parse output');
+    return root;
   } catch {
     console.error('[margo] not inside a git repository.');
     console.error('       margo stores comments as files synced by git — `cd` into a repo (or `git init`) and try again.');
     process.exit(1);
   }
-  if (path.resolve(root) !== path.resolve(cwd)) {
-    console.log(`[margo] resolving to git repo root: ${root}`);
-    console.log(`        (invoked from ${cwd})`);
-  }
-  return root;
 }
 
+/**
+ * Walk up from `cwd` to find the nearest ancestor containing a `.margo/`
+ * directory. Returns the *parent* (the project root where margo lives), or
+ * `null` if none found. Used by `install-skill`, `update`, and `uninstall`
+ * so they can be run from any subdirectory of a margo-enabled project.
+ */
+export async function findMargoDir(cwd: string): Promise<string | null> {
+  let dir = path.resolve(cwd);
+  // Stop at filesystem root: when dirname(dir) === dir we've walked past `/`.
+  while (true) {
+    if (await pathExists(path.join(dir, '.margo'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * Drop `.margo/` in CWD — wherever the user ran `margo init` is where
+ * the project root for margo lives. Mirrors how Vercel/Supabase/Prisma
+ * place their per-project state. In a monorepo, run `init` once per app
+ * you want margo on; each gets its own inbox.
+ *
+ * We still require a git repo (the comment-sync model needs it), but we
+ * don't anchor to git root — that's what produced the cross-app inbox
+ * bleed before.
+ */
 async function init(cwd: string, opts: { overwriteTemplates?: boolean } = {}): Promise<void> {
+  // Verify a git repo exists above CWD; abort otherwise.
+  await resolveGitRoot(cwd);
+
+  // Warn (but proceed) if there's an existing `.margo/` higher up — the
+  // user might have init'd at git root earlier and now be confused about
+  // why a new init at the app level creates a separate inbox. They asked
+  // for it; explain what they're getting.
+  const existing = await findMargoDir(cwd);
+  if (existing && path.resolve(existing) !== path.resolve(cwd)) {
+    console.log(`[margo] note: existing .margo/ found at ${existing}`);
+    console.log(`        this new inbox at ${cwd} will be separate (per-app).`);
+    console.log(`        cd to ${existing} if you wanted to use the existing one.`);
+  }
+
   const margoDir = path.join(cwd, '.margo');
-  // Claude Code skills register from a per-skill DIRECTORY containing a
-  // SKILL.md file (`.claude/skills/<name>/SKILL.md`), not from a flat
-  // `<name>.md` file. The flat form is silently ignored — the skill won't
-  // appear as a slash command. Discovery is live; once the file is at
-  // the right path the user gets `/margo` without restarting their
-  // Claude Code session.
-  const claudeSkillDir = path.join(cwd, '.claude', 'skills', 'margo');
   await fs.mkdir(path.join(margoDir, 'comments'), { recursive: true });
-  await fs.mkdir(claudeSkillDir, { recursive: true });
 
   await copyTemplate('config.json', path.join(margoDir, 'config.json'), opts.overwriteTemplates);
   await copyTemplate('CLAUDE.md', path.join(margoDir, 'CLAUDE.md'), opts.overwriteTemplates);
-  await copyTemplate('claude-skill.md', path.join(claudeSkillDir, 'SKILL.md'), opts.overwriteTemplates);
-  await migrateLegacySkillPath(cwd);
   await ensureGitkeep(path.join(margoDir, 'comments'));
 
-  await ensureRootClaudeBlock(cwd);
   // Pick the first integration that matches the project. We don't try both —
   // a project that mixes Vite + Next.js is unusual enough to handle by hand.
   const framework = await detectFramework(cwd);
@@ -116,13 +150,126 @@ async function init(cwd: string, opts: { overwriteTemplates?: boolean } = {}): P
 
   console.log('[margo] init complete.');
   console.log('       Review .margo/config.json (especially the roster) and run `npm run dev`.');
+  await printSkillHint(cwd);
+}
+
+/**
+ * Install the Claude Code integration: drop the `/margo` skill and add a
+ * reference block to the repo's root `CLAUDE.md`. Separate from `init`
+ * because not every user runs Claude Code, and because writing to
+ * `~/.claude/` (scope=user) is a different blast radius than writing to
+ * the repo. Matches the pattern other ecosystems use for AI-tool
+ * integrations (Stripe, Sentry, Prisma all ship their MCP server as a
+ * separate package/command from the SDK CLI).
+ *
+ * - scope=project (default): skill goes to `<repo>/.claude/skills/margo/SKILL.md`,
+ *   gets committed with the repo. Good default for teams.
+ * - scope=user: skill goes to `~/.claude/skills/margo/SKILL.md`, shared
+ *   across every repo on this machine. Good for solo devs who want one
+ *   copy of the skill across many margo-using projects.
+ *
+ * Either way, the root `CLAUDE.md` block is written — it points the AI at
+ * `.margo/CLAUDE.md` for *this* repo, regardless of where the skill lives.
+ */
+async function installSkill(cwd: string, opts: { scope: 'project' | 'user' }): Promise<void> {
+  // Find the project this skill belongs to: walk up to the nearest `.margo/`.
+  // We don't accept "install the skill but there's no inbox to point at" —
+  // the skill would error on every `/margo` invocation. Cheaper to surface
+  // the ordering error here.
+  const projectDir = await findMargoDir(cwd);
+  if (!projectDir) {
+    console.error('[margo] no .margo/ found in this directory or any parent — run `npx margo init` first.');
+    process.exit(1);
+  }
+
+  // Skill placement:
+  //   - project scope → git-root `.claude/skills/margo/`. Forced by Claude
+  //     Code's discovery rule: it only picks up project skills at the
+  //     workspace root. Putting the skill in `<project>/.claude/` instead
+  //     would silently fail to register when `<project>` isn't git root.
+  //   - user scope → `~/.claude/skills/margo/`. Shared across every repo
+  //     on this machine; not committed.
+  //
+  // The reference block in CLAUDE.md goes next to `.margo/` (not git root),
+  // so a monorepo with multiple apps gets per-app references instead of
+  // one global one that mentions margo for apps that don't use it.
+  const gitRoot = await resolveGitRoot(cwd);
+  const skillDir = opts.scope === 'user'
+    ? path.join(os.homedir(), '.claude', 'skills', 'margo')
+    : path.join(gitRoot, '.claude', 'skills', 'margo');
+  await fs.mkdir(skillDir, { recursive: true });
+  await copyTemplate('claude-skill.md', path.join(skillDir, 'SKILL.md'), true);
+  await migrateLegacySkillPath(gitRoot);
+  await ensureRootClaudeBlock(projectDir);
+
+  const where = opts.scope === 'user'
+    ? '~/.claude/skills/margo/'
+    : path.relative(cwd, path.join(gitRoot, '.claude', 'skills', 'margo')) + '/';
+  console.log(`[margo] installed Claude Code skill at ${where}SKILL.md`);
+  console.log(`       Added margo block to ${path.relative(cwd, path.join(projectDir, 'CLAUDE.md')) || 'CLAUDE.md'}.`);
+  console.log('       Restart Claude Code or open the repo to pick up `/margo`.');
+}
+
+/**
+ * Idempotent refresh of whichever artifacts already exist. We don't want
+ * `update` to silently install new things — that turns it into a hidden
+ * `init`. If only `.margo/` is installed, only `.margo/` gets refreshed;
+ * the user runs `install-skill` separately when they want it.
+ */
+async function update(cwd: string): Promise<void> {
+  const projectDir = await findMargoDir(cwd);
+  if (!projectDir) {
+    console.error('[margo] nothing installed in this directory or any parent — run `npx margo init` first.');
+    process.exit(1);
+  }
+  await init(projectDir, { overwriteTemplates: true });
+
+  // Refresh the skill only if it was already installed somewhere. We don't
+  // want `update` to silently install new things — that turns it into a
+  // hidden `install-skill`.
+  const gitRoot = await resolveGitRoot(cwd);
+  const projectSkill = path.join(gitRoot, '.claude', 'skills', 'margo', 'SKILL.md');
+  const userSkill = path.join(os.homedir(), '.claude', 'skills', 'margo', 'SKILL.md');
+  if (await pathExists(projectSkill)) {
+    await installSkill(cwd, { scope: 'project' });
+  } else if (await pathExists(userSkill)) {
+    await installSkill(cwd, { scope: 'user' });
+  }
 }
 
 async function uninstall(cwd: string): Promise<void> {
-  await removeRootClaudeBlock(cwd);
+  const projectDir = await findMargoDir(cwd);
+  if (projectDir) {
+    await removeRootClaudeBlock(projectDir);
+  }
+  // Remove the project-scope skill if present. We intentionally do NOT
+  // touch the user-scope skill (`~/.claude/skills/margo/`) — it's shared
+  // across repos; uninstalling margo from one project shouldn't delete
+  // it for the others.
+  const gitRoot = await resolveGitRoot(cwd);
+  const projectSkill = path.join(gitRoot, '.claude', 'skills', 'margo');
+  if (await pathExists(projectSkill)) {
+    await fs.rm(projectSkill, { recursive: true, force: true });
+    console.log(`[margo] removed ${path.relative(cwd, projectSkill) || '.claude/skills/margo'}/`);
+  }
   // We deliberately do NOT delete .margo/ — comment history may still be wanted.
-  console.log('[margo] removed root CLAUDE.md block. .margo/ left in place.');
-  console.log('       To remove fully: `rm -r .margo .claude/skills/margo` and uninstall the package.');
+  const margoRel = projectDir ? path.relative(cwd, path.join(projectDir, '.margo')) || '.margo' : '.margo';
+  console.log(`[margo] removed CLAUDE.md block. ${margoRel}/ left in place.`);
+  console.log(`       To remove fully: \`rm -r ${margoRel}\` and uninstall the package.`);
+}
+
+/**
+ * After `init`, nudge users who look like Claude Code users toward
+ * `install-skill`. We don't auto-install — it would surprise people and
+ * write to `~/.claude/` without consent in the `--user` case.
+ */
+async function printSkillHint(cwd: string): Promise<void> {
+  const projectClaude = await pathExists(path.join(cwd, '.claude'));
+  const userClaude = await pathExists(path.join(os.homedir(), '.claude'));
+  if (!projectClaude && !userClaude) return;
+  console.log('');
+  console.log('       Tip: run `npx margo install-skill` to add the Claude Code `/margo` skill.');
+  console.log('       Use `--user` to install at `~/.claude/skills/` instead of committing it per-repo.');
 }
 
 /**
@@ -407,7 +554,15 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-main().catch((err) => {
-  console.error('[margo]', err);
-  process.exit(1);
-});
+// Only run when this file is invoked directly (e.g. via the `margo` bin
+// entry). Without the guard, importing helpers like `resolveGitRoot` from
+// the test suite would re-execute `main()` and scaffold `.margo/` into
+// whatever directory the test runner happens to be in.
+const invokedDirectly = process.argv[1]
+  && import.meta.url === url.pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
+  main().catch((err) => {
+    console.error('[margo]', err);
+    process.exit(1);
+  });
+}

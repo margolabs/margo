@@ -1,6 +1,6 @@
 {
   "name": "margo-dev",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Live-app feedback layer for AI-coding teams. Comments live as files in your repo; AI works through them.",
   "author": "Stanley Song <sxhuan@gmail.com>",
   "homepage": "https://gitlab.com/metaleap/margo#readme",
