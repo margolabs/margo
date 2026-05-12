@@ -9,7 +9,7 @@
   },
   "dependencies": {},
   "devDependencies": {
-    "margo-dev": "file:../package",
+    "margo-dev": "*",
     "vite": "^5.0.0"
   }
 }

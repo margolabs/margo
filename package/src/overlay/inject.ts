@@ -230,7 +230,16 @@ export function start(opts: StartOptions): void {
   // would stay anchored to its old viewport position while the underlying
   // element scrolled away. `passive: true` so we never interfere with the
   // browser's smooth-scroll path.
-  window.addEventListener('scroll', schedule, { capture: true, passive: true });
+  //
+  // Skip scrolls originating inside the overlay itself (e.g. the inbox list).
+  // Without this filter, scrolling the inbox triggers renderInbox via
+  // renderPins, which rebuilds panel.innerHTML and resets scrollTop to 0 —
+  // the scrollbar appears but every scroll tick snaps back to top.
+  window.addEventListener('scroll', (e) => {
+    const t = e.target;
+    if (t instanceof Element && t.closest('[data-margo]')) return;
+    schedule();
+  }, { capture: true, passive: true });
   if (typeof ResizeObserver !== 'undefined') {
     new ResizeObserver(schedule).observe(document.documentElement);
   }
@@ -2874,7 +2883,7 @@ function injectStyles(): void {
       background: var(--margo-bg); color: var(--margo-fg);
       border: 1px solid var(--margo-border); border-radius: 12px;
       box-shadow: 0 12px 40px rgb(0 0 0 / .18);
-      display: flex; flex-direction: column;
+      display: grid; grid-template-rows: auto 1fr;
       animation: margo-inbox-in .16s ease-out;
       overflow: hidden;
     }
@@ -2886,7 +2895,6 @@ function injectStyles(): void {
     .margo-panel.margo-panel-no-animate { animation: none; }
     .margo-inbox-header {
       padding: 12px 14px 8px; border-bottom: 1px solid var(--margo-border);
-      flex: 0 0 auto;
     }
     .margo-inbox-titlebar {
       display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
@@ -2915,7 +2923,8 @@ function injectStyles(): void {
       background: var(--margo-muted); color: var(--margo-fg); font-weight: 500;
     }
     .margo-inbox-list {
-      flex: 1; overflow-y: auto; padding: 6px;
+      min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+      padding: 6px;
     }
     .margo-inbox-empty {
       padding: 24px 16px; text-align: center;

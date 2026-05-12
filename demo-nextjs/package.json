@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "seed:comments": "node scripts/seed-comments.mjs",
+    "seed:comments:clean": "node scripts/seed-comments.mjs --clean 0"
   },
   "dependencies": {
     "next": "16.2.6",
@@ -19,7 +21,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
-    "margo-dev": "file:../package",
+    "margo-dev": "*",
     "typescript": "^5"
   }
 }

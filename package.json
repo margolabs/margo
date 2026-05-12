@@ -1,0 +1,12 @@
+{
+  "name": "margo-monorepo",
+  "private": true,
+  "workspaces": [
+    "package",
+    "demo-app",
+    "demo-nextjs"
+  ],
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  }
+}
