@@ -3,6 +3,11 @@
 Resolved comments distilled to one-line decisions. Newest first.
 Each entry references the source comment in `.margo/comments/<id>.md`.
 
+- **2026-05-12** · `c-202ff8` · teammate@example.com · Perf seed #47 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-2ce150` · teammate@example.com · Perf seed #59 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-77971f` · teammate@example.com · Perf seed #29 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-31296a` · teammate@example.com · Perf seed #77 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-c216e2` · teammate@example.com · testt
 - **2026-05-12** · `c-77ce23` · teammate@example.com · Perf seed #23 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
 - **2026-05-12** · `c-86e140` · teammate@example.com · Perf seed #41 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
 - **2026-05-12** · `c-8b553d` · teammate@example.com · Perf seed #71 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
