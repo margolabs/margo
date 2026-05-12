@@ -155,7 +155,16 @@ export function start(opts: StartOptions): void {
     // For created / updated / deleted, naive refetch keeps things simple in v0.
     // Optimization (delta fetches) deferred.
     if (e.type === 'created' || e.type === 'updated' || e.type === 'deleted') {
-      void refetchAndRender(store, renderPins);
+      void refetchAndRender(store, renderPins).then(() => {
+        // If the panel is open for the comment that just changed (e.g. the
+        // user just submitted a reply, or a teammate did), surgically update
+        // its thread so the user sees the new content without losing their
+        // place. Skipped for 'deleted' — the panel's outside-click handler
+        // already cleans up if the user navigates away.
+        if (e.type === 'updated' || e.type === 'created') {
+          refreshOpenPanelThreadIfMatches(store, e.id);
+        }
+      });
       // A new comment file probably means a teammate pushed; their push may
       // have advanced our HEAD via the background pull. Refresh git state too.
       void refreshGitState();
@@ -319,6 +328,29 @@ async function refetchAndRender(
   store.clear();
   for (const c of comments) store.set(c.frontmatter.id, c);
   renderPins();
+}
+
+// If the comment panel is currently open and shows the comment that just
+// changed, replace JUST the thread (not the header/banner/reply form/
+// footer). Keeps the reply form's draft + collapse state intact and avoids
+// re-running the panel's entrance animation. The new thread is scrolled to
+// the bottom so the just-arrived message is visible without manual scroll.
+function refreshOpenPanelThreadIfMatches(
+  store: Map<string, Comment>,
+  id: string,
+): void {
+  const panel = document.querySelector('.margo-panel') as HTMLElement | null;
+  if (!panel || panel.dataset.commentId !== id) return;
+  const c = store.get(id);
+  if (!c) return;
+  const oldThread = panel.querySelector('.margo-thread');
+  if (!oldThread) return;
+  const temp = document.createElement('div');
+  temp.innerHTML = renderThread(c);
+  const next = temp.firstElementChild as HTMLElement | null;
+  if (!next) return;
+  oldThread.replaceWith(next);
+  next.scrollTop = next.scrollHeight;
 }
 
 function renderAllPins(
@@ -733,18 +765,23 @@ function renderInboxItem(
   const preview = (c.body.split(/\n---\n/)[0] || '').replace(/\s+/g, ' ').trim().slice(0, 100);
   const author = c.frontmatter.authorName || c.frontmatter.author;
   const orphanBadge = isOrphan ? `<span class="margo-inbox-item-orphan" title="Anchor not found on this view">⚠ anchor lost</span>` : '';
+  const avatarColor = colorForEmail(c.frontmatter.author);
+  const avatarInitial = initialOf(c.frontmatter.authorName || c.frontmatter.author);
   item.innerHTML = `
-    <div class="margo-inbox-item-head">
-      <code class="margo-inbox-item-id">${escapeHtml(c.frontmatter.id)}</code>
-      ${orphanBadge}
-      <span class="margo-inbox-item-url">${escapeHtml(url)}</span>
-      <span class="margo-inbox-item-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
-    </div>
-    <div class="margo-inbox-item-body">${escapeHtml(preview) || '<em>(empty)</em>'}</div>
-    <div class="margo-inbox-item-foot">
-      <span>${escapeHtml(author)}</span>
-      <span>${escapeHtml(formatTime(c.frontmatter.created))}</span>
-    </div>
+    <span class="margo-inbox-item-avatar" style="background:${avatarColor.bg};color:${avatarColor.fg}" title="${escapeHtml(c.frontmatter.author)}">${escapeHtml(avatarInitial)}</span>
+    <span class="margo-inbox-item-main">
+      <span class="margo-inbox-item-head">
+        <code class="margo-inbox-item-id">${escapeHtml(c.frontmatter.id)}</code>
+        ${orphanBadge}
+        <span class="margo-inbox-item-url">${escapeHtml(url)}</span>
+        <span class="margo-inbox-item-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
+      </span>
+      <span class="margo-inbox-item-body">${escapeHtml(preview) || '<em>(empty)</em>'}</span>
+      <span class="margo-inbox-item-foot">
+        <span>${escapeHtml(author)}</span>
+        <span>${escapeHtml(formatTime(c.frontmatter.created))}</span>
+      </span>
+    </span>
   `;
   if (onClick) {
     item.addEventListener('click', () => onClick(item));
@@ -1374,15 +1411,43 @@ function openCommentPanel(
       }
     };
     document.addEventListener('keydown', onKey);
+    // Outside-click closes the panel. Bound on the next tick so the click
+    // that just opened it doesn't immediately close it. The bubble-phase
+    // listener runs after element-level handlers (pin click, inbox-item
+    // click) — those already update the panel in place by calling
+    // openCommentPanel again, so we skip-close when the target is one of
+    // them (otherwise we'd close-then-reopen with a flicker). Modals are
+    // skipped too because the panel triggered them, not the user dismissing
+    // the panel.
+    const SKIP_CLOSE_SELECTOR =
+      '.margo-panel, .margo-pin, .margo-inbox-item, [data-margo-modal], .margo-modal-backdrop';
+    let onOutsideClick: ((e: MouseEvent) => void) | null = null;
+    setTimeout(() => {
+      onOutsideClick = (e: MouseEvent) => {
+        const live = document.querySelector('.margo-panel');
+        if (!live) {
+          if (onOutsideClick) document.removeEventListener('click', onOutsideClick);
+          return;
+        }
+        const target = e.target as Element | null;
+        if (!target || target.closest(SKIP_CLOSE_SELECTOR)) return;
+        live.remove();
+        if (onOutsideClick) document.removeEventListener('click', onOutsideClick);
+      };
+      document.addEventListener('click', onOutsideClick);
+    }, 0);
   }
 
   if (!readOnly) {
     const toolbar = panel.querySelector('[data-margo-toolbar]') as HTMLElement;
     for (const el of buildHeaderActions(c, sync, close, me)) toolbar.appendChild(el);
-    const replyForm = buildReplyForm(c, sync, close);
+    const replyForm = buildReplyForm(c, sync);
     if (replyForm) panel.appendChild(replyForm);
   }
   panel.appendChild(makeIdFooter(c.frontmatter.id));
+  // Tag the panel with the comment id so SSE-driven thread refreshes can
+  // find the matching open panel (see refreshOpenPanelThreadIfMatches).
+  panel.dataset.commentId = c.frontmatter.id;
   // Anchor the panel near the pin. Done after content is in place so
   // we can measure the final panel size for placement.
   if (anchor) positionPanelNearAnchor(panel, anchor);
@@ -1531,8 +1596,13 @@ function buildHeaderActions(
  * The collapsible reply form. Hidden by default; revealed by the Reply
  * button in the header toolbar. Returns null for resolved/wontfix
  * comments (no replying once a thread is closed) and for read-only mode.
+ *
+ * Submit does NOT close the panel — the user wants to see their reply
+ * land in the thread (otherwise the panel vanishes before they can
+ * confirm what they wrote). The SSE 'updated' event refreshes the open
+ * panel's thread; we just collapse + clear the form here.
  */
-function buildReplyForm(c: Comment, sync: SyncClient, close: () => void): HTMLElement | null {
+function buildReplyForm(c: Comment, sync: SyncClient): HTMLElement | null {
   const isResolved = c.frontmatter.status === 'resolved' || c.frontmatter.status === 'wontfix';
   if (isResolved) return null;
 
@@ -1576,7 +1646,13 @@ function buildReplyForm(c: Comment, sync: SyncClient, close: () => void): HTMLEl
     ta.disabled = true;
     try {
       await sync.patchComment(c.frontmatter.id, { reply: { body } });
-      close();
+      // Reset the form for the next reply. Don't close the panel; the
+      // SSE-driven thread refresh will surface the just-posted reply.
+      ta.value = '';
+      ta.style.height = 'auto';
+      ta.disabled = false;
+      submit.disabled = true;
+      form.hidden = true;
     } catch (err) {
       submit.disabled = false;
       ta.disabled = false;
@@ -2948,7 +3024,8 @@ function injectStyles(): void {
       color: var(--margo-muted-fg); font-size: 13px; line-height: 1.5;
     }
     .margo-inbox-item {
-      display: block; width: 100%; text-align: left;
+      display: flex; gap: 10px; align-items: flex-start;
+      width: 100%; text-align: left;
       background: transparent; border: 0;
       padding: 10px 12px; margin: 2px 0; border-radius: 8px;
       cursor: pointer; font: inherit;
@@ -2956,6 +3033,18 @@ function injectStyles(): void {
     }
     .margo-inbox-item:hover { background: var(--margo-muted); }
     .margo-inbox-item:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: -2px; }
+    .margo-inbox-item-avatar {
+      flex: 0 0 auto;
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; border-radius: 9999px;
+      font-size: 12px; font-weight: 600;
+      box-shadow: 0 1px 2px rgb(0 0 0 / .08);
+      margin-top: 1px;
+    }
+    .margo-inbox-item-main {
+      flex: 1; min-width: 0;
+      display: flex; flex-direction: column;
+    }
     .margo-inbox-item-head {
       display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
     }
