@@ -3,6 +3,17 @@
 Resolved comments distilled to one-line decisions. Newest first.
 Each entry references the source comment in `.margo/comments/<id>.md`.
 
+- **2026-05-12** · `c-5b80ec` · teammate@example.com · Perf seed #8 on /features. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-d217f9` · teammate@example.com · Perf seed #51 on /pricing. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-aa6d31` · teammate@example.com · Perf seed #45 on /pricing. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-bcad02` · teammate@example.com · Perf seed #21 on /pricing. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-f42f5a` · teammate@example.com · Perf seed #81 on /pricing. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-446790` · teammate@example.com · Perf seed #15 on /pricing. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-c9efb0` · teammate@example.com · Perf seed #65 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-d05868` · teammate@example.com · Perf seed #35 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-d99701` · teammate@example.com · Perf seed #11 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-e11767` · teammate@example.com · Perf seed #83 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
+- **2026-05-12** · `c-bbb263` · teammate@example.com · Perf seed #5 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
 - **2026-05-11** · `c-77f03a` · xhsong@fortinet.com · testssss
 - **2026-05-11** · `c-402466` · xhsong@fortinet.com · gap?
 - **2026-05-10** · `c-d15b19` · sxhuan@gmail.com · test
