@@ -33,7 +33,8 @@ export function start(opts: StartOptions): void {
   // own-only delete affordance — null while the fetch is in flight or in
   // preview mode (where we don't ask the backend at all).
   let me: { email: string } | null = null;
-  // Local repo state — drives the divergence diagnostics in the orphan tray.
+  // Local repo state — drives the divergence diagnostics in expanded
+  // orphan rows of the inbox.
   // Refreshed on SSE events (someone else's commit landed) and on tab focus
   // (user may have run git checkout / git pull in another terminal).
   let gitState: GitState | null = null;
@@ -69,13 +70,26 @@ export function start(opts: StartOptions): void {
   // other routes can't be checked without navigating.
   const orphanIds = new Set<string>();
 
+  // Inbox filter state. Three independent dimensions on top of the existing
+  // Open/All status tabs:
+  // - mine: localStorage — durable preference ("I always want to see only mine")
+  // - thisPage: sessionStorage — contextual to the current browsing session
+  //   (durable would footgun: page B with this-page on hides everything else)
+  // - search: volatile — clears on reload, no need to persist a transient query
+  const filterMineKey = 'margo:filterMine';
+  const filterThisPageKey = 'margo:filterThisPage';
+  let filterMine = localStorage.getItem(filterMineKey) === '1';
+  let filterThisPage = sessionStorage.getItem(filterThisPageKey) === '1';
+  let searchQuery = '';
+
   const renderPins = () => {
     renderAllPins(root, store, sync, opts.mode === 'preview', me, showResolved, gitState, hidePins, orphanIds);
     renderInbox();
   };
   const renderInbox = () => {
     renderInboxPanel(
-      root, store, sync, inboxOpen, opts.mode === 'preview', showResolved, orphanIds,
+      root, store, sync, inboxOpen, opts.mode === 'preview', showResolved, orphanIds, me, gitState,
+      { mine: filterMine, thisPage: filterThisPage, search: searchQuery },
       suppressInboxEntranceAnim,
       (next) => {
         // The inbox's "Open" / "All" filter doubles as the global show-resolved
@@ -83,6 +97,18 @@ export function start(opts: StartOptions): void {
         showResolved = next;
         localStorage.setItem(showResolvedKey, next ? '1' : '0');
         renderPins();
+      },
+      (patch) => {
+        if (patch.mine !== undefined) {
+          filterMine = patch.mine;
+          localStorage.setItem(filterMineKey, patch.mine ? '1' : '0');
+        }
+        if (patch.thisPage !== undefined) {
+          filterThisPage = patch.thisPage;
+          sessionStorage.setItem(filterThisPageKey, patch.thisPage ? '1' : '0');
+        }
+        if (patch.search !== undefined) searchQuery = patch.search;
+        renderInbox();
       },
       () => { inboxOpen = false; sessionStorage.setItem(inboxOpenKey, '0'); renderInbox(); },
     );
@@ -147,8 +173,8 @@ export function start(opts: StartOptions): void {
     void sync.getMe().then((u) => { me = u; renderPins(); });
     void refreshGitState();
     // Catches the common case: user runs `git checkout other-branch` in a
-    // terminal, alt-tabs back to the browser. Without this the orphan tray
-    // would still show diagnostics for the previous branch.
+    // terminal, alt-tabs back to the browser. Without this the inbox would
+    // still show divergence diagnostics for the previous branch.
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') void refreshGitState();
     });
@@ -306,8 +332,8 @@ function renderAllPins(
   hidePins: boolean,
   orphanIds: Set<string>,
 ): void {
-  // Clear existing pin + highlight + tray + bulk-action nodes (keep the launcher and toggle)
-  for (const el of Array.from(root.querySelectorAll('[data-margo-pin],[data-margo-highlight],[data-margo-tray]'))) el.remove();
+  // Clear existing pin + highlight nodes (keep the launcher and toggle)
+  for (const el of Array.from(root.querySelectorAll('[data-margo-pin],[data-margo-highlight]'))) el.remove();
   // Reset for this render — same Set instance so callers (the inbox) see
   // updates without re-passing.
   orphanIds.clear();
@@ -407,9 +433,9 @@ function renderAllPins(
     root.appendChild(pin);
   }
 
-  if (orphans.length > 0) renderOrphanTray(root, orphans, sync, readOnly, me, gitState);
-  // The "resolve N on this page" bulk action lives inside the inbox panel
-  // now, so renderAllPins doesn't need to render its own bulk bar.
+  // Orphaned comments are surfaced inside the inbox panel (sorted to top,
+  // expandable inline with diagnostics + actions). renderAllPins only needs
+  // to populate the shared orphanIds Set so renderInboxPanel can read it.
 }
 
 function renderInboxToggle(root: HTMLElement, onClick: () => void): void {
@@ -426,6 +452,12 @@ function renderInboxToggle(root: HTMLElement, onClick: () => void): void {
   root.appendChild(btn);
 }
 
+interface InboxFilterState {
+  mine: boolean;
+  thisPage: boolean;
+  search: string;
+}
+
 function renderInboxPanel(
   root: HTMLElement,
   store: Map<string, Comment>,
@@ -434,8 +466,12 @@ function renderInboxPanel(
   readOnly: boolean,
   showResolved: boolean,
   orphanIds: Set<string>,
+  me: { email: string } | null,
+  gitState: GitState | null,
+  filters: InboxFilterState,
   suppressEntranceAnim: boolean,
   onShowResolvedChange: (next: boolean) => void,
+  onFiltersChange: (patch: Partial<InboxFilterState>) => void,
   onClose: () => void,
 ): void {
   let panel = root.querySelector('[data-margo-inbox]') as HTMLElement | null;
@@ -458,25 +494,101 @@ function renderInboxPanel(
     root.appendChild(panel);
   }
 
+  // Preserve the user's typing across the imminent innerHTML rebuild — SSE
+  // events, status changes, and filter toggles all re-render the panel, and
+  // we don't want any of them to wipe the search box mid-keystroke. Capture
+  // the input's current value (which may be ahead of state.search if a
+  // re-render fires during a fast-typing burst), focus, and selection.
+  const existingSearch = panel.querySelector<HTMLInputElement>('.margo-inbox-search-input');
+  const searchFocusState = existingSearch && document.activeElement === existingSearch
+    ? {
+      value: existingSearch.value,
+      selectionStart: existingSearch.selectionStart,
+      selectionEnd: existingSearch.selectionEnd,
+    }
+    : null;
+
   // The "Open" / "All" filter is bound to the global show-resolved state
   // (see start()), so the inbox doubles as the show-resolved control.
   const openStatuses: ReadonlySet<string> = new Set(['open', 'in-progress', 'ready-for-review', 'blocked']);
   const visibleStatuses: ReadonlySet<string> = showResolved
     ? new Set([...openStatuses, 'resolved', 'wontfix'])
     : openStatuses;
+  const route = currentRoute();
+  const meEmail = me?.email ?? null;
+  // Each chip count is computed by applying every OTHER active filter but
+  // not the chip's own dimension — so the number on "This page · N" shows
+  // how many comments would be visible if the user toggled that filter on.
+  // Search is always applied (it's a continuous reduction, not a tab).
+  const q = filters.search.trim().toLowerCase();
+  const matchesSearch = (c: Comment): boolean => {
+    if (!q) return true;
+    const url = c.frontmatter.target.url || '';
+    const author = (c.frontmatter.authorName || c.frontmatter.author || '').toLowerCase();
+    return (
+      author.includes(q) ||
+      c.frontmatter.id.toLowerCase().includes(q) ||
+      url.toLowerCase().includes(q) ||
+      c.body.toLowerCase().includes(q)
+    );
+  };
+  const matchesMine = (c: Comment): boolean => !meEmail || c.frontmatter.author === meEmail;
+  const matchesThisPage = (c: Comment): boolean => c.frontmatter.target.url === route;
+
+  // Final visible list: status + mine + thisPage + search.
+  // Sort: orphans first (they need attention), then by created desc.
+  // Stable sort preserves the date order within each group.
   const all = Array.from(store.values())
     .filter((c) => visibleStatuses.has(c.frontmatter.status))
-    .sort((a, b) => (b.frontmatter.created || '').localeCompare(a.frontmatter.created || ''));
-  const totalOpen = Array.from(store.values()).filter((c) =>
-    openStatuses.has(c.frontmatter.status),
-  ).length;
+    .filter((c) => (!filters.mine || matchesMine(c)))
+    .filter((c) => (!filters.thisPage || matchesThisPage(c)))
+    .filter(matchesSearch)
+    .sort((a, b) => (b.frontmatter.created || '').localeCompare(a.frontmatter.created || ''))
+    .sort((a, b) => {
+      const ao = orphanIds.has(a.frontmatter.id) ? 0 : 1;
+      const bo = orphanIds.has(b.frontmatter.id) ? 0 : 1;
+      return ao - bo;
+    });
+
+  // Chip counts. For status tabs we also apply mine/thisPage/search; for
+  // the mine chip we drop mine; for thisPage we drop thisPage.
+  const baseFiltered = Array.from(store.values())
+    .filter((c) => (!filters.mine || matchesMine(c)))
+    .filter((c) => (!filters.thisPage || matchesThisPage(c)))
+    .filter(matchesSearch);
+  const openCount = baseFiltered.filter((c) => openStatuses.has(c.frontmatter.status)).length;
+  const allCount = baseFiltered.length;
+  // For Mine count: respect status (current showResolved) + thisPage + search,
+  // and count what's mine.
+  const mineCount = Array.from(store.values())
+    .filter((c) => visibleStatuses.has(c.frontmatter.status))
+    .filter((c) => (!filters.thisPage || matchesThisPage(c)))
+    .filter(matchesSearch)
+    .filter(matchesMine).length;
+  const thisPageCount = Array.from(store.values())
+    .filter((c) => visibleStatuses.has(c.frontmatter.status))
+    .filter((c) => (!filters.mine || matchesMine(c)))
+    .filter(matchesSearch)
+    .filter(matchesThisPage).length;
+
   // Unresolved comments anchored to the current page — drives the
   // contextual "Resolve N on this page" button at the top of the list.
-  const route = currentRoute();
+  // Independent of filters because the action operates on a fixed scope.
   const onPage = Array.from(store.values()).filter((c) =>
     openStatuses.has(c.frontmatter.status) && c.frontmatter.target.url === route,
   );
+  // Orphans visible in the current filter — drives the "Resolve N orphans"
+  // bulk action. Skipping wontfix/resolved orphans is implicit via `all`.
+  const visibleOrphans = all.filter((c) => orphanIds.has(c.frontmatter.id));
 
+  // Hide the "Mine" chip when we don't know the user (preview mode).
+  const showMineChip = !!meEmail;
+  // Single unified chip row. Open/All are radio-like (clicking one selects
+  // it, the other deselects); Mine/This page are independent toggles. A
+  // hairline divider visually groups them without enforcing it via separate
+  // rows. Order is intentional: status first (anchors the user's mental
+  // model — "am I looking at open or everything?"), then narrow-or-widen
+  // toggles to the right.
   panel.innerHTML = `
     <header class="margo-inbox-header">
       <div class="margo-inbox-titlebar">
@@ -484,17 +596,59 @@ function renderInboxPanel(
         <span class="margo-inbox-count">${all.length} ${all.length === 1 ? 'comment' : 'comments'}</span>
         <button type="button" class="margo-inbox-close" aria-label="close inbox">×</button>
       </div>
-      <div class="margo-inbox-filters" role="tablist">
-        <button type="button" role="tab" data-filter="open" aria-selected="${!showResolved}">Open · ${totalOpen}</button>
-        <button type="button" role="tab" data-filter="all" aria-selected="${showResolved}">All · ${store.size}</button>
+      <div class="margo-inbox-search">
+        <span class="margo-inbox-search-icon" aria-hidden="true">🔍</span>
+        <input
+          type="search"
+          class="margo-inbox-search-input"
+          placeholder="Search comments…"
+          value="${escapeHtml(filters.search)}"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </div>
+      <div class="margo-inbox-chips" role="group" aria-label="filters">
+        <button type="button" class="margo-inbox-chip margo-inbox-chip-status" data-chip="open" aria-pressed="${!showResolved}">Open · ${openCount}</button>
+        <button type="button" class="margo-inbox-chip margo-inbox-chip-status" data-chip="all" aria-pressed="${showResolved}">All · ${allCount}</button>
+        <span class="margo-inbox-chips-divider" aria-hidden="true"></span>
+        ${showMineChip ? `<button type="button" class="margo-inbox-chip" data-chip="mine" aria-pressed="${filters.mine}">Mine · ${mineCount}</button>` : ''}
+        <button type="button" class="margo-inbox-chip" data-chip="thisPage" aria-pressed="${filters.thisPage}">This page · ${thisPageCount}</button>
       </div>
     </header>
     <div class="margo-inbox-list" role="list"></div>
   `;
   const list = panel.querySelector('.margo-inbox-list') as HTMLElement;
 
-  // Bulk action: only when there are >1 unresolved on this page (1 is faster
-  // to resolve from the panel directly), and we're not in preview/read-only.
+  // Restore the search input's value + focus + selection if it was focused
+  // before this re-render. Done before re-binding so the listener sees the
+  // restored value if the user keeps typing.
+  if (searchFocusState) {
+    const newSearch = panel.querySelector<HTMLInputElement>('.margo-inbox-search-input');
+    if (newSearch) {
+      newSearch.value = searchFocusState.value;
+      newSearch.focus();
+      try {
+        newSearch.setSelectionRange(searchFocusState.selectionStart ?? 0, searchFocusState.selectionEnd ?? 0);
+      } catch {
+        // setSelectionRange on type=search can throw in older Safari — non-fatal.
+      }
+    }
+  }
+
+  // Bulk action: only when there are >1 orphaned comments (1 expands fine
+  // inline), and we're not in preview/read-only. Sits at the very top
+  // because orphans need attention — easy to see, easy to clear in bulk.
+  if (!readOnly && visibleOrphans.length > 1) {
+    const bulk = document.createElement('button');
+    bulk.type = 'button';
+    bulk.className = 'margo-inbox-bulk margo-inbox-bulk-orphan';
+    bulk.innerHTML = `<span class="margo-bulk-warn">⚠</span> Resolve all ${visibleOrphans.length} orphaned`;
+    bulk.addEventListener('click', () => bulkResolve(bulk, visibleOrphans, sync, 'orphans'));
+    list.appendChild(bulk);
+  }
+  // On-page bulk: same rationale as before, but only show when there are
+  // >1 unresolved comments on the current route. Orphans aren't included
+  // here — they have their own bulk above.
   if (!readOnly && onPage.length > 1) {
     const bulk = document.createElement('button');
     bulk.type = 'button';
@@ -507,24 +661,68 @@ function renderInboxPanel(
   if (all.length === 0) {
     const empty = document.createElement('p');
     empty.className = 'margo-inbox-empty';
-    empty.textContent = showResolved
-      ? 'No comments yet. Pin something on the live app.'
-      : 'No open comments. Switch to All to see resolved ones.';
+    // Tailor the empty-state message to the active filters so the user
+    // knows WHY the list is empty (and what to toggle to fix it).
+    const hasNarrowingFilter = filters.mine || filters.thisPage || q.length > 0;
+    if (hasNarrowingFilter) {
+      empty.textContent = 'No matches. Try clearing filters or search.';
+    } else if (!showResolved) {
+      empty.textContent = 'No open comments. Switch to All to see resolved ones.';
+    } else {
+      empty.textContent = 'No comments yet. Pin something on the live app.';
+    }
     list.appendChild(empty);
   } else {
-    for (const c of all) list.appendChild(renderInboxItem(c, orphanIds.has(c.frontmatter.id)));
+    for (const c of all) {
+      const isOrphan = orphanIds.has(c.frontmatter.id);
+      list.appendChild(renderInboxItem(
+        c,
+        isOrphan,
+        // Orphans can't be navigated to (no pin to land on), so clicking
+        // opens the standard comment panel anchored to the inbox row. The
+        // panel's positioner places it to the left of the inbox when the
+        // inbox is open, giving the "popup beside the list item" feel.
+        isOrphan
+          ? (item) => openCommentPanel(root, c, sync, readOnly, me, item, { orphan: { gitState } })
+          : undefined,
+      ));
+    }
   }
 
   panel.querySelector('.margo-inbox-close')!.addEventListener('click', onClose);
-  for (const tab of Array.from(panel.querySelectorAll<HTMLElement>('.margo-inbox-filters button'))) {
-    tab.addEventListener('click', () => {
-      const next = (tab.dataset.filter as 'open' | 'all') === 'all';
-      if (next !== showResolved) onShowResolvedChange(next);
+  // All filter chips in one row. Open/All are radio-like (clicking a
+  // not-currently-selected one flips showResolved); Mine/This page are
+  // independent toggles. Clicking the already-pressed status chip is a
+  // no-op — they don't both deselect because status is required.
+  for (const chip of Array.from(panel.querySelectorAll<HTMLElement>('.margo-inbox-chip'))) {
+    chip.addEventListener('click', () => {
+      const dim = chip.dataset.chip as 'open' | 'all' | 'mine' | 'thisPage';
+      if (dim === 'open') {
+        if (showResolved) onShowResolvedChange(false);
+      } else if (dim === 'all') {
+        if (!showResolved) onShowResolvedChange(true);
+      } else if (dim === 'mine') {
+        onFiltersChange({ mine: !filters.mine });
+      } else {
+        onFiltersChange({ thisPage: !filters.thisPage });
+      }
+    });
+  }
+  // Search input — instant filter, no debounce. Capture+restore around the
+  // re-render keeps the cursor put. The chip counts get recomputed too.
+  const searchInput = panel.querySelector<HTMLInputElement>('.margo-inbox-search-input');
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      onFiltersChange({ search: searchInput.value });
     });
   }
 }
 
-function renderInboxItem(c: Comment, isOrphan: boolean): HTMLElement {
+function renderInboxItem(
+  c: Comment,
+  isOrphan: boolean,
+  onClick?: (item: HTMLElement) => void,
+): HTMLElement {
   const item = document.createElement('button');
   item.type = 'button';
   item.className = 'margo-inbox-item';
@@ -548,7 +746,11 @@ function renderInboxItem(c: Comment, isOrphan: boolean): HTMLElement {
       <span>${escapeHtml(formatTime(c.frontmatter.created))}</span>
     </div>
   `;
-  item.addEventListener('click', () => navigateToComment(c.frontmatter.target.url, c.frontmatter.id));
+  if (onClick) {
+    item.addEventListener('click', () => onClick(item));
+  } else {
+    item.addEventListener('click', () => navigateToComment(c.frontmatter.target.url, c.frontmatter.id));
+  }
   return item;
 }
 
@@ -730,239 +932,6 @@ async function bulkResolve(
   // SSE refresh will re-render and remove the bar.
 }
 
-function renderOrphanTray(
-  root: HTMLElement,
-  orphans: Comment[],
-  sync: SyncClient,
-  readOnly: boolean,
-  me: { email: string } | null,
-  gitState: GitState | null,
-): void {
-  const tray = document.createElement('div');
-  tray.dataset.margoTray = '';
-  tray.className = 'margo-tray';
-
-  const toggle = document.createElement('button');
-  toggle.className = 'margo-tray-toggle';
-  toggle.type = 'button';
-  toggle.innerHTML = `
-    <span class="margo-tray-icon">⚠</span>
-    <span class="margo-tray-label">${orphans.length} orphaned ${orphans.length === 1 ? 'comment' : 'comments'}</span>
-    <span class="margo-tray-chev">▾</span>
-  `;
-  tray.appendChild(toggle);
-
-  const list = document.createElement('div');
-  list.className = 'margo-tray-list';
-  list.hidden = true;
-  // Accordion: one orphan expanded at a time. Default to none expanded so
-  // opening the tray gives a quick scannable list, not a wall of cards.
-  let expandedId: string | null = null;
-
-  const renderList = () => {
-    list.innerHTML = '';
-    if (!readOnly && orphans.length > 1) {
-      const bulk = document.createElement('button');
-      bulk.type = 'button';
-      bulk.className = 'margo-tray-resolve-all';
-      bulk.textContent = `resolve all ${orphans.length}`;
-      bulk.addEventListener('click', () => bulkResolve(bulk, orphans, sync, 'orphans'));
-      list.appendChild(bulk);
-    }
-    for (const c of orphans) {
-      list.appendChild(renderOrphanRow(c, expandedId === c.frontmatter.id, sync, readOnly, me, gitState, () => {
-        expandedId = expandedId === c.frontmatter.id ? null : c.frontmatter.id;
-        renderList();
-      }));
-    }
-  };
-  renderList();
-  tray.appendChild(list);
-
-  toggle.addEventListener('click', () => {
-    list.hidden = !list.hidden;
-    tray.classList.toggle('margo-tray-open', !list.hidden);
-  });
-
-  root.appendChild(tray);
-}
-
-function renderOrphanRow(
-  c: Comment,
-  expanded: boolean,
-  sync: SyncClient,
-  readOnly: boolean,
-  me: { email: string } | null,
-  gitState: GitState | null,
-  onToggle: () => void,
-): HTMLElement {
-  const wrap = document.createElement('div');
-  wrap.className = 'margo-orphan-row';
-  wrap.dataset.commentId = c.frontmatter.id;
-  if (expanded) wrap.dataset.expanded = '';
-
-  const author = c.frontmatter.authorName || c.frontmatter.author;
-  const url = c.frontmatter.target.url || '/';
-  const head = document.createElement('button');
-  head.type = 'button';
-  head.className = 'margo-orphan-row-head';
-  head.innerHTML = `
-    <code class="margo-orphan-row-id">${escapeHtml(c.frontmatter.id)}</code>
-    <span class="margo-orphan-row-author">${escapeHtml(author)}</span>
-    <span class="margo-orphan-row-url">${escapeHtml(url)}</span>
-    <span class="margo-orphan-row-chev" aria-hidden="true">${expanded ? '▴' : '▾'}</span>
-  `;
-  head.addEventListener('click', (e) => { e.stopPropagation(); onToggle(); });
-  wrap.appendChild(head);
-
-  // Only build the heavy body when the user actually wants it. Keeps the
-  // tray fast even with many orphans.
-  if (expanded) wrap.appendChild(renderOrphanCard(c, sync, readOnly, me, gitState));
-  return wrap;
-}
-
-function renderOrphanCard(
-  c: Comment,
-  sync: SyncClient,
-  readOnly: boolean,
-  me: { email: string } | null,
-  gitState: GitState | null,
-): HTMLElement {
-  const card = document.createElement('div');
-  card.className = 'margo-orphan';
-  card.dataset.commentId = c.frontmatter.id;
-  const isResolved = c.frontmatter.status === 'resolved' || c.frontmatter.status === 'wontfix';
-  if (isResolved) card.dataset.resolved = '';
-
-  // Show what was originally anchored — phrase if it was a text selection,
-  // else the element's captured text snippet. Strikethrough signals "gone".
-  const anchor = c.frontmatter.target.textAnchor;
-  const quoted = anchor?.phrase ?? c.frontmatter.target.text ?? '';
-  const role = c.frontmatter.target.role ?? '';
-  const wasAt = `${role ? `<${role}>` : ''} on ${c.frontmatter.target.url}`;
-
-  const header = document.createElement('header');
-  header.innerHTML = `
-    <div class="margo-panel-titlebar">
-      <strong class="margo-panel-author">${escapeHtml(c.frontmatter.author)}</strong>
-      <button class="margo-close" type="button" aria-label="dismiss">×</button>
-    </div>
-    <div class="margo-panel-meta">
-      ${c.frontmatter.role ? `<span class="margo-role">${escapeHtml(c.frontmatter.role)}</span>` : ''}
-      <span class="margo-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
-    </div>
-  `;
-  // Close just dismisses this card from the current view. The orphan stays
-  // in the file system; next renderAllPins (resize, mutation, SSE refresh)
-  // will surface it again until the user actually replies / resolves / deletes.
-  header.querySelector('.margo-close')!.addEventListener('click', () => card.remove());
-  card.appendChild(header);
-
-  const diag = diagnoseOrphan(c, gitState);
-  const lostLabel = document.createElement('p');
-  lostLabel.className = 'margo-orphan-label';
-  lostLabel.textContent = diag.label;
-  card.appendChild(lostLabel);
-  if (diag.hint) {
-    const hint = document.createElement('p');
-    hint.className = 'margo-orphan-hint';
-    hint.textContent = diag.hint;
-    card.appendChild(hint);
-  }
-
-  if (quoted) {
-    const q = document.createElement('blockquote');
-    q.className = 'margo-orphan-quote';
-    q.innerHTML = `<span class="margo-orphan-quote-text">${escapeHtml(truncate(quoted, 220))}</span>`;
-    card.appendChild(q);
-  }
-
-  const meta = document.createElement('p');
-  meta.className = 'margo-orphan-meta';
-  meta.textContent = wasAt;
-  card.appendChild(meta);
-
-  // Use the chat thread renderer so orphan cards match the panel's premium look.
-  const threadWrap = document.createElement('div');
-  threadWrap.innerHTML = renderThread(c);
-  card.appendChild(threadWrap.firstElementChild!);
-
-  if (!readOnly) {
-    const actions = document.createElement('div');
-    actions.className = 'margo-actions';
-    if (isResolved) {
-      actions.appendChild(makeOrphanButton('reopen', 'reopen', async (btn) => {
-        btn.disabled = true;
-        await sync.patchComment(c.frontmatter.id, { status: 'open' });
-      }));
-      if (canDelete(c, me)) {
-        actions.appendChild(makeOrphanButton('delete', 'delete', async (btn) => {
-          if (!(await confirmDelete(c))) return;
-          btn.disabled = true;
-          await sync.deleteComment(c.frontmatter.id);
-        }));
-      }
-    } else {
-      actions.appendChild(makeOrphanButton('reply', 'reply', async (btn) => {
-        const text = await uiPrompt({
-          title: 'Reply',
-          message: 'The commenter will see this in the comment file and the inbox.',
-          placeholder: 'e.g. "Removed because the section was deprecated."',
-          multiline: true,
-          confirmLabel: 'Post reply',
-        });
-        if (!text || !text.trim()) return;
-        btn.disabled = true;
-        await sync.patchComment(c.frontmatter.id, { reply: { body: text.trim() } });
-      }));
-      actions.appendChild(makeOrphanButton('resolve', 'resolved', async (btn) => {
-        const summary = await promptDecisionSummary(c);
-        if (summary === null) return;
-        btn.disabled = true;
-        await sync.patchComment(c.frontmatter.id, {
-          status: 'resolved',
-          ...(summary ? { decisionSummary: summary } : {}),
-        });
-      }));
-      // Same status as the in-panel "Dismiss" action — label kept in sync.
-      actions.appendChild(makeOrphanButton('wontfix', 'dismiss', async (btn) => {
-        btn.disabled = true;
-        await sync.patchComment(c.frontmatter.id, { status: 'wontfix' });
-      }));
-      if (canDelete(c, me)) {
-        actions.appendChild(makeOrphanButton('delete', 'delete', async (btn) => {
-          if (!(await confirmDelete(c))) return;
-          btn.disabled = true;
-          await sync.deleteComment(c.frontmatter.id);
-        }));
-      }
-    }
-    card.appendChild(actions);
-  }
-  card.appendChild(makeIdFooter(c.frontmatter.id));
-
-  return card;
-}
-
-function makeOrphanButton(
-  action: string,
-  label: string,
-  run: (btn: HTMLButtonElement) => Promise<void>,
-): HTMLButtonElement {
-  const b = document.createElement('button');
-  b.dataset.margoAction = action;
-  b.type = 'button';
-  b.textContent = label;
-  b.addEventListener('click', async () => {
-    try { await run(b); }
-    catch (err) {
-      b.disabled = false;
-      await uiAlert((err as Error).message, `${action} failed`);
-    }
-  });
-  return b;
-}
-
 async function promptDecisionSummary(c: Comment): Promise<string | null> {
   // Pre-fill with the first non-empty line of the comment so trivial cases
   // ("fix the typo") can be accepted in one click. Returns null on cancel,
@@ -1026,6 +995,27 @@ function diagnoseOrphan(c: Comment, gitState: GitState | null): { label: string;
     label: 'Element no longer exists in the code at this commit.',
     hint: null,
   };
+}
+
+// Compact, panel-embedded version of the orphan card content. Used when the
+// comment panel is opened for an orphaned comment from the inbox — there's
+// no pin to anchor the panel to in the page itself, so the banner replaces
+// what the pin's visual presence would have conveyed (which element, what
+// the anchor text was, and why we couldn't find it).
+function buildOrphanBannerHtml(c: Comment, gitState: GitState | null): string {
+  const diag = diagnoseOrphan(c, gitState);
+  const target = c.frontmatter.target;
+  const quoted = target.textAnchor?.phrase ?? target.text ?? '';
+  const role = target.role ?? '';
+  const wasAt = `${role ? `&lt;${escapeHtml(role)}&gt;` : ''}${role ? ' on ' : ''}${escapeHtml(target.url || '/')}`;
+  return `
+    <div class="margo-panel-orphan">
+      <p class="margo-panel-orphan-label">${escapeHtml(diag.label)}</p>
+      ${diag.hint ? `<p class="margo-panel-orphan-hint">${escapeHtml(diag.hint)}</p>` : ''}
+      ${quoted ? `<blockquote class="margo-panel-orphan-quote"><span class="margo-panel-orphan-quote-text">${escapeHtml(truncate(quoted, 200))}</span></blockquote>` : ''}
+      <p class="margo-panel-orphan-meta">${wasAt}</p>
+    </div>
+  `;
 }
 
 function enablePinComposer(
@@ -1310,6 +1300,14 @@ function leafmostNonOverlayAt(x: number, y: number): Element | null {
 }
 
 
+interface OpenPanelOptions {
+  // When present, render a small diagnostic banner near the top of the
+  // panel — used when the panel is opened for an orphaned comment from the
+  // inbox (no pin exists to anchor it; the banner replaces what the pin's
+  // visual presence would have conveyed).
+  orphan?: { gitState: GitState | null };
+}
+
 function openCommentPanel(
   root: HTMLElement,
   c: Comment,
@@ -1317,6 +1315,7 @@ function openCommentPanel(
   readOnly: boolean,
   me: { email: string } | null,
   anchor?: Element,
+  options?: OpenPanelOptions,
 ): void {
   // Reuse the existing panel element when present so swapping between
   // comments (clicking through the inbox) doesn't destroy + rebuild the
@@ -1340,6 +1339,7 @@ function openCommentPanel(
   // and forces the toolbar buttons off the visible row. Hovering surfaces
   // the canonical email for cases where two teammates share a first name.
   const displayName = displayNameOf(c.frontmatter);
+  const orphanBanner = options?.orphan ? buildOrphanBannerHtml(c, options.orphan.gitState) : '';
   panel.innerHTML = `
     <header>
       <div class="margo-panel-titlebar">
@@ -1348,12 +1348,14 @@ function openCommentPanel(
           <div class="margo-panel-meta">
             ${c.frontmatter.role ? `<span class="margo-role">${escapeHtml(c.frontmatter.role)}</span>` : ''}
             <span class="margo-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
+            ${options?.orphan ? '<span class="margo-status margo-status-orphan" title="Anchor not found on this view">⚠ anchor lost</span>' : ''}
           </div>
         </div>
         <div class="margo-panel-toolbar" data-margo-toolbar></div>
         <button class="margo-close" type="button" aria-label="close">×</button>
       </div>
     </header>
+    ${orphanBanner}
     ${renderThread(c)}
     ${readOnly ? '<p class="margo-readonly">read-only — run <code>npm run dev</code> locally to reply</p>' : ''}
   `;
@@ -2692,73 +2694,44 @@ function injectStyles(): void {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
     }
     body.margo-targeting * { cursor: crosshair !important; }
-    /* ——— orphan tray (bottom-left, opposite the launcher) ——— */
-    .margo-tray {
-      position: fixed; bottom: 16px; left: 16px; z-index: 999999;
-      display: flex; flex-direction: column-reverse; align-items: flex-start;
-      gap: 8px;
-      max-width: min(420px, calc(100vw - 32px));
-    }
-    .margo-tray-toggle {
-      display: inline-flex; align-items: center; gap: 8px;
-      height: 36px; padding: 0 14px;
-      background: hsl(38 92% 96%); color: hsl(28 80% 28%);
-      border: 1px solid hsl(38 92% 75%); border-radius: 9999px;
-      font: inherit; font-size: 13px; font-weight: 500;
-      cursor: pointer;
-      box-shadow: 0 1px 2px rgb(0 0 0 / .08), 0 4px 12px rgb(0 0 0 / .08);
-      transition: background-color .12s, border-color .12s;
-    }
-    .margo-tray-toggle:hover { background: hsl(38 92% 92%); }
-    .margo-tray-toggle:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
-    .margo-tray-icon { font-size: 14px; }
-    .margo-tray-chev { transition: transform .12s ease; font-size: 10px; opacity: .6; }
-    .margo-tray.margo-tray-open .margo-tray-chev { transform: rotate(180deg); }
-    .margo-tray-list {
-      display: flex; flex-direction: column; gap: 8px;
-      max-height: 60vh; overflow: auto;
-      padding: 4px; /* breathing room for focus rings */
-    }
-    .margo-orphan {
-      width: 380px; max-width: 100%;
-      background: var(--margo-bg); color: var(--margo-fg);
-      border: 1px solid var(--margo-border); border-left: 3px solid hsl(38 92% 50%);
-      border-radius: var(--margo-radius);
-      box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1);
-      padding: 0; overflow: hidden;
-      animation: margo-pop .14s ease-out;
-      display: flex; flex-direction: column;
-    }
-    /* Reuse panel header styling */
-    .margo-orphan > header {
+    /* ——— orphan-info banner inside the standard comment panel ——— */
+    .margo-panel-orphan {
+      margin: 12px 16px 0; padding: 10px 12px;
+      background: hsl(38 92% 96%);
+      border: 1px solid hsl(38 92% 80%);
+      border-left: 3px solid hsl(38 92% 50%);
+      border-radius: 6px;
       display: flex; flex-direction: column; gap: 6px;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--margo-border);
     }
-    .margo-orphan-label {
-      margin: 0; padding: 10px 16px 0;
-      font-size: 12px; font-weight: 500; color: hsl(28 80% 32%);
+    .margo-panel-orphan-label {
+      margin: 0;
+      font-size: 12px; font-weight: 600; color: hsl(28 80% 28%);
+      line-height: 1.4;
     }
-    .margo-orphan-quote {
-      margin: 8px 16px 0; padding: 8px 10px;
-      background: var(--margo-muted); border-left: 2px solid var(--margo-border);
+    .margo-panel-orphan-hint {
+      margin: 0;
+      font-size: 11px; color: hsl(28 50% 32%);
+      line-height: 1.45;
+    }
+    .margo-panel-orphan-quote {
+      margin: 2px 0 0; padding: 6px 10px;
+      background: var(--margo-bg); border: 1px solid hsl(38 92% 85%);
       border-radius: 4px;
       font-size: 12px; color: var(--margo-muted-fg);
     }
-    .margo-orphan-quote-text { text-decoration: line-through; text-decoration-color: hsl(0 60% 55% / .6); }
-    .margo-orphan-hint {
-      margin: 6px 16px 0; padding: 6px 10px;
-      background: hsl(28 80% 96%); border-radius: 4px;
-      font-size: 11px; color: hsl(28 50% 30%);
-      line-height: 1.4;
+    .margo-panel-orphan-quote-text {
+      text-decoration: line-through; text-decoration-color: hsl(0 60% 55% / .6);
     }
-    .margo-orphan-meta {
-      margin: 8px 16px 0;
+    .margo-panel-orphan-meta {
+      margin: 0;
       font-size: 11px; color: var(--margo-muted-fg);
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       word-break: break-all;
     }
-    .margo-orphan .margo-body { font-size: 13px; max-height: 160px; padding: 12px 16px 0; }
+    .margo-status.margo-status-orphan {
+      background: hsl(28 80% 92%); color: hsl(28 80% 30%);
+      font-weight: 500;
+    }
     /* ——— inbox-internal "Resolve N on this page" bulk action ——— */
     .margo-inbox-bulk {
       display: flex; align-items: center; gap: 6px;
@@ -2772,19 +2745,14 @@ function injectStyles(): void {
     .margo-inbox-bulk:hover { background: hsl(140 30% 92%); border-color: hsl(160 84% 60%); }
     .margo-inbox-bulk:disabled { opacity: .6; cursor: not-allowed; }
     .margo-bulk-check { color: hsl(160 84% 39%); font-weight: 700; }
-    /* ——— orphan tray "resolve all" (sticky inside the list) ——— */
-    .margo-tray-resolve-all {
-      align-self: stretch;
-      height: 30px; padding: 0 12px;
-      background: var(--margo-primary); color: var(--margo-primary-fg);
-      border: 0; border-radius: 6px;
-      font: inherit; font-size: 12px; font-weight: 500;
-      cursor: pointer;
-      transition: background-color .12s;
+    /* Orphan variant — warning tones so it reads as "needs attention" */
+    .margo-inbox-bulk.margo-inbox-bulk-orphan {
+      background: hsl(38 92% 96%); border-color: hsl(38 92% 75%); color: hsl(28 80% 28%);
     }
-    .margo-tray-resolve-all:hover { background: hsl(240 5.9% 18%); }
-    .margo-tray-resolve-all:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
-    .margo-tray-resolve-all:disabled { opacity: .6; cursor: not-allowed; }
+    .margo-inbox-bulk.margo-inbox-bulk-orphan:hover {
+      background: hsl(38 92% 92%); border-color: hsl(38 92% 65%);
+    }
+    .margo-bulk-warn { font-weight: 700; }
     /* ——— inbox toggle (sits above hide-pins) ——— */
     .margo-inbox-toggle {
       position: fixed; bottom: 104px; right: 16px; z-index: 1000000;
@@ -2823,8 +2791,7 @@ function injectStyles(): void {
        menu, launcher, inbox, and hide-pins button itself stay visible so
        the user can still create comments, browse the inbox, etc. */
     [data-margo-hidden] [data-margo-pin],
-    [data-margo-hidden] [data-margo-highlight],
-    [data-margo-hidden] [data-margo-tray] { display: none !important; }
+    [data-margo-hidden] [data-margo-highlight] { display: none !important; }
     /* ——— main FAB (pill, always visible) ——— */
     .margo-fab-main {
       position: fixed; bottom: 16px; right: 16px; z-index: 1000002;
@@ -2909,18 +2876,68 @@ function injectStyles(): void {
       width: 24px; height: 24px; border-radius: 6px;
     }
     .margo-inbox-close:hover { background: var(--margo-muted); color: var(--margo-fg); }
-    .margo-inbox-filters {
-      display: flex; gap: 4px;
+    /* ——— search input ——— */
+    .margo-inbox-search {
+      position: relative;
+      margin: 0 0 6px;
     }
-    .margo-inbox-filters button {
-      background: transparent; border: 0;
-      padding: 4px 10px; border-radius: 6px;
-      font: inherit; font-size: 12px; color: var(--margo-muted-fg);
+    .margo-inbox-search-icon {
+      position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+      font-size: 12px; opacity: .6; pointer-events: none;
+    }
+    .margo-inbox-search-input {
+      width: 100%; height: 28px;
+      padding: 0 26px 0 28px;
+      background: var(--margo-bg); color: var(--margo-fg);
+      border: 1px solid var(--margo-border); border-radius: 6px;
+      font: inherit; font-size: 12px;
+      box-sizing: border-box;
+    }
+    .margo-inbox-search-input::placeholder { color: var(--margo-muted-fg); }
+    .margo-inbox-search-input:focus {
+      outline: 2px solid var(--margo-ring); outline-offset: -1px;
+      border-color: transparent;
+    }
+    /* Native clear button — works in Chromium/Safari. Firefox falls back to
+       the user clearing the field manually, which is fine. */
+    .margo-inbox-search-input::-webkit-search-cancel-button {
+      -webkit-appearance: none; appearance: none;
+      width: 14px; height: 14px;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='%23999' d='M4 4l8 8M12 4l-8 8' stroke='%23999' stroke-width='1.5' stroke-linecap='round'/></svg>");
+      background-repeat: no-repeat; background-position: center;
+      cursor: pointer; opacity: .7;
+    }
+    .margo-inbox-search-input::-webkit-search-cancel-button:hover { opacity: 1; }
+    /* ——— filter chips (Open · All · Mine · This page) — one row ——— */
+    .margo-inbox-chips {
+      display: flex; gap: 4px; flex-wrap: wrap; align-items: center;
+    }
+    .margo-inbox-chip {
+      background: transparent; color: var(--margo-muted-fg);
+      border: 1px solid var(--margo-border); border-radius: 9999px;
+      padding: 2px 10px;
+      font: inherit; font-size: 11px;
       cursor: pointer;
+      transition: background-color .1s, color .1s, border-color .1s;
     }
-    .margo-inbox-filters button:hover { background: var(--margo-muted); }
-    .margo-inbox-filters button[aria-selected="true"] {
-      background: var(--margo-muted); color: var(--margo-fg); font-weight: 500;
+    .margo-inbox-chip:hover { background: var(--margo-muted); color: var(--margo-fg); }
+    .margo-inbox-chip[aria-pressed="true"] {
+      background: var(--margo-fg); color: var(--margo-bg);
+      border-color: var(--margo-fg);
+      font-weight: 500;
+    }
+    /* Status chips (Open/All) get a subtle filled look when pressed so they
+       read as "the currently selected scope" rather than "an added filter".
+       Reuses the same pressed style; the divider after them does the
+       grouping work. */
+    .margo-inbox-chip-status[aria-pressed="true"] {
+      background: var(--margo-fg); color: var(--margo-bg);
+    }
+    .margo-inbox-chip:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 1px; }
+    .margo-inbox-chips-divider {
+      width: 1px; height: 16px;
+      background: var(--margo-border);
+      margin: 0 4px;
     }
     .margo-inbox-list {
       min-height: 0; overflow-y: auto; overscroll-behavior: contain;
@@ -2955,34 +2972,9 @@ function injectStyles(): void {
     .margo-inbox-item[data-orphan] {
       border-left: 2px solid hsl(28 80% 60%);
       padding-left: 10px;
+      background: hsl(38 92% 99%);
     }
-    /* ——— compact orphan rows (accordion) ——— */
-    .margo-orphan-row { border-top: 1px solid var(--margo-border); }
-    .margo-orphan-row:first-of-type { border-top: 0; }
-    .margo-orphan-row-head {
-      display: flex; align-items: center; gap: 8px;
-      width: 100%; padding: 10px 12px;
-      background: transparent; border: 0; cursor: pointer;
-      font: inherit; text-align: left;
-      transition: background-color .1s;
-    }
-    .margo-orphan-row-head:hover { background: var(--margo-muted); }
-    .margo-orphan-row-head:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: -2px; }
-    .margo-orphan-row-id {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 11px; color: var(--margo-muted-fg);
-    }
-    .margo-orphan-row-author {
-      font-size: 13px; font-weight: 500; flex: 0 0 auto;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px;
-    }
-    .margo-orphan-row-url {
-      font-size: 11px; color: var(--margo-muted-fg);
-      flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
-    .margo-orphan-row-chev { font-size: 10px; color: var(--margo-muted-fg); }
-    .margo-orphan-row[data-expanded] .margo-orphan-row-head { background: var(--margo-muted); }
-    .margo-orphan-row[data-expanded] .margo-orphan { border: 0; border-radius: 0; }
+    .margo-inbox-item[data-orphan]:hover { background: hsl(38 92% 95%); }
     .margo-inbox-item-url {
       font-size: 11px; color: var(--margo-muted-fg);
       flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -3015,12 +3007,10 @@ function injectStyles(): void {
       40% { box-shadow: 0 0 0 16px hsl(214 95% 60% / 0); transform: scale(1.25); }
       100% { box-shadow: 0 0 0 0 hsl(214 95% 60% / 0); transform: scale(1); }
     }
-    /* ——— muted styling for resolved pins / highlights / orphan cards ——— */
+    /* ——— muted styling for resolved pins / highlights ——— */
     .margo-pin[data-resolved] { opacity: .5; filter: grayscale(.45); }
     .margo-pin[data-resolved]:hover { opacity: .9; }
     .margo-hl[data-resolved] { opacity: .35; filter: grayscale(.55); }
-    .margo-orphan[data-resolved] { opacity: .7; border-left-color: var(--margo-border); }
-    .margo-orphan[data-resolved]:hover { opacity: 1; }
     /* ——— reopen action (Button: variant=outline, with an arrow hint) ——— */
     .margo-actions button[data-margo-action="reopen"] {
       background: var(--margo-bg); color: var(--margo-fg);
