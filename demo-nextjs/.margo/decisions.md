@@ -3,6 +3,7 @@
 Resolved comments distilled to one-line decisions. Newest first.
 Each entry references the source comment in `.margo/comments/<id>.md`.
 
+- **2026-05-12** · `c-a661bf` · teammate@example.com · Perf seed #17 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
 - **2026-05-12** · `c-8a75c9` · teammate@example.com · Perf seed #53 on /scroll-test. Lorem ipsum placeholder so the panel has body content to layout.
 - **2026-05-12** · `c-5b80ec` · teammate@example.com · Perf seed #8 on /features. Lorem ipsum placeholder so the panel has body content to layout.
 - **2026-05-12** · `c-d217f9` · teammate@example.com · Perf seed #51 on /pricing. Lorem ipsum placeholder so the panel has body content to layout.
