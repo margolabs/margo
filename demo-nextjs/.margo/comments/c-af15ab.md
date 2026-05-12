@@ -5,7 +5,7 @@ author: xhsong@fortinet.com
 authorName: xhsong
 branch: main
 created: '2026-05-12T22:53:23.494Z'
-status: open
+status: resolved
 target:
   url: /scroll-test
   selector: main:nth-of-type(1) > section[data-testid="scroll-card"] > p:nth-of-type(6)
@@ -28,5 +28,6 @@ target:
   commit: 5ab51e8
   dirty: true
 ---
+
 
 888666
