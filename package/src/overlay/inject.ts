@@ -225,6 +225,12 @@ export function start(opts: StartOptions): void {
     requestAnimationFrame(() => { scheduled = false; renderPins(); });
   };
   window.addEventListener('resize', schedule);
+  // Capture-phase scroll listener catches scrolling on *any* ancestor, not
+  // just the document — without this, a pin inside an overflow:auto card
+  // would stay anchored to its old viewport position while the underlying
+  // element scrolled away. `passive: true` so we never interfere with the
+  // browser's smooth-scroll path.
+  window.addEventListener('scroll', schedule, { capture: true, passive: true });
   if (typeof ResizeObserver !== 'undefined') {
     new ResizeObserver(schedule).observe(document.documentElement);
   }
@@ -347,25 +353,23 @@ function renderAllPins(
     const pin = document.createElement('button');
     pin.dataset.margoPin = c.frontmatter.id;
     pin.className = 'margo-pin';
-    // Pin position. For text/gap anchors the rect is small and meaningful —
-    // park the pin at its top-right corner. For element/container anchors
-    // the rect can be huge (a tall <main> spans the page) so the corner is
-    // visually disconnected from where the user actually clicked. In that
-    // case use the captured click point (target.coords) scaled from the
-    // capture-time viewport to the current viewport.
+    // Pin position: anchor to the live rect for every anchor kind. The rect
+    // is what `getBoundingClientRect()` produces, so it reflects the element's
+    // current viewport position whether the page, an inner overflow:auto
+    // container, or anything else has scrolled.
+    //
+    // We used to take a different path for element/container anchors —
+    // scaling the captured click point (target.coords) by viewport ratios.
+    // That only handled window resize. On scroll, `cap.coords` is the
+    // viewport position *at capture time* and combining it with the
+    // *current* `window.scrollX/Y` gave a document position fixed to the
+    // capture-time scroll. The highlight tracked correctly but the pin
+    // drifted by exactly the scroll delta. Top-right of the rect is the
+    // same place users park the dot anyway.
     const PIN_SIZE = 22;
     const PAD = 4;
-    let docLeft: number, docTop: number;
-    if (isTextAnchor || isGapAnchor) {
-      docLeft = r.left + r.width - 8 + window.scrollX;
-      docTop = r.top - 8 + window.scrollY;
-    } else {
-      const cap = c.frontmatter.target;
-      const sx = cap.viewport.w > 0 ? window.innerWidth / cap.viewport.w : 1;
-      const sy = cap.viewport.h > 0 ? window.innerHeight / cap.viewport.h : 1;
-      docLeft = cap.coords.x * sx - PIN_SIZE / 2 + window.scrollX;
-      docTop = cap.coords.y * sy - PIN_SIZE / 2 + window.scrollY;
-    }
+    const docLeft = r.left + r.width - 8 + window.scrollX;
+    const docTop = r.top - 8 + window.scrollY;
     const minLeft = window.scrollX + PAD;
     const maxLeft = window.scrollX + window.innerWidth - PIN_SIZE - PAD;
     const minTop = window.scrollY + PAD;

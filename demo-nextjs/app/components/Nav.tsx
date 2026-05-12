@@ -6,6 +6,7 @@ const links = [
   { href: "/features", label: "Features" },
   { href: "/contact", label: "Contact" },
   { href: "/tabs-test", label: "Tabs test" },
+  { href: "/scroll-test", label: "Scroll test" },
 ];
 
 export function Nav() {
