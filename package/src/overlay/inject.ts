@@ -577,8 +577,11 @@ function renderInboxPanel(
     .filter(matchesSearch)
     .sort((a, b) => (b.frontmatter.created || '').localeCompare(a.frontmatter.created || ''))
     .sort((a, b) => {
-      const ao = orphanIds.has(a.frontmatter.id) ? 0 : 1;
-      const bo = orphanIds.has(b.frontmatter.id) ? 0 : 1;
+      // Resolved comments aren't actionable orphans even if their anchor
+      // doesn't resolve — don't yank them to the top of the All view with
+      // the "anchor lost" treatment.
+      const ao = orphanIds.has(a.frontmatter.id) && openStatuses.has(a.frontmatter.status) ? 0 : 1;
+      const bo = orphanIds.has(b.frontmatter.id) && openStatuses.has(b.frontmatter.status) ? 0 : 1;
       return ao - bo;
     });
 
@@ -610,8 +613,11 @@ function renderInboxPanel(
     openStatuses.has(c.frontmatter.status) && c.frontmatter.target.url === route,
   );
   // Orphans visible in the current filter — drives the "Resolve N orphans"
-  // bulk action. Skipping wontfix/resolved orphans is implicit via `all`.
-  const visibleOrphans = all.filter((c) => orphanIds.has(c.frontmatter.id));
+  // bulk action. Resolved/wontfix comments are never actionable orphans, so
+  // exclude them even when they sneak in via the All view.
+  const visibleOrphans = all.filter(
+    (c) => orphanIds.has(c.frontmatter.id) && openStatuses.has(c.frontmatter.status),
+  );
 
   // Hide the "Mine" chip when we don't know the user (preview mode).
   const showMineChip = !!meEmail;
@@ -706,7 +712,7 @@ function renderInboxPanel(
     list.appendChild(empty);
   } else {
     for (const c of all) {
-      const isOrphan = orphanIds.has(c.frontmatter.id);
+      const isOrphan = orphanIds.has(c.frontmatter.id) && openStatuses.has(c.frontmatter.status);
       list.appendChild(renderInboxItem(
         c,
         isOrphan,
@@ -732,7 +738,14 @@ function renderInboxPanel(
       if (dim === 'open') {
         if (showResolved) onShowResolvedChange(false);
       } else if (dim === 'all') {
-        if (!showResolved) onShowResolvedChange(true);
+        if (!showResolved) {
+          // "All" reads as "expand to everything" — silently leaving the
+          // page-scope narrowing on contradicts that intent and made users
+          // think the count was buggy ("All · N counted only this page").
+          // Mine stays — it's a user scope, not a visibility expansion.
+          onShowResolvedChange(true);
+          if (filters.thisPage) onFiltersChange({ thisPage: false });
+        }
       } else if (dim === 'mine') {
         onFiltersChange({ mine: !filters.mine });
       } else {
