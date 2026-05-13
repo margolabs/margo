@@ -5,7 +5,7 @@ author: xhsong@fortinet.com
 authorName: xhsong
 branch: main
 created: '2026-05-13T09:18:00.000Z'
-status: open
+status: resolved
 target:
   url: /
   selector: section#features > h2
@@ -20,6 +20,7 @@ target:
   commit: d8581f2
   dirty: false
 ---
+
 
 "Built for small teams" feels generic — try "Made for teams of 3 to 30"
 so the audience self-identifies immediately.
