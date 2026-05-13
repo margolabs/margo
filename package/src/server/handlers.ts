@@ -19,6 +19,7 @@ import {
   getDeclaredRole,
   getDirtyState,
   removeAndCommit,
+  setAuthor,
   type GitOptions,
 } from './git.js';
 import type {
@@ -88,9 +89,30 @@ export async function listComments(ctx: HandlerContext): Promise<{ comments: Com
   return { comments: await readAllComments(ctx.commentsDir) };
 }
 
-export async function getMe(ctx: HandlerContext): Promise<{ email: string; name: string }> {
-  const author = await getAuthor(ctx.rootDir);
-  return { email: author.email, name: author.name };
+export async function getMe(ctx: HandlerContext): Promise<{ email: string; name: string } | null> {
+  // Return null on missing config so the overlay can prompt for setup instead
+  // of treating the request as a 5xx and surfacing a cryptic "author api
+  // failed" error on the next pin attempt.
+  try {
+    const author = await getAuthor(ctx.rootDir);
+    return { email: author.email, name: author.name };
+  } catch {
+    return null;
+  }
+}
+
+export async function setMe(
+  ctx: HandlerContext,
+  body: { name?: string; email?: string },
+): Promise<{ email: string; name: string }> {
+  const name = (body.name ?? '').trim();
+  const email = (body.email ?? '').trim();
+  if (!name) throw new HandlerError(400, 'name is required');
+  // Permissive email regex — git itself doesn't validate, but a leading sanity
+  // check catches typos before we shell out to `git config`.
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HandlerError(400, 'invalid email');
+  await setAuthor(name, email, ctx.rootDir);
+  return { name, email };
 }
 
 export async function getGitState(ctx: HandlerContext): Promise<GitState> {

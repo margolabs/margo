@@ -36,6 +36,20 @@ export async function getAuthor(cwd: string): Promise<{ name: string; email: str
   return { name, email };
 }
 
+/**
+ * Persist `user.name` and `user.email` into git config so subsequent
+ * getAuthor()s succeed without the operator manually running `git config`.
+ *
+ * Scope: `--global` so a one-time setup carries to every repo on this
+ * machine. The overlay-side prompt only fires when both values are missing,
+ * which is by definition a fresh-environment problem — local-only would
+ * still leave the next clone broken.
+ */
+export async function setAuthor(name: string, email: string, cwd: string): Promise<void> {
+  await run(cwd, ['config', '--global', 'user.name', name]);
+  await run(cwd, ['config', '--global', 'user.email', email]);
+}
+
 /** Read user's self-declared margo role from `git config margo.role`. */
 export async function getDeclaredRole(cwd: string): Promise<'pm' | 'designer' | 'dev' | undefined> {
   const v = (await run(cwd, ['config', 'margo.role'])).stdout.trim().toLowerCase();

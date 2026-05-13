@@ -36,6 +36,7 @@ import {
   getGitState,
   getMe,
   listComments,
+  setMe,
   syncFromRemote,
   updateComment,
   type HandlerContext,
@@ -154,6 +155,10 @@ async function dispatch(request: Request, ctx: RouteContext): Promise<Response> 
     }
     if (route === 'me' && request.method === 'GET') {
       return jsonResponse(200, await getMe(handlerCtx));
+    }
+    if (route === 'me' && request.method === 'POST') {
+      const body = (await request.json()) as { name?: string; email?: string };
+      return jsonResponse(200, await setMe(handlerCtx, body));
     }
     if (route === 'git-state' && request.method === 'GET') {
       return jsonResponse(200, await getGitState(handlerCtx));

@@ -179,7 +179,16 @@ export function start(opts: StartOptions): void {
 
   sync.start();
   if (opts.mode === 'dev') {
-    void sync.getMe().then((u) => { me = u; renderPins(); });
+    void (async () => {
+      let u = await sync.getMe();
+      // Missing git config user.name / user.email is the most common cause of
+      // "author api failed" surfacing later when the user clicks Pin. Catch
+      // it now, prompt for setup, persist via `git config --global`, then
+      // continue normally.
+      if (!u) u = await openIdentitySetup(sync);
+      me = u;
+      renderPins();
+    })();
     void refreshGitState();
     // Catches the common case: user runs `git checkout other-branch` in a
     // terminal, alt-tabs back to the browser. Without this the inbox would
@@ -2235,6 +2244,135 @@ async function uiAlert(message: string, title = 'Heads up'): Promise<void> {
   });
 }
 
+/**
+ * First-run identity setup. Two-input modal (name + email) that POSTs to
+ * /__margo/me on Save, which runs `git config --global user.name/email` so
+ * subsequent operations (createComment, commitAndPush) have a real author.
+ *
+ * Returns the persisted identity on Save, null on Cancel/Escape/backdrop.
+ * Cancelling leaves the overlay running with me=null — the user can still
+ * read pins, but attempts to create or update comments will fail until they
+ * refresh and complete setup. We don't loop-on-cancel because some users
+ * (preview deploys, read-only walkthroughs) genuinely don't need to write.
+ */
+function openIdentitySetup(sync: SyncClient): Promise<{ email: string; name: string } | null> {
+  return new Promise((resolve) => {
+    const root = document.getElementById(ROOT_ID);
+    if (!root) { resolve(null); return; }
+    root.querySelector('[data-margo-modal]')?.remove();
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'margo-modal-backdrop';
+    backdrop.dataset.margoModal = '';
+
+    const modal = document.createElement('div');
+    modal.className = 'margo-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+
+    const header = document.createElement('header');
+    const h = document.createElement('h3');
+    h.textContent = 'Set up your margo identity';
+    header.appendChild(h);
+    const close = document.createElement('button');
+    close.className = 'margo-close';
+    close.type = 'button';
+    close.setAttribute('aria-label', 'close');
+    close.textContent = '×';
+    close.addEventListener('click', () => done(null));
+    header.appendChild(close);
+    modal.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'margo-modal-body';
+    const p = document.createElement('p');
+    p.className = 'margo-modal-message';
+    p.textContent =
+      "git config user.name / user.email aren't set on this machine. "
+      + 'margo uses them to attribute every comment. Save once and you\'re done — '
+      + 'they\'ll be written to your global git config.';
+    body.appendChild(p);
+
+    const nameInput = document.createElement('input');
+    nameInput.className = 'margo-modal-input';
+    nameInput.type = 'text';
+    nameInput.placeholder = 'Your name';
+    nameInput.autocomplete = 'name';
+    body.appendChild(nameInput);
+
+    const emailInput = document.createElement('input');
+    emailInput.className = 'margo-modal-input';
+    emailInput.type = 'email';
+    emailInput.placeholder = 'you@example.com';
+    emailInput.autocomplete = 'email';
+    body.appendChild(emailInput);
+
+    const errorEl = document.createElement('p');
+    errorEl.className = 'margo-modal-error';
+    body.appendChild(errorEl);
+
+    modal.appendChild(body);
+
+    const footer = document.createElement('footer');
+    const cancel = document.createElement('button');
+    cancel.className = 'margo-modal-cancel';
+    cancel.type = 'button';
+    cancel.textContent = 'Later';
+    cancel.addEventListener('click', () => done(null));
+    footer.appendChild(cancel);
+
+    const confirm = document.createElement('button');
+    confirm.className = 'margo-modal-confirm';
+    confirm.type = 'button';
+    confirm.textContent = 'Save';
+    confirm.addEventListener('click', () => void submit());
+    footer.appendChild(confirm);
+    modal.appendChild(footer);
+
+    backdrop.appendChild(modal);
+    backdrop.addEventListener('mousedown', (e) => {
+      if (e.target === backdrop) done(null);
+    });
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.stopPropagation(); done(null); }
+      else if (e.key === 'Enter') { e.preventDefault(); void submit(); }
+    };
+    document.addEventListener('keydown', onKey, true);
+
+    root.appendChild(backdrop);
+    queueMicrotask(() => nameInput.focus());
+
+    async function submit(): Promise<void> {
+      const name = nameInput.value.trim();
+      const email = emailInput.value.trim();
+      if (!name) return showError('Name is required.');
+      if (!email) return showError('Email is required.');
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return showError('That email doesn\'t look right.');
+      hideError();
+      confirm.disabled = true;
+      confirm.textContent = 'Saving…';
+      const result = await sync.setMe(name, email);
+      confirm.disabled = false;
+      confirm.textContent = 'Save';
+      if ('error' in result) { showError(result.error); return; }
+      done(result);
+    }
+    function showError(msg: string): void {
+      errorEl.textContent = msg;
+      errorEl.classList.add('margo-modal-error-shown');
+    }
+    function hideError(): void {
+      errorEl.classList.remove('margo-modal-error-shown');
+    }
+    function done(result: { email: string; name: string } | null): void {
+      document.removeEventListener('keydown', onKey, true);
+      backdrop.remove();
+      resolve(result);
+    }
+  });
+}
+
 function injectStyles(): void {
   if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement('style');
@@ -3178,6 +3316,12 @@ function injectStyles(): void {
     }
     .margo-modal-input::placeholder { color: hsl(240 3.8% 60%); }
     textarea.margo-modal-input { min-height: 80px; }
+    .margo-modal-error {
+      display: none;
+      margin: 0;
+      font-size: 12px; color: hsl(0 72% 42%);
+    }
+    .margo-modal-error.margo-modal-error-shown { display: block; }
     .margo-modal footer {
       display: flex; justify-content: flex-end; gap: 8px;
       padding: 12px 16px 16px;
