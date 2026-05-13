@@ -76,10 +76,15 @@ export class SyncClient extends EventTarget {
       const res = await fetch('/__margo/me');
       if (!res.ok) return null;
       const body = await res.json();
-      // Server returns null when git config is missing — propagate as null
-      // so the overlay can prompt for setup.
-      if (!body || !body.email) return null;
-      return body as { email: string; name: string };
+      // Server may return null (both unset) or a partial { email, name: '' }
+      // when only one half of the config is missing. Either way, return
+      // exactly what we know so the boot flow can decide whether to prompt
+      // and pre-fill the half that's already set.
+      if (!body) return null;
+      return {
+        email: typeof body.email === 'string' ? body.email : '',
+        name: typeof body.name === 'string' ? body.name : '',
+      };
     } catch { return null; }
   }
 

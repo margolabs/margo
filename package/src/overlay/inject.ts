@@ -184,8 +184,13 @@ export function start(opts: StartOptions): void {
       // Missing git config user.name / user.email is the most common cause of
       // "author api failed" surfacing later when the user clicks Pin. Catch
       // it now, prompt for setup, persist via `git config --global`, then
-      // continue normally.
-      if (!u) u = await openIdentitySetup(sync);
+      // continue normally. We prompt when either half is missing — the
+      // overlay attributes comments by both name and email, so a half-set
+      // identity still produces a broken-looking comment.
+      const incomplete = !u || !u.name || !u.email;
+      if (incomplete) {
+        u = await openIdentitySetup(sync, { name: u?.name ?? '', email: u?.email ?? '' });
+      }
       me = u;
       renderPins();
     })();
@@ -2255,7 +2260,10 @@ async function uiAlert(message: string, title = 'Heads up'): Promise<void> {
  * refresh and complete setup. We don't loop-on-cancel because some users
  * (preview deploys, read-only walkthroughs) genuinely don't need to write.
  */
-function openIdentitySetup(sync: SyncClient): Promise<{ email: string; name: string } | null> {
+function openIdentitySetup(
+  sync: SyncClient,
+  seed: { name: string; email: string } = { name: '', email: '' },
+): Promise<{ email: string; name: string } | null> {
   return new Promise((resolve) => {
     const root = document.getElementById(ROOT_ID);
     if (!root) { resolve(null); return; }
@@ -2287,10 +2295,18 @@ function openIdentitySetup(sync: SyncClient): Promise<{ email: string; name: str
     body.className = 'margo-modal-body';
     const p = document.createElement('p');
     p.className = 'margo-modal-message';
+    // Tailor the message to which half is missing so a user who only needs
+    // to fill in a name doesn't see "user.email isn't set" and get confused.
+    const missingName = !seed.name;
+    const missingEmail = !seed.email;
     p.textContent =
-      "git config user.name / user.email aren't set on this machine. "
-      + 'margo uses them to attribute every comment. Save once and you\'re done — '
-      + 'they\'ll be written to your global git config.';
+      missingName && missingEmail
+        ? "git config user.name / user.email aren't set on this machine. "
+          + 'margo uses them to attribute every comment. Save once and you\'re done — '
+          + 'they\'ll be written to your global git config.'
+        : missingName
+        ? 'git config user.name isn\'t set. margo attributes comments by name + email, so a name is required. It\'ll be written to your global git config.'
+        : 'git config user.email isn\'t set. margo attributes comments by name + email, so an email is required. It\'ll be written to your global git config.';
     body.appendChild(p);
 
     const nameInput = document.createElement('input');
@@ -2298,6 +2314,7 @@ function openIdentitySetup(sync: SyncClient): Promise<{ email: string; name: str
     nameInput.type = 'text';
     nameInput.placeholder = 'Your name';
     nameInput.autocomplete = 'name';
+    nameInput.value = seed.name;
     body.appendChild(nameInput);
 
     const emailInput = document.createElement('input');
@@ -2305,6 +2322,7 @@ function openIdentitySetup(sync: SyncClient): Promise<{ email: string; name: str
     emailInput.type = 'email';
     emailInput.placeholder = 'you@example.com';
     emailInput.autocomplete = 'email';
+    emailInput.value = seed.email;
     body.appendChild(emailInput);
 
     const errorEl = document.createElement('p');
@@ -2341,7 +2359,9 @@ function openIdentitySetup(sync: SyncClient): Promise<{ email: string; name: str
     document.addEventListener('keydown', onKey, true);
 
     root.appendChild(backdrop);
-    queueMicrotask(() => nameInput.focus());
+    // Land focus on the field that needs the input, so the user can start
+    // typing the missing half without tabbing past a pre-filled one.
+    queueMicrotask(() => (missingName ? nameInput : emailInput).focus());
 
     async function submit(): Promise<void> {
       const name = nameInput.value.trim();
