@@ -2446,8 +2446,12 @@ function injectStyles(): void {
     }
     .margo-remote-banner-dismiss:hover { background: var(--margo-muted); color: var(--margo-fg); }
     /* ——— launcher (Button: variant=default, size=sm, shape=pill) ——— */
+    /* All sub-FABs share the main FAB's z-index (1000002) so the FAB menu
+       stays reachable while inbox or comment panel is open. Visibility while
+       the menu is closed is gated by [data-margo-fab-open] further down — z
+       alone never makes them appear. */
     .margo-launcher {
-      position: fixed; bottom: 16px; right: 16px; z-index: 999999;
+      position: fixed; bottom: 16px; right: 16px; z-index: 1000002;
       display: inline-flex; align-items: center; gap: 6px;
       height: 36px; padding: 0 14px;
       background: var(--margo-primary); color: var(--margo-primary-fg);
@@ -2603,7 +2607,11 @@ function injectStyles(): void {
       border: 1px solid var(--margo-border);
       border-radius: var(--margo-radius);
       box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1);
-      padding: 0; z-index: 999999; overflow: hidden;
+      /* Above the inbox (1000001) so a comment panel opened from an inbox row
+         never lands behind the inbox if the positioner's fallback path
+         couldn't find clearance. Sub-FABs (1000002) still sit above so the
+         FAB menu stays reachable while a panel is open. */
+      padding: 0; z-index: 1000001; overflow: hidden;
       animation: margo-pop .14s ease-out;
       display: flex; flex-direction: column;
     }
@@ -3002,7 +3010,7 @@ function injectStyles(): void {
     .margo-bulk-warn { font-weight: 700; }
     /* ——— inbox toggle (sits above hide-pins) ——— */
     .margo-inbox-toggle {
-      position: fixed; bottom: 104px; right: 16px; z-index: 1000000;
+      position: fixed; bottom: 104px; right: 16px; z-index: 1000002;
       display: inline-flex; align-items: center; gap: 6px;
       height: 32px; padding: 0 12px;
       background: var(--margo-bg); color: var(--margo-muted-fg);
@@ -3016,7 +3024,7 @@ function injectStyles(): void {
     .margo-inbox-toggle:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
     /* ——— hide-pins (focus-mode) toggle ——— */
     .margo-hide-pins {
-      position: fixed; bottom: 60px; right: 16px; z-index: 1000000;
+      position: fixed; bottom: 60px; right: 16px; z-index: 1000002;
       display: inline-flex; align-items: center; gap: 6px;
       height: 32px; padding: 0 12px;
       background: var(--margo-bg); color: var(--margo-muted-fg);
