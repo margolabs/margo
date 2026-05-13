@@ -5,7 +5,7 @@ author: xhsong@fortinet.com
 authorName: xhsong
 branch: main
 created: '2026-05-12T22:52:31.505Z'
-status: open
+status: resolved
 target:
   url: /tabs-test
   selector: div#panel-plans > section:nth-of-type(1) > article[data-testid="plans-starter"]
@@ -37,5 +37,6 @@ target:
   commit: 743a4ee
   dirty: true
 ---
+
 
 test 3
