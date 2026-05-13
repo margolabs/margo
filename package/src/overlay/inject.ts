@@ -61,10 +61,19 @@ export function start(opts: StartOptions): void {
     deleted: string[];
     total: number;
   } | null = null;
-  // Persist the "show resolved" choice across reloads — surveying past
-  // decisions is a recurring task, so the user shouldn't have to re-toggle.
-  const showResolvedKey = "margo:showResolved";
-  let showResolved = localStorage.getItem(showResolvedKey) === "1";
+  // Persist the status scope across reloads. Three-way: 'open' (active
+  // tasks/discussion only — the default), 'all' (everything), 'closed'
+  // (resolved + wontfix only — used for sweeping the inbox of stale
+  // entries via the bulk-delete affordance).
+  // Backwards-compat: read the old 'margo:showResolved' boolean key the
+  // first time we see no new key set — so existing users who had "all" on
+  // don't get reset to "open" after upgrading.
+  const statusFilterKey = "margo:statusFilter";
+  const legacyShowResolved = localStorage.getItem("margo:showResolved");
+  const rawStatus = localStorage.getItem(statusFilterKey)
+    ?? (legacyShowResolved === "1" ? "all" : null);
+  let statusFilter: import("./inbox-view.js").StatusFilter =
+    rawStatus === "all" || rawStatus === "closed" ? rawStatus : "open";
   // Hide-pins toggle — flips off pin/highlight/orphan-tray rendering so
   // the user can review their product without comment dots cluttering it.
   // The FAB menu and other controls stay visible so the user can still
@@ -88,6 +97,12 @@ export function start(opts: StartOptions): void {
   // the affected rows). Only meaningful for the current route — comments on
   // other routes can't be checked without navigating.
   const orphanIds = new Set<string>();
+  // Comments that successfully placed a pin on the current route. Used by
+  // the inbox click handler to decide: if the comment has a pin, scroll to
+  // it; otherwise open the comment panel directly anchored to the inbox row
+  // (avoids scrollToPin spinning silently when no pin exists, which made
+  // non-mine wrong-view comments appear unclickable).
+  const pinIds = new Set<string>();
 
   // Inbox filter state. Three independent dimensions on top of the existing
   // Open/All status tabs:
@@ -102,16 +117,21 @@ export function start(opts: StartOptions): void {
   let searchQuery = "";
 
   const renderPins = () => {
+    // Pin rendering: only suppress resolved pins in the Open view. Both All
+    // and Closed views render all pins (the user has the hide-pins toggle
+    // if they want a clean page).
+    const showResolvedPins = statusFilter !== "open";
     renderAllPins(
       root,
       store,
       sync,
       opts.mode === "preview",
       me,
-      showResolved,
+      showResolvedPins,
       gitState,
       hidePins,
       orphanIds,
+      pinIds,
     );
     renderInbox();
   };
@@ -122,17 +142,16 @@ export function start(opts: StartOptions): void {
       sync,
       inboxOpen,
       opts.mode === "preview",
-      showResolved,
+      statusFilter,
       orphanIds,
+      pinIds,
       me,
       gitState,
       { mine: filterMine, thisPage: filterThisPage, search: searchQuery },
       suppressInboxEntranceAnim,
       (next) => {
-        // The inbox's "Open" / "All" filter doubles as the global show-resolved
-        // control — there's no value in two separate UIs for the same idea.
-        showResolved = next;
-        localStorage.setItem(showResolvedKey, next ? "1" : "0");
+        statusFilter = next;
+        localStorage.setItem(statusFilterKey, next);
         renderPins();
       },
       (patch) => {
@@ -455,6 +474,7 @@ function renderAllPins(
   gitState: GitState | null,
   hidePins: boolean,
   orphanIds: Set<string>,
+  pinIds: Set<string>,
 ): void {
   // Clear existing pin + highlight nodes (keep the launcher and toggle)
   for (const el of Array.from(
@@ -464,6 +484,7 @@ function renderAllPins(
   // Reset for this render — same Set instance so callers (the inbox) see
   // updates without re-passing.
   orphanIds.clear();
+  pinIds.clear();
   // Focus mode: leave the cleared state — no pins, no tray, no bulk bar.
   // Other affordances (launcher, show-resolved toggle) are hidden via CSS
   // on the [data-margo-hidden] root attribute set by start().
@@ -566,9 +587,10 @@ function renderAllPins(
     pin.addEventListener("click", (e) => {
       e.stopPropagation();
       hideTooltip();
-      openCommentPanel(root, c, sync, readOnly, me, pin);
+      openCommentPanel(root, c, sync, readOnly, pin);
     });
     root.appendChild(pin);
+    pinIds.add(c.frontmatter.id);
   }
 
   // Orphaned comments are surfaced inside the inbox panel (sorted to top,
@@ -596,13 +618,14 @@ export function renderInboxPanel(
   sync: SyncClient,
   open: boolean,
   readOnly: boolean,
-  showResolved: boolean,
+  statusFilter: import("./inbox-view.js").StatusFilter,
   orphanIds: Set<string>,
+  pinIds: Set<string>,
   me: { email: string } | null,
   gitState: GitState | null,
   filters: InboxFilterState,
   suppressEntranceAnim: boolean,
-  onShowResolvedChange: (next: boolean) => void,
+  onStatusFilterChange: (next: import("./inbox-view.js").StatusFilter) => void,
   onFiltersChange: (patch: Partial<InboxFilterState>) => void,
   onClose: () => void,
 ): void {
@@ -649,7 +672,7 @@ export function renderInboxPanel(
   const meEmail = me?.email ?? null;
   const view = computeInboxView({
     comments: Array.from(store.values()),
-    showResolved,
+    statusFilter,
     filters,
     orphanIds,
     route,
@@ -659,8 +682,10 @@ export function renderInboxPanel(
     all,
     onPage,
     visibleOrphans,
+    visibleClosed,
     openCount,
     allCount,
+    closedCount,
     mineCount,
     thisPageCount,
   } = view;
@@ -693,11 +718,11 @@ export function renderInboxPanel(
         />
       </div>
       <div class="margo-inbox-chips" role="group" aria-label="filters">
-        <button type="button" class="margo-inbox-chip margo-inbox-chip-status" data-chip="open" aria-pressed="${!showResolved}">Open · ${openCount}</button>
-        <button type="button" class="margo-inbox-chip margo-inbox-chip-status" data-chip="all" aria-pressed="${showResolved}">All · ${allCount}</button>
-        <span class="margo-inbox-chips-divider" aria-hidden="true"></span>
+        <button type="button" class="margo-inbox-chip margo-inbox-chip-status" data-chip="open" aria-pressed="${statusFilter === "open"}">Open · ${openCount}</button>
+        <button type="button" class="margo-inbox-chip margo-inbox-chip-status" data-chip="all" aria-pressed="${statusFilter === "all"}">All · ${allCount}</button>
+        <button type="button" class="margo-inbox-chip margo-inbox-chip-status" data-chip="closed" aria-pressed="${statusFilter === "closed"}">Closed · ${closedCount}</button>
         ${showMineChip ? `<button type="button" class="margo-inbox-chip" data-chip="mine" aria-pressed="${filters.mine}">Mine · ${mineCount}</button>` : ""}
-        <button type="button" class="margo-inbox-chip" data-chip="thisPage" aria-pressed="${filters.thisPage}">This page · ${thisPageCount}</button>
+        <button type="button" class="margo-inbox-chip" data-chip="thisPage" aria-pressed="${filters.thisPage}">Page · ${thisPageCount}</button>
       </div>
     </header>
     <div class="margo-inbox-list" role="list"></div>
@@ -740,8 +765,9 @@ export function renderInboxPanel(
   }
   // On-page bulk: same rationale as before, but only show when there are
   // >1 unresolved comments on the current route. Orphans aren't included
-  // here — they have their own bulk above.
-  if (!readOnly && onPage.length > 1) {
+  // here — they have their own bulk above. Hidden in the Closed view —
+  // there's nothing left to resolve there.
+  if (!readOnly && statusFilter !== "closed" && onPage.length > 1) {
     const bulk = document.createElement("button");
     bulk.type = "button";
     bulk.className = "margo-inbox-bulk";
@@ -749,6 +775,18 @@ export function renderInboxPanel(
     bulk.addEventListener("click", () =>
       bulkResolve(bulk, onPage, sync, "on this page"),
     );
+    list.appendChild(bulk);
+  }
+  // Closed-view bulk delete: operates on every visible closed comment,
+  // regardless of author. Comments are a shared resource — anyone on the
+  // team can sweep stale entries. The server doesn't gate by authorship
+  // either; git history preserves the file.
+  if (!readOnly && statusFilter === "closed" && visibleClosed.length > 0) {
+    const bulk = document.createElement("button");
+    bulk.type = "button";
+    bulk.className = "margo-inbox-bulk margo-inbox-bulk-danger";
+    bulk.innerHTML = `<span class="margo-bulk-warn">${icon("warn", 13)}</span> Delete all ${visibleClosed.length} closed`;
+    bulk.addEventListener("click", () => bulkDelete(bulk, visibleClosed, sync));
     list.appendChild(bulk);
   }
 
@@ -760,9 +798,11 @@ export function renderInboxPanel(
     const hasNarrowingFilter = filters.mine || filters.thisPage || q.length > 0;
     if (hasNarrowingFilter) {
       empty.textContent = "No matches. Try clearing filters or search.";
-    } else if (!showResolved) {
+    } else if (statusFilter === "open") {
       empty.textContent =
         "No open comments. Switch to All to see resolved ones.";
+    } else if (statusFilter === "closed") {
+      empty.textContent = "No closed comments yet.";
     } else {
       empty.textContent = "No comments yet. Pin something on the live app.";
     }
@@ -772,45 +812,61 @@ export function renderInboxPanel(
       const isOrphan =
         orphanIds.has(c.frontmatter.id) &&
         OPEN_STATUSES.has(c.frontmatter.status);
+      // The default click handler (renderInboxItem with no onClick override)
+      // navigates to the comment's URL and then scrollToPin's that pin into
+      // view. That ONLY works when a pin actually exists for the comment on
+      // the destination page. When it doesn't (orphan, wrong-view, or any
+      // current-route comment whose target couldn't resolve), scrollToPin
+      // spins silently and nothing opens — making the row appear unclick-
+      // able. So: anything we know is current-route-but-no-pin gets a
+      // direct panel-open handler instead. Orphans additionally include
+      // the diagnostic banner via the `orphan` option.
+      const onCurrentRoute = c.frontmatter.target.url === route;
+      const hasPinHere = pinIds.has(c.frontmatter.id);
+      const noPinFallback = onCurrentRoute && !hasPinHere;
       list.appendChild(
         renderInboxItem(
           c,
           isOrphan,
-          // Orphans can't be navigated to (no pin to land on), so clicking
-          // opens the standard comment panel anchored to the inbox row. The
-          // panel's positioner places it to the left of the inbox when the
-          // inbox is open, giving the "popup beside the list item" feel.
           isOrphan
             ? (item) =>
-                openCommentPanel(root, c, sync, readOnly, me, item, {
+                openCommentPanel(root, c, sync, readOnly, item, {
                   orphan: { gitState },
                 })
-            : undefined,
+            : noPinFallback
+              ? (item) =>
+                  openCommentPanel(root, c, sync, readOnly, item)
+              : undefined,
         ),
       );
     }
   }
 
   panel.querySelector(".margo-inbox-close")!.addEventListener("click", onClose);
-  // All filter chips in one row. Open/All are radio-like (clicking a
-  // not-currently-selected one flips showResolved); Mine/This page are
-  // independent toggles. Clicking the already-pressed status chip is a
-  // no-op — they don't both deselect because status is required.
+  // All filter chips in one row. Open/All/Closed are radio-like (clicking
+  // a not-currently-selected one switches statusFilter to it); Mine/This
+  // page are independent toggles. Clicking the already-pressed status
+  // chip is a no-op — status is required, no "none" state.
   for (const chip of Array.from(
     panel.querySelectorAll<HTMLElement>(".margo-inbox-chip"),
   )) {
     chip.addEventListener("click", () => {
-      const dim = chip.dataset.chip as "open" | "all" | "mine" | "thisPage";
-      if (dim === "open") {
-        if (showResolved) onShowResolvedChange(false);
-      } else if (dim === "all") {
-        if (!showResolved) {
-          // "All" reads as "expand to everything" — silently leaving the
-          // page-scope narrowing on contradicts that intent and made users
-          // think the count was buggy ("All · N counted only this page").
-          // Mine stays — it's a user scope, not a visibility expansion.
-          onShowResolvedChange(true);
-          if (filters.thisPage) onFiltersChange({ thisPage: false });
+      const dim = chip.dataset.chip as
+        | "open"
+        | "all"
+        | "closed"
+        | "mine"
+        | "thisPage";
+      if (dim === "open" || dim === "all" || dim === "closed") {
+        if (statusFilter !== dim) {
+          // Switching to "all" / "closed" reads as "expand my view" — drop
+          // a page-scope narrowing that would silently shrink the count
+          // (users were confused why "All · N" counted only the current
+          // page). Mine stays — it's a user scope, not a visibility one.
+          onStatusFilterChange(dim);
+          if (dim !== "open" && filters.thisPage) {
+            onFiltersChange({ thisPage: false });
+          }
         }
       } else if (dim === "mine") {
         onFiltersChange({ mine: !filters.mine });
@@ -1084,6 +1140,44 @@ async function bulkResolve(
     }
   }
   // SSE refresh will re-render and remove the bar.
+}
+
+// Bulk delete: hard-removes the comment files. Used from the Closed view
+// to sweep stale resolved/wontfix entries. Operates on the whole visible
+// set — the server doesn't gate by authorship, so anyone on the team can
+// run this on anyone's comments. Git history preserves the files.
+async function bulkDelete(
+  trigger: HTMLButtonElement,
+  comments: Comment[],
+  sync: SyncClient,
+): Promise<void> {
+  const noun = comments.length === 1 ? "comment" : "comments";
+  const ok = await uiConfirm({
+    title: `Delete ${comments.length} closed ${noun}`,
+    message: `This permanently removes ${comments.length} comment file${comments.length === 1 ? "" : "s"} from .margo/comments. The git history still contains them, but they won't appear in the inbox again. Continue?`,
+    confirmLabel: `Delete ${comments.length}`,
+    destructive: true,
+  });
+  if (!ok) return;
+
+  trigger.disabled = true;
+  const original = trigger.innerHTML;
+  let done = 0;
+  for (const c of comments) {
+    trigger.textContent = `deleting ${++done}/${comments.length}…`;
+    try {
+      await sync.deleteComment(c.frontmatter.id);
+    } catch (err) {
+      await uiAlert(
+        `Stopped after ${done - 1}/${comments.length}: ${(err as Error).message}`,
+        "Bulk delete failed",
+      );
+      trigger.disabled = false;
+      trigger.innerHTML = original;
+      return;
+    }
+  }
+  // SSE refresh re-renders and the bar disappears with the deleted items.
 }
 
 async function promptDecisionSummary(c: Comment): Promise<string | null> {
@@ -1509,7 +1603,6 @@ function openCommentPanel(
   c: Comment,
   sync: SyncClient,
   readOnly: boolean,
-  me: { email: string } | null,
   anchor?: Element,
   options?: OpenPanelOptions,
 ): void {
@@ -1605,7 +1698,7 @@ function openCommentPanel(
 
   if (!readOnly) {
     const toolbar = panel.querySelector("[data-margo-toolbar]") as HTMLElement;
-    for (const el of buildHeaderActions(c, sync, close, me))
+    for (const el of buildHeaderActions(c, sync, close))
       toolbar.appendChild(el);
     const replyForm = buildReplyForm(c, sync);
     if (replyForm) panel.appendChild(replyForm);
@@ -1693,7 +1786,6 @@ function buildHeaderActions(
   c: Comment,
   sync: SyncClient,
   close: () => void,
-  me: { email: string } | null,
 ): HTMLElement[] {
   const isResolved =
     c.frontmatter.status === "resolved" || c.frontmatter.status === "wontfix";
@@ -1718,7 +1810,7 @@ function buildHeaderActions(
     buttons.push(reopen);
     buttons.push(
       makeOverflowMenu(
-        buildOverflowItems(c, sync, close, me, /* showDismiss */ false),
+        buildOverflowItems(c, sync, close, /* showDismiss */ false),
       ),
     );
     return buttons;
@@ -1769,7 +1861,7 @@ function buildHeaderActions(
 
   buttons.push(
     makeOverflowMenu(
-      buildOverflowItems(c, sync, close, me, /* showDismiss */ true),
+      buildOverflowItems(c, sync, close, /* showDismiss */ true),
     ),
   );
   return buttons;
@@ -1854,7 +1946,6 @@ function buildOverflowItems(
   c: Comment,
   sync: SyncClient,
   close: () => void,
-  me: { email: string } | null,
   showDismiss: boolean,
 ): OverflowItem[] {
   const items: OverflowItem[] = [];
@@ -1906,22 +1997,23 @@ function buildOverflowItems(
     },
   });
 
-  if (canDelete(c, me)) {
-    items.push({
-      label: "Delete comment",
-      hint: "Hard delete (removes the file). Prefer Dismiss — this is for accidental commits.",
-      destructive: true,
-      onSelect: async () => {
-        if (!(await confirmDelete(c))) return;
-        try {
-          await sync.deleteComment(c.frontmatter.id);
-          close();
-        } catch (err) {
-          await uiAlert((err as Error).message, "Delete failed");
-        }
-      },
-    });
-  }
+  // Delete is available to anyone on the team — comments are a shared
+  // resource (server enforces no authorship gate; git history preserves
+  // the file regardless). Dismiss is still preferred for routine clearing.
+  items.push({
+    label: "Delete comment",
+    hint: "Hard delete (removes the file). Prefer Dismiss — this is for accidental commits.",
+    destructive: true,
+    onSelect: async () => {
+      if (!(await confirmDelete(c))) return;
+      try {
+        await sync.deleteComment(c.frontmatter.id);
+        close();
+      } catch (err) {
+        await uiAlert((err as Error).message, "Delete failed");
+      }
+    },
+  });
 
   return items;
 }
@@ -2000,12 +2092,6 @@ function makeOverflowMenu(items: OverflowItem[]): HTMLElement {
   });
 
   return container;
-}
-
-// Own-only: matches what the backend enforces. Status doesn't matter — the
-// owner can prune any of their own comments; git history preserves the file.
-function canDelete(c: Comment, me: { email: string } | null): boolean {
-  return !!me && me.email === c.frontmatter.author;
 }
 
 async function confirmDelete(c: Comment): Promise<boolean> {
@@ -3249,6 +3335,16 @@ function injectStyles(): void {
       background: hsl(38 92% 92%); border-color: hsl(38 92% 65%);
     }
     .margo-bulk-warn { color: hsl(28 80% 38%); }
+    /* Danger variant — for the bulk-delete in the Closed view. Reads as
+       irreversible. Red tones; the warn icon picks up the same color via
+       currentColor since .margo-bulk-warn is overridden below. */
+    .margo-inbox-bulk.margo-inbox-bulk-danger {
+      background: hsl(0 84% 97%); border-color: hsl(0 84% 85%); color: hsl(0 70% 38%);
+    }
+    .margo-inbox-bulk.margo-inbox-bulk-danger:hover {
+      background: hsl(0 84% 94%); border-color: hsl(0 84% 70%);
+    }
+    .margo-inbox-bulk.margo-inbox-bulk-danger .margo-bulk-warn { color: hsl(0 70% 42%); }
     /* ——— inbox toggle (sits above hide-pins) ——— */
     .margo-inbox-toggle {
       position: fixed; bottom: 104px; right: 16px; z-index: 1000002;
@@ -3413,16 +3509,17 @@ function injectStyles(): void {
       cursor: pointer; opacity: .7;
     }
     .margo-inbox-search-input::-webkit-search-cancel-button:hover { opacity: 1; }
-    /* ——— filter chips (Open · All · Mine · This page) — one row ——— */
+    /* ——— filter chips (Open · All · Closed · Mine · Page) — one row ——— */
     .margo-inbox-chips {
-      display: flex; gap: 4px; flex-wrap: wrap; align-items: center;
+      display: flex; gap: 3px; flex-wrap: wrap; align-items: center;
     }
     .margo-inbox-chip {
       background: transparent; color: var(--margo-muted-fg);
       border: 1px solid var(--margo-border); border-radius: 9999px;
-      padding: 2px 10px;
-      font: inherit; font-size: 11px;
+      padding: 2px 7px;
+      font: inherit; font-size: 10.5px;
       cursor: pointer;
+      white-space: nowrap;
       transition: background-color .1s, color .1s, border-color .1s;
     }
     .margo-inbox-chip:hover { background: var(--margo-muted); color: var(--margo-fg); }
@@ -3431,19 +3528,14 @@ function injectStyles(): void {
       border-color: var(--margo-fg);
       font-weight: 500;
     }
-    /* Status chips (Open/All) get a subtle filled look when pressed so they
-       read as "the currently selected scope" rather than "an added filter".
-       Reuses the same pressed style; the divider after them does the
-       grouping work. */
+    /* Status chips (Open/All/Closed) get a subtle filled look when pressed
+       so they read as "the currently selected scope" rather than "an added
+       filter". Reuses the same pressed style — visual grouping comes from
+       order (status chips always sit first) rather than a divider. */
     .margo-inbox-chip-status[aria-pressed="true"] {
       background: var(--margo-fg); color: var(--margo-bg);
     }
     .margo-inbox-chip:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 1px; }
-    .margo-inbox-chips-divider {
-      width: 1px; height: 16px;
-      background: var(--margo-border);
-      margin: 0 4px;
-    }
     .margo-inbox-list {
       min-height: 0; overflow-y: auto; overscroll-behavior: contain;
       padding: 6px;

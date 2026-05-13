@@ -202,7 +202,13 @@ describe('comment-pin handlers — happy path', () => {
     expect(deleted).toBeDefined();
   });
 
-  it('delete → rejects when a different author tries to delete', async () => {
+  it('delete → allows a different author to delete (comments are shared)', async () => {
+    // Comments are a shared resource — anyone on the team can resolve,
+    // reopen, reply, or delete any comment. The actor's identity is still
+    // captured for attribution (recorded in the commit message), but
+    // authorship is NOT a gate. Inverted from the older "only-author"
+    // policy; the user-facing rationale is that triaging stale comments
+    // shouldn't require chasing down the original author.
     const { id } = await createComment(ctx, {
       type: 'task',
       body: 'mine',
@@ -211,9 +217,8 @@ describe('comment-pin handlers — happy path', () => {
     // Change the repo's configured author — emulates a different teammate.
     execSync('git config user.email other-teammate@example.com', { cwd: rootDir });
 
-    await expect(deleteComment(ctx, id)).rejects.toMatchObject({ status: 403 });
-    // File should still exist — the rejection happened before any unlink.
-    await expect(fs.access(path.join(ctx.commentsDir, `${id}.md`))).resolves.toBeUndefined();
+    await expect(deleteComment(ctx, id)).resolves.toEqual({ ok: true });
+    await expect(fs.access(path.join(ctx.commentsDir, `${id}.md`))).rejects.toThrow();
   });
 
   it('delete → rejects an obviously malformed id without touching the filesystem', async () => {

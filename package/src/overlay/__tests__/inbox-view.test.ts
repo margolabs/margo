@@ -59,7 +59,7 @@ describe('computeInboxView — bulk-action counts respect active filters', () =>
     ];
     const view = computeInboxView({
       comments,
-      showResolved: false,
+      statusFilter: "open",
       filters: { ...baseFilters, mine: true },
       orphanIds: new Set(),
       route: ROUTE,
@@ -77,7 +77,7 @@ describe('computeInboxView — bulk-action counts respect active filters', () =>
     ];
     const view = computeInboxView({
       comments,
-      showResolved: false,
+      statusFilter: "open",
       filters: { ...baseFilters, search: 'checkout' },
       orphanIds: new Set(),
       route: ROUTE,
@@ -95,7 +95,7 @@ describe('computeInboxView — bulk-action counts respect active filters', () =>
     ];
     const view = computeInboxView({
       comments,
-      showResolved: true, // All view — resolved/wontfix appear in `all`
+      statusFilter: "all", // All view — resolved/wontfix appear in `all`
       filters: baseFilters,
       orphanIds: new Set(),
       route: ROUTE,
@@ -112,7 +112,7 @@ describe('computeInboxView — bulk-action counts respect active filters', () =>
     ];
     const view = computeInboxView({
       comments,
-      showResolved: false,
+      statusFilter: "open",
       filters: baseFilters,
       orphanIds: new Set(),
       route: ROUTE,
@@ -131,7 +131,7 @@ describe('computeInboxView — bulk-action counts respect active filters', () =>
     ];
     const view = computeInboxView({
       comments,
-      showResolved: false,
+      statusFilter: "open",
       filters: { ...baseFilters, mine: true },
       orphanIds: new Set(['c-orph-alice', 'c-orph-me']),
       route: ROUTE,
@@ -154,7 +154,7 @@ describe('computeInboxView — chip counts are intersection-aware', () => {
     // thisPage, c-4 not mine.)
     const view = computeInboxView({
       comments,
-      showResolved: false,
+      statusFilter: "open",
       filters: { ...baseFilters, thisPage: true },
       orphanIds: new Set(),
       route: ROUTE,
@@ -173,7 +173,7 @@ describe('computeInboxView — chip counts are intersection-aware', () => {
     // c-1 qualifies; c-2 not mine; c-3 not on this page.
     const view = computeInboxView({
       comments,
-      showResolved: false,
+      statusFilter: "open",
       filters: { ...baseFilters, mine: true },
       orphanIds: new Set(),
       route: ROUTE,
@@ -192,7 +192,7 @@ describe('computeInboxView — sort order', () => {
     ];
     const view = computeInboxView({
       comments,
-      showResolved: false,
+      statusFilter: "open",
       filters: baseFilters,
       orphanIds: new Set(['c-orph']),
       route: ROUTE,
@@ -210,12 +210,86 @@ describe('computeInboxView — sort order', () => {
     ];
     const view = computeInboxView({
       comments,
-      showResolved: true,
+      statusFilter: "all",
       filters: baseFilters,
       orphanIds: new Set(['c-resolved-orph']),
       route: ROUTE,
       meEmail: null,
     });
     expect(view.all.map((c) => c.frontmatter.id)).toEqual(['c-a', 'c-resolved-orph']);
+  });
+});
+
+describe('computeInboxView — Closed status filter', () => {
+  it('Closed shows only resolved/wontfix and excludes active statuses', () => {
+    const comments = [
+      mkComment({ id: 'c-open', author: 'a@x', status: 'open' }),
+      mkComment({ id: 'c-wip', author: 'a@x', status: 'in-progress' }),
+      mkComment({ id: 'c-resolved', author: 'a@x', status: 'resolved' }),
+      mkComment({ id: 'c-wontfix', author: 'a@x', status: 'wontfix' }),
+    ];
+    const view = computeInboxView({
+      comments,
+      statusFilter: 'closed',
+      filters: baseFilters,
+      orphanIds: new Set(),
+      route: ROUTE,
+      meEmail: null,
+    });
+    expect(view.all.map((c) => c.frontmatter.id).sort()).toEqual(['c-resolved', 'c-wontfix']);
+  });
+
+  it('visibleClosed mirrors `all` when statusFilter is closed', () => {
+    const comments = [
+      mkComment({ id: 'c-r1', author: ME, status: 'resolved' }),
+      mkComment({ id: 'c-r2', author: 'a@x', status: 'wontfix' }),
+      mkComment({ id: 'c-open', author: ME, status: 'open' }),
+    ];
+    const view = computeInboxView({
+      comments,
+      statusFilter: 'closed',
+      filters: baseFilters,
+      orphanIds: new Set(),
+      route: ROUTE,
+      meEmail: ME,
+    });
+    expect(view.visibleClosed.map((c) => c.frontmatter.id).sort()).toEqual(['c-r1', 'c-r2']);
+    expect(view.all.length).toBe(view.visibleClosed.length);
+  });
+
+  it('Closed view + Mine filter narrows visibleClosed to the user’s own', () => {
+    const comments = [
+      mkComment({ id: 'c-mine', author: ME, status: 'resolved' }),
+      mkComment({ id: 'c-theirs', author: 'alice@team.com', status: 'resolved' }),
+    ];
+    const view = computeInboxView({
+      comments,
+      statusFilter: 'closed',
+      filters: { ...baseFilters, mine: true },
+      orphanIds: new Set(),
+      route: ROUTE,
+      meEmail: ME,
+    });
+    expect(view.visibleClosed.map((c) => c.frontmatter.id)).toEqual(['c-mine']);
+  });
+
+  it('closedCount reflects status-axis-only intersection with other filters', () => {
+    const comments = [
+      mkComment({ id: 'c-1', author: ME, status: 'resolved', url: ROUTE }),
+      mkComment({ id: 'c-2', author: 'a@x', status: 'resolved', url: ROUTE }),
+      mkComment({ id: 'c-3', author: ME, status: 'resolved', url: '/other' }),
+      mkComment({ id: 'c-4', author: ME, status: 'open', url: ROUTE }),
+    ];
+    // Mine + thisPage on. closedCount should be the count under those
+    // narrowings ignoring the status axis itself: c-1 only.
+    const view = computeInboxView({
+      comments,
+      statusFilter: 'open',
+      filters: { ...baseFilters, mine: true, thisPage: true },
+      orphanIds: new Set(),
+      route: ROUTE,
+      meEmail: ME,
+    });
+    expect(view.closedCount).toBe(1);
   });
 });

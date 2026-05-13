@@ -2,18 +2,22 @@
 // it can be unit-tested without spinning up the whole DOM overlay.
 //
 // The inbox has four orthogonal filter dimensions:
-//   - status (Open / All): showResolved flag
+//   - statusFilter: 'open' | 'all' | 'closed' — three-way status scope.
+//     Open = active comments (open/in-progress/ready-for-review/blocked),
+//     Closed = resolved/wontfix only, All = everything.
 //   - mine: comments authored by the current user
 //   - thisPage: comments anchored to the current route
 //   - search: substring match across author, body, id, url
 //
-// Plus two derived lists used by the bulk-action buttons at the top of
-// the panel — both must respect the active filters so the button count
-// matches what the user sees:
+// Plus three derived lists used by the bulk-action buttons at the top of
+// the panel — all scoped to `all` so the labels match what the user sees:
 //   - onPage: subset of `all` that's open AND on this route
 //   - visibleOrphans: subset of `all` that's open AND anchor-lost
+//   - visibleClosed: subset of `all` that's resolved/wontfix (Closed view)
 
 import type { Comment } from '../shared/types.js';
+
+export type StatusFilter = 'open' | 'all' | 'closed';
 
 export interface InboxFilters {
   mine: boolean;
@@ -23,7 +27,7 @@ export interface InboxFilters {
 
 export interface ComputeInboxViewInput {
   comments: Comment[];
-  showResolved: boolean;
+  statusFilter: StatusFilter;
   filters: InboxFilters;
   orphanIds: Set<string>;
   route: string;
@@ -37,9 +41,12 @@ export interface InboxView {
   onPage: Comment[];
   /** Open + anchor-lost subset of `all`. Drives the orphan-bulk button. */
   visibleOrphans: Comment[];
+  /** Resolved/wontfix subset of `all`. Drives the Closed-view bulk delete. */
+  visibleClosed: Comment[];
   /** Counts shown on each chip — intersection-aware. */
   openCount: number;
   allCount: number;
+  closedCount: number;
   mineCount: number;
   thisPageCount: number;
 }
@@ -51,11 +58,20 @@ export const OPEN_STATUSES: ReadonlySet<string> = new Set([
   'blocked',
 ]);
 
+export const CLOSED_STATUSES: ReadonlySet<string> = new Set([
+  'resolved',
+  'wontfix',
+]);
+
+function statusesFor(filter: StatusFilter): ReadonlySet<string> {
+  if (filter === 'open') return OPEN_STATUSES;
+  if (filter === 'closed') return CLOSED_STATUSES;
+  return new Set([...OPEN_STATUSES, ...CLOSED_STATUSES]);
+}
+
 export function computeInboxView(input: ComputeInboxViewInput): InboxView {
-  const { comments, showResolved, filters, orphanIds, route, meEmail } = input;
-  const visibleStatuses: ReadonlySet<string> = showResolved
-    ? new Set([...OPEN_STATUSES, 'resolved', 'wontfix'])
-    : OPEN_STATUSES;
+  const { comments, statusFilter, filters, orphanIds, route, meEmail } = input;
+  const visibleStatuses = statusesFor(statusFilter);
   const q = filters.search.trim().toLowerCase();
   const matchesSearch = (c: Comment): boolean => {
     if (!q) return true;
@@ -89,14 +105,15 @@ export function computeInboxView(input: ComputeInboxViewInput): InboxView {
       return ao - bo;
     });
 
-  // Chip counts. For each chip, apply every OTHER active filter but skip
-  // the chip's own dimension — so toggling it on would land you on the
-  // shown count. Search is always applied (continuous reduction, not a tab).
+  // Chip counts. For each status chip, count what THAT filter would show
+  // with the other (mine/thisPage/search) filters held constant. Search is
+  // always applied (continuous reduction, not a tab).
   const baseFiltered = comments
     .filter((c) => (!filters.mine || matchesMine(c)))
     .filter((c) => (!filters.thisPage || matchesThisPage(c)))
     .filter(matchesSearch);
   const openCount = baseFiltered.filter((c) => OPEN_STATUSES.has(c.frontmatter.status)).length;
+  const closedCount = baseFiltered.filter((c) => CLOSED_STATUSES.has(c.frontmatter.status)).length;
   const allCount = baseFiltered.length;
   const mineCount = comments
     .filter((c) => visibleStatuses.has(c.frontmatter.status))
@@ -109,15 +126,25 @@ export function computeInboxView(input: ComputeInboxViewInput): InboxView {
     .filter(matchesSearch)
     .filter(matchesThisPage).length;
 
-  // Bulk-action subsets. Both are scoped to `all` (which is already
-  // filter-aware), so the button labels match the visible list — never
-  // promise to resolve comments the user can't see.
+  // Bulk-action subsets. Scoped to `all` (filter-aware) so the labels match
+  // the visible list — never promise to act on comments the user can't see.
   const onPage = all.filter(
     (c) => OPEN_STATUSES.has(c.frontmatter.status) && c.frontmatter.target.url === route,
   );
   const visibleOrphans = all.filter(
     (c) => orphanIds.has(c.frontmatter.id) && OPEN_STATUSES.has(c.frontmatter.status),
   );
+  const visibleClosed = all.filter((c) => CLOSED_STATUSES.has(c.frontmatter.status));
 
-  return { all, onPage, visibleOrphans, openCount, allCount, mineCount, thisPageCount };
+  return {
+    all,
+    onPage,
+    visibleOrphans,
+    visibleClosed,
+    openCount,
+    allCount,
+    closedCount,
+    mineCount,
+    thisPageCount,
+  };
 }

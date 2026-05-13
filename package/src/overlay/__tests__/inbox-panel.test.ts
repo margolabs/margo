@@ -9,6 +9,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderInboxPanel } from '../inject.js';
+import type { StatusFilter } from '../inbox-view.js';
 import type { Comment } from '../../shared/types.js';
 import type { SyncClient } from '../sync.js';
 
@@ -50,7 +51,7 @@ const fakeSync = {} as unknown as SyncClient;
 const baseFilters = { mine: false, thisPage: false, search: '' };
 
 interface Handlers {
-  onShowResolvedChange: ReturnType<typeof vi.fn>;
+  onStatusFilterChange: ReturnType<typeof vi.fn>;
   onFiltersChange: ReturnType<typeof vi.fn>;
   onClose: ReturnType<typeof vi.fn>;
 }
@@ -58,7 +59,7 @@ interface Handlers {
 function render(
   store: Map<string, Comment>,
   opts?: {
-    showResolved?: boolean;
+    statusFilter?: StatusFilter;
     filters?: { mine: boolean; thisPage: boolean; search: string };
     me?: { email: string } | null;
   },
@@ -67,7 +68,7 @@ function render(
   root.id = 'margo-overlay-root';
   document.body.appendChild(root);
   const handlers: Handlers = {
-    onShowResolvedChange: vi.fn(),
+    onStatusFilterChange: vi.fn(),
     onFiltersChange: vi.fn(),
     onClose: vi.fn(),
   };
@@ -77,15 +78,14 @@ function render(
     fakeSync,
     true, // open
     false, // readOnly
-    opts?.showResolved ?? false,
+    opts?.statusFilter ?? 'open',
     new Set<string>(), // orphanIds
-    // Caller may pass `me: null` explicitly to simulate preview mode; only
-    // fall back to the default when `me` was omitted entirely.
+    new Set<string>(), // pinIds
     opts && 'me' in opts ? opts.me ?? null : { email: 'me@team.com' },
     null, // gitState
     opts?.filters ?? baseFilters,
     true, // suppressEntranceAnim
-    handlers.onShowResolvedChange,
+    handlers.onStatusFilterChange,
     handlers.onFiltersChange,
     handlers.onClose,
   );
@@ -96,8 +96,6 @@ function render(
 describe('renderInboxPanel — smoke', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
-    // happy-dom may have stale window.location from prior tests — point to
-    // a stable URL so currentRoute() returns "/" inside the panel.
     history.replaceState(null, '', '/');
   });
 
@@ -107,9 +105,9 @@ describe('renderInboxPanel — smoke', () => {
     expect(() => render(store)).not.toThrow();
     const panel = document.querySelector('[data-margo-inbox]');
     expect(panel).not.toBeNull();
-    // Four chips: Open, All, Mine, This page.
+    // Five chips: Open, All, Closed, Mine, This page.
     const chips = document.querySelectorAll('.margo-inbox-chip');
-    expect(chips.length).toBe(4);
+    expect(chips.length).toBe(5);
   });
 });
 
@@ -119,31 +117,41 @@ describe('renderInboxPanel — chip clicks dispatch the right callbacks', () => 
     history.replaceState(null, '', '/');
   });
 
-  function getChip(panel: HTMLElement, dim: 'open' | 'all' | 'mine' | 'thisPage'): HTMLElement {
+  function getChip(
+    panel: HTMLElement,
+    dim: 'open' | 'all' | 'closed' | 'mine' | 'thisPage',
+  ): HTMLElement {
     const el = panel.querySelector<HTMLElement>(`.margo-inbox-chip[data-chip="${dim}"]`);
     if (!el) throw new Error(`chip ${dim} not found`);
     return el;
   }
 
-  it('clicking "All" turns on showResolved (and not yet on)', () => {
+  it('clicking "All" switches statusFilter to all (from open)', () => {
     const store = new Map([['c-1', mkComment({ id: 'c-1', author: 'alice@team.com' })]]);
-    const { panel, handlers } = render(store, { showResolved: false });
+    const { panel, handlers } = render(store, { statusFilter: 'open' });
     getChip(panel, 'all').click();
-    expect(handlers.onShowResolvedChange).toHaveBeenCalledWith(true);
+    expect(handlers.onStatusFilterChange).toHaveBeenCalledWith('all');
   });
 
-  it('clicking "Open" turns off showResolved when currently on', () => {
-    const store = new Map([['c-1', mkComment({ id: 'c-1', author: 'alice@team.com' })]]);
-    const { panel, handlers } = render(store, { showResolved: true });
-    getChip(panel, 'open').click();
-    expect(handlers.onShowResolvedChange).toHaveBeenCalledWith(false);
+  it('clicking "Closed" switches statusFilter to closed', () => {
+    const store = new Map([['c-1', mkComment({ id: 'c-1', author: 'alice@team.com', status: 'resolved' })]]);
+    const { panel, handlers } = render(store, { statusFilter: 'open' });
+    getChip(panel, 'closed').click();
+    expect(handlers.onStatusFilterChange).toHaveBeenCalledWith('closed');
   });
 
-  it('clicking "Open" while already on does NOT dispatch (no-op)', () => {
+  it('clicking "Open" when currently on All switches back to open', () => {
     const store = new Map([['c-1', mkComment({ id: 'c-1', author: 'alice@team.com' })]]);
-    const { panel, handlers } = render(store, { showResolved: false });
+    const { panel, handlers } = render(store, { statusFilter: 'all' });
     getChip(panel, 'open').click();
-    expect(handlers.onShowResolvedChange).not.toHaveBeenCalled();
+    expect(handlers.onStatusFilterChange).toHaveBeenCalledWith('open');
+  });
+
+  it('clicking the already-pressed status chip is a no-op', () => {
+    const store = new Map([['c-1', mkComment({ id: 'c-1', author: 'alice@team.com' })]]);
+    const { panel, handlers } = render(store, { statusFilter: 'open' });
+    getChip(panel, 'open').click();
+    expect(handlers.onStatusFilterChange).not.toHaveBeenCalled();
   });
 
   it('clicking "Mine" toggles the mine filter', () => {
@@ -167,13 +175,23 @@ describe('renderInboxPanel — chip clicks dispatch the right callbacks', () => 
     expect(handlers.onFiltersChange).toHaveBeenCalledWith({ thisPage: true });
   });
 
-  it('renders only three chips when me is unknown (preview/no-Mine)', () => {
-    // Mine is hidden when we don't know the user — verifies the conditional
-    // render doesn't crash and the remaining chips are still wired.
+  it('switching to All clears an active thisPage filter (expand intent)', () => {
+    const store = new Map([['c-1', mkComment({ id: 'c-1', author: 'alice@team.com' })]]);
+    const { panel, handlers } = render(store, {
+      statusFilter: 'open',
+      filters: { mine: false, thisPage: true, search: '' },
+    });
+    getChip(panel, 'all').click();
+    expect(handlers.onStatusFilterChange).toHaveBeenCalledWith('all');
+    expect(handlers.onFiltersChange).toHaveBeenCalledWith({ thisPage: false });
+  });
+
+  it('renders only four chips when me is unknown (preview/no-Mine)', () => {
     const store = new Map([['c-1', mkComment({ id: 'c-1', author: 'alice@team.com' })]]);
     const { panel } = render(store, { me: null });
-    expect(panel.querySelectorAll('.margo-inbox-chip').length).toBe(3);
+    expect(panel.querySelectorAll('.margo-inbox-chip').length).toBe(4);
     expect(panel.querySelector('[data-chip="mine"]')).toBeNull();
     expect(panel.querySelector('[data-chip="thisPage"]')).not.toBeNull();
+    expect(panel.querySelector('[data-chip="closed"]')).not.toBeNull();
   });
 });

@@ -222,17 +222,15 @@ export async function deleteComment(
   } catch {
     throw new HandlerError(404, 'not found');
   }
-  const me = await getAuthor(ctx.rootDir);
-  if (comment.frontmatter.author !== me.email) {
-    throw new HandlerError(403, { error: 'only the original author can delete a comment' });
-  }
-  // Authorship is the only gate — git history preserves the file regardless.
-  // Delete the file synchronously so subsequent reads don't see the ghost,
-  // then queue the git rm + commit + push for the background.
+  // Comments are a shared resource — anyone on the team can resolve,
+  // reopen, reply, or delete any comment. The author is captured for
+  // attribution + audit (commit message records who did the delete) but
+  // does NOT gate the action. Git history preserves the file regardless.
+  const actor = await getAuthor(ctx.rootDir);
   await fs.unlink(file).catch(() => { /* already gone is fine */ });
   broadcastSse(ctx, { type: 'deleted', id });
   enqueueGitOp(`delete ${id}`, () =>
-    removeAndCommit([file], `delete ${id} by ${me.email}`, gitOpts(ctx)),
+    removeAndCommit([file], `delete ${id} by ${actor.email}`, gitOpts(ctx)),
   );
   return { ok: true };
 }
