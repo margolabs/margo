@@ -5,25 +5,39 @@
 // Intentionally plain DOM + minimal CSS: this code lives inside the host
 // app's page, and we cannot assume any framework or styling library.
 
-import { captureTarget, captureTargetFromEvent, captureTargetFromGap, captureTargetFromRange } from './pin.js';
-import { resolveTarget } from './resolver.js';
-import { installRouteTracker, onRouteChange, currentRoute } from './route-tracker.js';
-import { SyncClient, type SyncEvent } from './sync.js';
-import type { Comment, CommentType, GitState } from '../shared/types.js';
+import {
+  captureTarget,
+  captureTargetFromEvent,
+  captureTargetFromGap,
+  captureTargetFromRange,
+} from "./pin.js";
+import { resolveTarget } from "./resolver.js";
+import {
+  installRouteTracker,
+  onRouteChange,
+  currentRoute,
+} from "./route-tracker.js";
+import { SyncClient, type SyncEvent } from "./sync.js";
+import {
+  computeInboxView,
+  OPEN_STATUSES,
+  type InboxFilters as InboxFilterState,
+} from "./inbox-view.js";
+import type { Comment, CommentType, GitState } from "../shared/types.js";
 
 interface StartOptions {
-  mode: 'dev' | 'preview';
+  mode: "dev" | "preview";
 }
 
-const ROOT_ID = 'margo-overlay-root';
-const STYLE_ID = 'margo-overlay-style';
+const ROOT_ID = "margo-overlay-root";
+const STYLE_ID = "margo-overlay-style";
 
 export function start(opts: StartOptions): void {
   if (document.getElementById(ROOT_ID)) return; // already started
   injectStyles();
-  const root = document.createElement('div');
+  const root = document.createElement("div");
   root.id = ROOT_ID;
-  root.dataset.margo = '';
+  root.dataset.margo = "";
   root.dataset.mode = opts.mode;
   document.body.appendChild(root);
 
@@ -41,24 +55,29 @@ export function start(opts: StartOptions): void {
   // Set when the server's RemotePoller spots new comment changes on upstream.
   // Drives the "N new comments · Pull" banner. Null when there's nothing
   // incoming (either we're up to date or we already pulled).
-  let remoteIncoming: { added: string[]; modified: string[]; deleted: string[]; total: number } | null = null;
+  let remoteIncoming: {
+    added: string[];
+    modified: string[];
+    deleted: string[];
+    total: number;
+  } | null = null;
   // Persist the "show resolved" choice across reloads — surveying past
   // decisions is a recurring task, so the user shouldn't have to re-toggle.
-  const showResolvedKey = 'margo:showResolved';
-  let showResolved = localStorage.getItem(showResolvedKey) === '1';
+  const showResolvedKey = "margo:showResolved";
+  let showResolved = localStorage.getItem(showResolvedKey) === "1";
   // Hide-pins toggle — flips off pin/highlight/orphan-tray rendering so
   // the user can review their product without comment dots cluttering it.
   // The FAB menu and other controls stay visible so the user can still
   // open the inbox, create new pins, etc. Persisted across reloads.
-  const hidePinsKey = 'margo:hidePins';
-  let hidePins = localStorage.getItem(hidePinsKey) === '1';
-  root.toggleAttribute('data-margo-hidden', hidePins);
+  const hidePinsKey = "margo:hidePins";
+  let hidePins = localStorage.getItem(hidePinsKey) === "1";
+  root.toggleAttribute("data-margo-hidden", hidePins);
   // Inbox panel — cross-page list of all comments. Open state is persisted
   // in sessionStorage so cross-page navigation from the inbox doesn't drop
   // the user out of triage mode. (sessionStorage rather than localStorage:
   // closing the tab should reset, opening a new one starts fresh.)
-  const inboxOpenKey = 'margo:inboxOpen';
-  let inboxOpen = sessionStorage.getItem(inboxOpenKey) === '1';
+  const inboxOpenKey = "margo:inboxOpen";
+  let inboxOpen = sessionStorage.getItem(inboxOpenKey) === "1";
   // When the inbox was open on the previous page and we landed here via a
   // hard navigation, skip the slide-in animation on the first render — it
   // wasn't really "opening," it's just continuing from the previous view.
@@ -76,41 +95,63 @@ export function start(opts: StartOptions): void {
   // - thisPage: sessionStorage — contextual to the current browsing session
   //   (durable would footgun: page B with this-page on hides everything else)
   // - search: volatile — clears on reload, no need to persist a transient query
-  const filterMineKey = 'margo:filterMine';
-  const filterThisPageKey = 'margo:filterThisPage';
-  let filterMine = localStorage.getItem(filterMineKey) === '1';
-  let filterThisPage = sessionStorage.getItem(filterThisPageKey) === '1';
-  let searchQuery = '';
+  const filterMineKey = "margo:filterMine";
+  const filterThisPageKey = "margo:filterThisPage";
+  let filterMine = localStorage.getItem(filterMineKey) === "1";
+  let filterThisPage = sessionStorage.getItem(filterThisPageKey) === "1";
+  let searchQuery = "";
 
   const renderPins = () => {
-    renderAllPins(root, store, sync, opts.mode === 'preview', me, showResolved, gitState, hidePins, orphanIds);
+    renderAllPins(
+      root,
+      store,
+      sync,
+      opts.mode === "preview",
+      me,
+      showResolved,
+      gitState,
+      hidePins,
+      orphanIds,
+    );
     renderInbox();
   };
   const renderInbox = () => {
     renderInboxPanel(
-      root, store, sync, inboxOpen, opts.mode === 'preview', showResolved, orphanIds, me, gitState,
+      root,
+      store,
+      sync,
+      inboxOpen,
+      opts.mode === "preview",
+      showResolved,
+      orphanIds,
+      me,
+      gitState,
       { mine: filterMine, thisPage: filterThisPage, search: searchQuery },
       suppressInboxEntranceAnim,
       (next) => {
         // The inbox's "Open" / "All" filter doubles as the global show-resolved
         // control — there's no value in two separate UIs for the same idea.
         showResolved = next;
-        localStorage.setItem(showResolvedKey, next ? '1' : '0');
+        localStorage.setItem(showResolvedKey, next ? "1" : "0");
         renderPins();
       },
       (patch) => {
         if (patch.mine !== undefined) {
           filterMine = patch.mine;
-          localStorage.setItem(filterMineKey, patch.mine ? '1' : '0');
+          localStorage.setItem(filterMineKey, patch.mine ? "1" : "0");
         }
         if (patch.thisPage !== undefined) {
           filterThisPage = patch.thisPage;
-          sessionStorage.setItem(filterThisPageKey, patch.thisPage ? '1' : '0');
+          sessionStorage.setItem(filterThisPageKey, patch.thisPage ? "1" : "0");
         }
         if (patch.search !== undefined) searchQuery = patch.search;
         renderInbox();
       },
-      () => { inboxOpen = false; sessionStorage.setItem(inboxOpenKey, '0'); renderInbox(); },
+      () => {
+        inboxOpen = false;
+        sessionStorage.setItem(inboxOpenKey, "0");
+        renderInbox();
+      },
     );
     // Only the very first render suppresses the entrance animation. Any
     // subsequent open (user click) animates normally.
@@ -118,14 +159,17 @@ export function start(opts: StartOptions): void {
   };
 
   const refreshGitState = async () => {
-    if (opts.mode !== 'dev') return;
+    if (opts.mode !== "dev") return;
     const next = await sync.getGitState();
-    if (next) { gitState = next; renderPins(); }
+    if (next) {
+      gitState = next;
+      renderPins();
+    }
   };
 
   const renderRemoteBanner = () => {
     // Preview mode never sees this banner — there's nothing to "pull" into.
-    if (opts.mode !== 'dev') return;
+    if (opts.mode !== "dev") return;
     renderRemoteChangesBanner(root, remoteIncoming, async () => {
       // Optimistic dismiss: the user clicked Pull, so hide the banner now.
       // If the pull fails, restore + surface the error.
@@ -136,7 +180,7 @@ export function start(opts: StartOptions): void {
       if (!result.ok) {
         remoteIncoming = stash;
         renderRemoteBanner();
-        await uiAlert(result.error, 'Pull failed');
+        await uiAlert(result.error, "Pull failed");
         return;
       }
       // Pull succeeded. The CommentWatcher will fire add/change events for
@@ -145,23 +189,23 @@ export function start(opts: StartOptions): void {
     });
   };
 
-  sync.addEventListener('event', (ev) => {
+  sync.addEventListener("event", (ev) => {
     const e = (ev as CustomEvent<SyncEvent>).detail;
-    if (e.type === 'snapshot') {
+    if (e.type === "snapshot") {
       store.clear();
       for (const c of e.comments) store.set(c.frontmatter.id, c);
       renderPins();
     }
     // For created / updated / deleted, naive refetch keeps things simple in v0.
     // Optimization (delta fetches) deferred.
-    if (e.type === 'created' || e.type === 'updated' || e.type === 'deleted') {
+    if (e.type === "created" || e.type === "updated" || e.type === "deleted") {
       void refetchAndRender(store, renderPins).then(() => {
         // If the panel is open for the comment that just changed (e.g. the
         // user just submitted a reply, or a teammate did), surgically update
         // its thread so the user sees the new content without losing their
         // place. Skipped for 'deleted' — the panel's outside-click handler
         // already cleans up if the user navigates away.
-        if (e.type === 'updated' || e.type === 'created') {
+        if (e.type === "updated" || e.type === "created") {
           refreshOpenPanelThreadIfMatches(store, e.id);
         }
       });
@@ -169,16 +213,22 @@ export function start(opts: StartOptions): void {
       // have advanced our HEAD via the background pull. Refresh git state too.
       void refreshGitState();
     }
-    if (e.type === 'remote-changes') {
-      remoteIncoming = e.total > 0
-        ? { added: e.added, modified: e.modified, deleted: e.deleted, total: e.total }
-        : null;
+    if (e.type === "remote-changes") {
+      remoteIncoming =
+        e.total > 0
+          ? {
+              added: e.added,
+              modified: e.modified,
+              deleted: e.deleted,
+              total: e.total,
+            }
+          : null;
       renderRemoteBanner();
     }
   });
 
   sync.start();
-  if (opts.mode === 'dev') {
+  if (opts.mode === "dev") {
     void (async () => {
       let u = await sync.getMe();
       // Missing git config user.name / user.email is the most common cause of
@@ -189,7 +239,10 @@ export function start(opts: StartOptions): void {
       // identity still produces a broken-looking comment.
       const incomplete = !u || !u.name || !u.email;
       if (incomplete) {
-        u = await openIdentitySetup(sync, { name: u?.name ?? '', email: u?.email ?? '' });
+        u = await openIdentitySetup(sync, {
+          name: u?.name ?? "",
+          email: u?.email ?? "",
+        });
       }
       me = u;
       renderPins();
@@ -198,8 +251,8 @@ export function start(opts: StartOptions): void {
     // Catches the common case: user runs `git checkout other-branch` in a
     // terminal, alt-tabs back to the browser. Without this the inbox would
     // still show divergence diagnostics for the previous branch.
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') void refreshGitState();
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") void refreshGitState();
     });
   }
   // Toggle is rendered once and lives outside renderAllPins (which clears its
@@ -207,13 +260,13 @@ export function start(opts: StartOptions): void {
   // a re-render — no need to re-create the toggle each time.
   renderHidePinsToggle(root, hidePins, (next) => {
     hidePins = next;
-    localStorage.setItem(hidePinsKey, next ? '1' : '0');
-    root.toggleAttribute('data-margo-hidden', next);
+    localStorage.setItem(hidePinsKey, next ? "1" : "0");
+    root.toggleAttribute("data-margo-hidden", next);
     renderPins();
   });
   renderInboxToggle(root, () => {
     inboxOpen = !inboxOpen;
-    sessionStorage.setItem(inboxOpenKey, inboxOpen ? '1' : '0');
+    sessionStorage.setItem(inboxOpenKey, inboxOpen ? "1" : "0");
     renderInbox();
     if (inboxOpen) setFabOpen(false); // collapse menu when surfacing the panel
   });
@@ -225,18 +278,21 @@ export function start(opts: StartOptions): void {
   const setFabOpen = (next: boolean) => {
     if (next === fabOpen) return;
     fabOpen = next;
-    root.toggleAttribute('data-margo-fab-open', next);
-    fabMain.setAttribute('aria-expanded', String(next));
-    fabMain.setAttribute('aria-label', next ? 'close margo menu' : 'open margo menu');
+    root.toggleAttribute("data-margo-fab-open", next);
+    fabMain.setAttribute("aria-expanded", String(next));
+    fabMain.setAttribute(
+      "aria-label",
+      next ? "close margo menu" : "open margo menu",
+    );
   };
-  const fabMain = document.createElement('button');
-  fabMain.type = 'button';
-  fabMain.className = 'margo-fab-main';
-  fabMain.setAttribute('aria-expanded', 'false');
-  fabMain.setAttribute('aria-label', 'open margo menu');
-  fabMain.title = 'Margo';
-  fabMain.innerHTML = `<span class="margo-fab-main-pin">📌</span><span class="margo-fab-main-label">Pin</span><span class="margo-fab-main-chev" aria-hidden="true">▾</span>`;
-  fabMain.addEventListener('click', (e) => {
+  const fabMain = document.createElement("button");
+  fabMain.type = "button";
+  fabMain.className = "margo-fab-main";
+  fabMain.setAttribute("aria-expanded", "false");
+  fabMain.setAttribute("aria-label", "open margo menu");
+  fabMain.title = "Margo";
+  fabMain.innerHTML = `<span class="margo-fab-main-pin">${icon("pin", 16)}</span><span class="margo-fab-main-label">Pin</span><span class="margo-fab-main-chev" aria-hidden="true">▾</span>`;
+  fabMain.addEventListener("click", (e) => {
     e.stopPropagation();
     setFabOpen(!fabOpen);
   });
@@ -245,7 +301,7 @@ export function start(opts: StartOptions): void {
   // Bubble-phase click listener. Sub-FAB's own click handler runs first
   // (target phase); we collapse the menu after, so the close never fights
   // with the action. Outside-click anywhere → collapse.
-  document.addEventListener('click', (e) => {
+  document.addEventListener("click", (e) => {
     if (!fabOpen) return;
     const t = e.target as Element | null;
     if (!t) return;
@@ -254,8 +310,8 @@ export function start(opts: StartOptions): void {
     if (fabMain.contains(t)) return;
     setFabOpen(false);
   });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && fabOpen) setFabOpen(false);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && fabOpen) setFabOpen(false);
   });
 
   // Hash deep-link: `#margo=<id>` makes the overlay scroll to that pin once
@@ -271,9 +327,12 @@ export function start(opts: StartOptions): void {
   const schedule = () => {
     if (scheduled) return;
     scheduled = true;
-    requestAnimationFrame(() => { scheduled = false; renderPins(); });
+    requestAnimationFrame(() => {
+      scheduled = false;
+      renderPins();
+    });
   };
-  window.addEventListener('resize', schedule);
+  window.addEventListener("resize", schedule);
   // Capture-phase scroll listener catches scrolling on *any* ancestor, not
   // just the document — without this, a pin inside an overflow:auto card
   // would stay anchored to its old viewport position while the underlying
@@ -284,12 +343,16 @@ export function start(opts: StartOptions): void {
   // Without this filter, scrolling the inbox triggers renderInbox via
   // renderPins, which rebuilds panel.innerHTML and resets scrollTop to 0 —
   // the scrollbar appears but every scroll tick snaps back to top.
-  window.addEventListener('scroll', (e) => {
-    const t = e.target;
-    if (t instanceof Element && t.closest('[data-margo]')) return;
-    schedule();
-  }, { capture: true, passive: true });
-  if (typeof ResizeObserver !== 'undefined') {
+  window.addEventListener(
+    "scroll",
+    (e) => {
+      const t = e.target;
+      if (t instanceof Element && t.closest("[data-margo]")) return;
+      schedule();
+    },
+    { capture: true, passive: true },
+  );
+  if (typeof ResizeObserver !== "undefined") {
     new ResizeObserver(schedule).observe(document.documentElement);
   }
   // Catch DOM mutations (font load, async content, tab/wizard panel swaps)
@@ -304,18 +367,33 @@ export function start(opts: StartOptions): void {
   // Skip mutations inside the overlay itself, otherwise rendering pins triggers
   // the observer and we infinite-loop.
   const RELEVANT_ATTRS = [
-    'hidden', 'aria-selected', 'aria-current', 'aria-expanded',
-    'aria-hidden', 'aria-pressed', 'data-state', 'data-step',
-    'style', 'class',
+    "hidden",
+    "aria-selected",
+    "aria-current",
+    "aria-expanded",
+    "aria-hidden",
+    "aria-pressed",
+    "data-state",
+    "data-step",
+    "style",
+    "class",
   ];
   new MutationObserver((records) => {
     for (const m of records) {
       const t = m.target as Node;
-      if (t.nodeType === Node.ELEMENT_NODE && (t as Element).closest('[data-margo]')) continue;
+      if (
+        t.nodeType === Node.ELEMENT_NODE &&
+        (t as Element).closest("[data-margo]")
+      )
+        continue;
       // For attribute changes, only react to ones that plausibly affect
       // visibility / which view is active. Otherwise every focus ring or
       // input event would re-render pins.
-      if (m.type === 'attributes' && (!m.attributeName || !RELEVANT_ATTRS.includes(m.attributeName))) continue;
+      if (
+        m.type === "attributes" &&
+        (!m.attributeName || !RELEVANT_ATTRS.includes(m.attributeName))
+      )
+        continue;
       schedule();
       return;
     }
@@ -327,7 +405,7 @@ export function start(opts: StartOptions): void {
     attributeFilter: RELEVANT_ATTRS,
   });
 
-  if (opts.mode === 'dev') {
+  if (opts.mode === "dev") {
     enablePinComposer(root, sync, renderPins);
   }
 }
@@ -336,7 +414,7 @@ async function refetchAndRender(
   store: Map<string, Comment>,
   renderPins: () => void,
 ): Promise<void> {
-  const res = await fetch('/__margo/list');
+  const res = await fetch("/__margo/list");
   if (!res.ok) return;
   const { comments } = (await res.json()) as { comments: Comment[] };
   store.clear();
@@ -353,13 +431,13 @@ function refreshOpenPanelThreadIfMatches(
   store: Map<string, Comment>,
   id: string,
 ): void {
-  const panel = document.querySelector('.margo-panel') as HTMLElement | null;
+  const panel = document.querySelector(".margo-panel") as HTMLElement | null;
   if (!panel || panel.dataset.commentId !== id) return;
   const c = store.get(id);
   if (!c) return;
-  const oldThread = panel.querySelector('.margo-thread');
+  const oldThread = panel.querySelector(".margo-thread");
   if (!oldThread) return;
-  const temp = document.createElement('div');
+  const temp = document.createElement("div");
   temp.innerHTML = renderThread(c);
   const next = temp.firstElementChild as HTMLElement | null;
   if (!next) return;
@@ -379,7 +457,10 @@ function renderAllPins(
   orphanIds: Set<string>,
 ): void {
   // Clear existing pin + highlight nodes (keep the launcher and toggle)
-  for (const el of Array.from(root.querySelectorAll('[data-margo-pin],[data-margo-highlight]'))) el.remove();
+  for (const el of Array.from(
+    root.querySelectorAll("[data-margo-pin],[data-margo-highlight]"),
+  ))
+    el.remove();
   // Reset for this render — same Set instance so callers (the inbox) see
   // updates without re-passing.
   orphanIds.clear();
@@ -391,16 +472,17 @@ function renderAllPins(
   const orphans: Comment[] = [];
   const onPage: Comment[] = []; // unresolved-only — bulk resolve operates on these
   for (const c of store.values()) {
-    const isResolved = c.frontmatter.status === 'resolved' || c.frontmatter.status === 'wontfix';
+    const isResolved =
+      c.frontmatter.status === "resolved" || c.frontmatter.status === "wontfix";
     if (isResolved && !showResolved) continue;
     const result = resolveTarget(c.frontmatter.target, url);
-    if (result.kind === 'wrong-route') continue;
+    if (result.kind === "wrong-route") continue;
     // wrong-view: comment is for THIS route but a different view state
     // (other tab, other wizard step, etc.). Suppress the pin without
     // orphaning — the user can navigate back to the original view to
     // see the pin again, and the comment stays visible in the inbox.
-    if (result.kind === 'wrong-view') continue;
-    if (result.kind === 'lost-anchor') {
+    if (result.kind === "wrong-view") continue;
+    if (result.kind === "lost-anchor") {
       orphans.push(c);
       orphanIds.add(c.frontmatter.id);
       continue;
@@ -415,14 +497,16 @@ function renderAllPins(
     // - gap anchors: the rect between the two boundary elements (hatched)
     // - element anchors: a single rect outlining the element
     for (const r of rects) {
-      const hl = document.createElement('div');
+      const hl = document.createElement("div");
       hl.dataset.margoHighlight = c.frontmatter.id;
       hl.className = isGapAnchor
-        ? 'margo-hl margo-hl-gap'
-        : isTextAnchor ? 'margo-hl margo-hl-text' : 'margo-hl margo-hl-el';
+        ? "margo-hl margo-hl-gap"
+        : isTextAnchor
+          ? "margo-hl margo-hl-text"
+          : "margo-hl margo-hl-el";
       hl.dataset.status = c.frontmatter.status;
       hl.dataset.kind = result.kind;
-      if (isResolved) hl.dataset.resolved = '';
+      if (isResolved) hl.dataset.resolved = "";
       hl.style.left = `${r.left + window.scrollX}px`;
       hl.style.top = `${r.top + window.scrollY}px`;
       hl.style.width = `${r.width}px`;
@@ -431,9 +515,9 @@ function renderAllPins(
     }
 
     const r = rects[0]!;
-    const pin = document.createElement('button');
+    const pin = document.createElement("button");
     pin.dataset.margoPin = c.frontmatter.id;
-    pin.className = 'margo-pin';
+    pin.className = "margo-pin";
     // Pin position: anchor to the live rect for every anchor kind. The rect
     // is what `getBoundingClientRect()` produces, so it reflects the element's
     // current viewport position whether the page, an inner overflow:auto
@@ -458,20 +542,28 @@ function renderAllPins(
     pin.style.top = `${Math.max(docTop, minTop)}px`;
     pin.dataset.status = c.frontmatter.status;
     pin.dataset.kind = result.kind;
-    if (isResolved) pin.dataset.resolved = '';
-    pin.textContent = result.kind === 'moved' ? '?' : '·';
+    if (isResolved) pin.dataset.resolved = "";
+    pin.textContent = result.kind === "moved" ? "?" : "·";
     // Hover the pin → intensify the matching highlight(s) + show our custom
     // tooltip (replacing the native `title` which the OS positions and
     // happily lets clip past the viewport edge).
-    const tipText = `${c.frontmatter.author}: ${truncate(c.body.split('\n').find((l) => l.trim()) ?? '', 80)}`;
+    const tipText = `${c.frontmatter.author}: ${truncate(c.body.split("\n").find((l) => l.trim()) ?? "", 80)}`;
     const setHover = (on: boolean) => {
-      for (const el of Array.from(root.querySelectorAll(`[data-margo-highlight="${c.frontmatter.id}"]`))) {
-        (el as HTMLElement).classList.toggle('margo-hl-hover', on);
+      for (const el of Array.from(
+        root.querySelectorAll(`[data-margo-highlight="${c.frontmatter.id}"]`),
+      )) {
+        (el as HTMLElement).classList.toggle("margo-hl-hover", on);
       }
     };
-    pin.addEventListener('mouseenter', () => { setHover(true); showTooltip(pin, tipText, c.frontmatter.id); });
-    pin.addEventListener('mouseleave', () => { setHover(false); hideTooltip(); });
-    pin.addEventListener('click', (e) => {
+    pin.addEventListener("mouseenter", () => {
+      setHover(true);
+      showTooltip(pin, tipText, c.frontmatter.id);
+    });
+    pin.addEventListener("mouseleave", () => {
+      setHover(false);
+      hideTooltip();
+    });
+    pin.addEventListener("click", (e) => {
       e.stopPropagation();
       hideTooltip();
       openCommentPanel(root, c, sync, readOnly, me, pin);
@@ -487,24 +579,18 @@ function renderAllPins(
 function renderInboxToggle(root: HTMLElement, onClick: () => void): void {
   // Stays mounted across renders; the panel itself is rebuilt on demand.
   // Click toggles the open/closed state via the supplied callback.
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'margo-inbox-toggle';
-  btn.dataset.margoToggle = 'inbox';
-  btn.setAttribute('aria-label', 'open margo inbox');
-  btn.title = 'All comments — across every page';
-  btn.innerHTML = `<span class="margo-eye">📋</span><span>inbox</span>`;
-  btn.addEventListener('click', onClick);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "margo-inbox-toggle";
+  btn.dataset.margoToggle = "inbox";
+  btn.setAttribute("aria-label", "open margo inbox");
+  btn.title = "All comments — across every page";
+  btn.innerHTML = `<span class="margo-eye">${icon("inbox", 13)}</span><span>inbox</span>`;
+  btn.addEventListener("click", onClick);
   root.appendChild(btn);
 }
 
-interface InboxFilterState {
-  mine: boolean;
-  thisPage: boolean;
-  search: string;
-}
-
-function renderInboxPanel(
+export function renderInboxPanel(
   root: HTMLElement,
   store: Map<string, Comment>,
   sync: SyncClient,
@@ -520,7 +606,7 @@ function renderInboxPanel(
   onFiltersChange: (patch: Partial<InboxFilterState>) => void,
   onClose: () => void,
 ): void {
-  let panel = root.querySelector('[data-margo-inbox]') as HTMLElement | null;
+  let panel = root.querySelector("[data-margo-inbox]") as HTMLElement | null;
   if (!open) {
     if (panel) panel.remove();
     return;
@@ -532,11 +618,13 @@ function renderInboxPanel(
   // unless the caller asked us to skip it (e.g. session-restored after a
   // cross-page nav).
   if (!panel) {
-    panel = document.createElement('aside');
-    panel.dataset.margoInbox = '';
-    panel.className = suppressEntranceAnim ? 'margo-inbox margo-inbox-no-animate' : 'margo-inbox';
-    panel.setAttribute('role', 'dialog');
-    panel.setAttribute('aria-label', 'margo inbox');
+    panel = document.createElement("aside");
+    panel.dataset.margoInbox = "";
+    panel.className = suppressEntranceAnim
+      ? "margo-inbox margo-inbox-no-animate"
+      : "margo-inbox";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-label", "margo inbox");
     root.appendChild(panel);
   }
 
@@ -545,93 +633,38 @@ function renderInboxPanel(
   // we don't want any of them to wipe the search box mid-keystroke. Capture
   // the input's current value (which may be ahead of state.search if a
   // re-render fires during a fast-typing burst), focus, and selection.
-  const existingSearch = panel.querySelector<HTMLInputElement>('.margo-inbox-search-input');
-  const searchFocusState = existingSearch && document.activeElement === existingSearch
-    ? {
-      value: existingSearch.value,
-      selectionStart: existingSearch.selectionStart,
-      selectionEnd: existingSearch.selectionEnd,
-    }
-    : null;
+  const existingSearch = panel.querySelector<HTMLInputElement>(
+    ".margo-inbox-search-input",
+  );
+  const searchFocusState =
+    existingSearch && document.activeElement === existingSearch
+      ? {
+          value: existingSearch.value,
+          selectionStart: existingSearch.selectionStart,
+          selectionEnd: existingSearch.selectionEnd,
+        }
+      : null;
 
-  // The "Open" / "All" filter is bound to the global show-resolved state
-  // (see start()), so the inbox doubles as the show-resolved control.
-  const openStatuses: ReadonlySet<string> = new Set(['open', 'in-progress', 'ready-for-review', 'blocked']);
-  const visibleStatuses: ReadonlySet<string> = showResolved
-    ? new Set([...openStatuses, 'resolved', 'wontfix'])
-    : openStatuses;
   const route = currentRoute();
   const meEmail = me?.email ?? null;
-  // Each chip count is computed by applying every OTHER active filter but
-  // not the chip's own dimension — so the number on "This page · N" shows
-  // how many comments would be visible if the user toggled that filter on.
-  // Search is always applied (it's a continuous reduction, not a tab).
+  const view = computeInboxView({
+    comments: Array.from(store.values()),
+    showResolved,
+    filters,
+    orphanIds,
+    route,
+    meEmail,
+  });
+  const {
+    all,
+    onPage,
+    visibleOrphans,
+    openCount,
+    allCount,
+    mineCount,
+    thisPageCount,
+  } = view;
   const q = filters.search.trim().toLowerCase();
-  const matchesSearch = (c: Comment): boolean => {
-    if (!q) return true;
-    const url = c.frontmatter.target.url || '';
-    const author = (c.frontmatter.authorName || c.frontmatter.author || '').toLowerCase();
-    return (
-      author.includes(q) ||
-      c.frontmatter.id.toLowerCase().includes(q) ||
-      url.toLowerCase().includes(q) ||
-      c.body.toLowerCase().includes(q)
-    );
-  };
-  const matchesMine = (c: Comment): boolean => !meEmail || c.frontmatter.author === meEmail;
-  const matchesThisPage = (c: Comment): boolean => c.frontmatter.target.url === route;
-
-  // Final visible list: status + mine + thisPage + search.
-  // Sort: orphans first (they need attention), then by created desc.
-  // Stable sort preserves the date order within each group.
-  const all = Array.from(store.values())
-    .filter((c) => visibleStatuses.has(c.frontmatter.status))
-    .filter((c) => (!filters.mine || matchesMine(c)))
-    .filter((c) => (!filters.thisPage || matchesThisPage(c)))
-    .filter(matchesSearch)
-    .sort((a, b) => (b.frontmatter.created || '').localeCompare(a.frontmatter.created || ''))
-    .sort((a, b) => {
-      // Resolved comments aren't actionable orphans even if their anchor
-      // doesn't resolve — don't yank them to the top of the All view with
-      // the "anchor lost" treatment.
-      const ao = orphanIds.has(a.frontmatter.id) && openStatuses.has(a.frontmatter.status) ? 0 : 1;
-      const bo = orphanIds.has(b.frontmatter.id) && openStatuses.has(b.frontmatter.status) ? 0 : 1;
-      return ao - bo;
-    });
-
-  // Chip counts. For status tabs we also apply mine/thisPage/search; for
-  // the mine chip we drop mine; for thisPage we drop thisPage.
-  const baseFiltered = Array.from(store.values())
-    .filter((c) => (!filters.mine || matchesMine(c)))
-    .filter((c) => (!filters.thisPage || matchesThisPage(c)))
-    .filter(matchesSearch);
-  const openCount = baseFiltered.filter((c) => openStatuses.has(c.frontmatter.status)).length;
-  const allCount = baseFiltered.length;
-  // For Mine count: respect status (current showResolved) + thisPage + search,
-  // and count what's mine.
-  const mineCount = Array.from(store.values())
-    .filter((c) => visibleStatuses.has(c.frontmatter.status))
-    .filter((c) => (!filters.thisPage || matchesThisPage(c)))
-    .filter(matchesSearch)
-    .filter(matchesMine).length;
-  const thisPageCount = Array.from(store.values())
-    .filter((c) => visibleStatuses.has(c.frontmatter.status))
-    .filter((c) => (!filters.mine || matchesMine(c)))
-    .filter(matchesSearch)
-    .filter(matchesThisPage).length;
-
-  // Unresolved comments anchored to the current page — drives the
-  // contextual "Resolve N on this page" button at the top of the list.
-  // Independent of filters because the action operates on a fixed scope.
-  const onPage = Array.from(store.values()).filter((c) =>
-    openStatuses.has(c.frontmatter.status) && c.frontmatter.target.url === route,
-  );
-  // Orphans visible in the current filter — drives the "Resolve N orphans"
-  // bulk action. Resolved/wontfix comments are never actionable orphans, so
-  // exclude them even when they sneak in via the All view.
-  const visibleOrphans = all.filter(
-    (c) => orphanIds.has(c.frontmatter.id) && openStatuses.has(c.frontmatter.status),
-  );
 
   // Hide the "Mine" chip when we don't know the user (preview mode).
   const showMineChip = !!meEmail;
@@ -645,11 +678,11 @@ function renderInboxPanel(
     <header class="margo-inbox-header">
       <div class="margo-inbox-titlebar">
         <strong>Inbox</strong>
-        <span class="margo-inbox-count">${all.length} ${all.length === 1 ? 'comment' : 'comments'}</span>
+        <span class="margo-inbox-count">${all.length} ${all.length === 1 ? "comment" : "comments"}</span>
         <button type="button" class="margo-inbox-close" aria-label="close inbox">×</button>
       </div>
       <div class="margo-inbox-search">
-        <span class="margo-inbox-search-icon" aria-hidden="true">🔍</span>
+        <span class="margo-inbox-search-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg></span>
         <input
           type="search"
           class="margo-inbox-search-input"
@@ -663,24 +696,29 @@ function renderInboxPanel(
         <button type="button" class="margo-inbox-chip margo-inbox-chip-status" data-chip="open" aria-pressed="${!showResolved}">Open · ${openCount}</button>
         <button type="button" class="margo-inbox-chip margo-inbox-chip-status" data-chip="all" aria-pressed="${showResolved}">All · ${allCount}</button>
         <span class="margo-inbox-chips-divider" aria-hidden="true"></span>
-        ${showMineChip ? `<button type="button" class="margo-inbox-chip" data-chip="mine" aria-pressed="${filters.mine}">Mine · ${mineCount}</button>` : ''}
+        ${showMineChip ? `<button type="button" class="margo-inbox-chip" data-chip="mine" aria-pressed="${filters.mine}">Mine · ${mineCount}</button>` : ""}
         <button type="button" class="margo-inbox-chip" data-chip="thisPage" aria-pressed="${filters.thisPage}">This page · ${thisPageCount}</button>
       </div>
     </header>
     <div class="margo-inbox-list" role="list"></div>
   `;
-  const list = panel.querySelector('.margo-inbox-list') as HTMLElement;
+  const list = panel.querySelector(".margo-inbox-list") as HTMLElement;
 
   // Restore the search input's value + focus + selection if it was focused
   // before this re-render. Done before re-binding so the listener sees the
   // restored value if the user keeps typing.
   if (searchFocusState) {
-    const newSearch = panel.querySelector<HTMLInputElement>('.margo-inbox-search-input');
+    const newSearch = panel.querySelector<HTMLInputElement>(
+      ".margo-inbox-search-input",
+    );
     if (newSearch) {
       newSearch.value = searchFocusState.value;
       newSearch.focus();
       try {
-        newSearch.setSelectionRange(searchFocusState.selectionStart ?? 0, searchFocusState.selectionEnd ?? 0);
+        newSearch.setSelectionRange(
+          searchFocusState.selectionStart ?? 0,
+          searchFocusState.selectionEnd ?? 0,
+        );
       } catch {
         // setSelectionRange on type=search can throw in older Safari — non-fatal.
       }
@@ -691,67 +729,81 @@ function renderInboxPanel(
   // inline), and we're not in preview/read-only. Sits at the very top
   // because orphans need attention — easy to see, easy to clear in bulk.
   if (!readOnly && visibleOrphans.length > 1) {
-    const bulk = document.createElement('button');
-    bulk.type = 'button';
-    bulk.className = 'margo-inbox-bulk margo-inbox-bulk-orphan';
-    bulk.innerHTML = `<span class="margo-bulk-warn">⚠</span> Resolve all ${visibleOrphans.length} orphaned`;
-    bulk.addEventListener('click', () => bulkResolve(bulk, visibleOrphans, sync, 'orphans'));
+    const bulk = document.createElement("button");
+    bulk.type = "button";
+    bulk.className = "margo-inbox-bulk margo-inbox-bulk-orphan";
+    bulk.innerHTML = `<span class="margo-bulk-warn">${icon("warn", 13)}</span> Resolve all ${visibleOrphans.length} orphaned`;
+    bulk.addEventListener("click", () =>
+      bulkResolve(bulk, visibleOrphans, sync, "orphans"),
+    );
     list.appendChild(bulk);
   }
   // On-page bulk: same rationale as before, but only show when there are
   // >1 unresolved comments on the current route. Orphans aren't included
   // here — they have their own bulk above.
   if (!readOnly && onPage.length > 1) {
-    const bulk = document.createElement('button');
-    bulk.type = 'button';
-    bulk.className = 'margo-inbox-bulk';
-    bulk.innerHTML = `<span class="margo-bulk-check">✓</span> Resolve ${onPage.length} on this page`;
-    bulk.addEventListener('click', () => bulkResolve(bulk, onPage, sync, 'on this page'));
+    const bulk = document.createElement("button");
+    bulk.type = "button";
+    bulk.className = "margo-inbox-bulk";
+    bulk.innerHTML = `<span class="margo-bulk-check">${icon("check", 13)}</span> Resolve ${onPage.length} on this page`;
+    bulk.addEventListener("click", () =>
+      bulkResolve(bulk, onPage, sync, "on this page"),
+    );
     list.appendChild(bulk);
   }
 
   if (all.length === 0) {
-    const empty = document.createElement('p');
-    empty.className = 'margo-inbox-empty';
+    const empty = document.createElement("p");
+    empty.className = "margo-inbox-empty";
     // Tailor the empty-state message to the active filters so the user
     // knows WHY the list is empty (and what to toggle to fix it).
     const hasNarrowingFilter = filters.mine || filters.thisPage || q.length > 0;
     if (hasNarrowingFilter) {
-      empty.textContent = 'No matches. Try clearing filters or search.';
+      empty.textContent = "No matches. Try clearing filters or search.";
     } else if (!showResolved) {
-      empty.textContent = 'No open comments. Switch to All to see resolved ones.';
+      empty.textContent =
+        "No open comments. Switch to All to see resolved ones.";
     } else {
-      empty.textContent = 'No comments yet. Pin something on the live app.';
+      empty.textContent = "No comments yet. Pin something on the live app.";
     }
     list.appendChild(empty);
   } else {
     for (const c of all) {
-      const isOrphan = orphanIds.has(c.frontmatter.id) && openStatuses.has(c.frontmatter.status);
-      list.appendChild(renderInboxItem(
-        c,
-        isOrphan,
-        // Orphans can't be navigated to (no pin to land on), so clicking
-        // opens the standard comment panel anchored to the inbox row. The
-        // panel's positioner places it to the left of the inbox when the
-        // inbox is open, giving the "popup beside the list item" feel.
-        isOrphan
-          ? (item) => openCommentPanel(root, c, sync, readOnly, me, item, { orphan: { gitState } })
-          : undefined,
-      ));
+      const isOrphan =
+        orphanIds.has(c.frontmatter.id) &&
+        OPEN_STATUSES.has(c.frontmatter.status);
+      list.appendChild(
+        renderInboxItem(
+          c,
+          isOrphan,
+          // Orphans can't be navigated to (no pin to land on), so clicking
+          // opens the standard comment panel anchored to the inbox row. The
+          // panel's positioner places it to the left of the inbox when the
+          // inbox is open, giving the "popup beside the list item" feel.
+          isOrphan
+            ? (item) =>
+                openCommentPanel(root, c, sync, readOnly, me, item, {
+                  orphan: { gitState },
+                })
+            : undefined,
+        ),
+      );
     }
   }
 
-  panel.querySelector('.margo-inbox-close')!.addEventListener('click', onClose);
+  panel.querySelector(".margo-inbox-close")!.addEventListener("click", onClose);
   // All filter chips in one row. Open/All are radio-like (clicking a
   // not-currently-selected one flips showResolved); Mine/This page are
   // independent toggles. Clicking the already-pressed status chip is a
   // no-op — they don't both deselect because status is required.
-  for (const chip of Array.from(panel.querySelectorAll<HTMLElement>('.margo-inbox-chip'))) {
-    chip.addEventListener('click', () => {
-      const dim = chip.dataset.chip as 'open' | 'all' | 'mine' | 'thisPage';
-      if (dim === 'open') {
+  for (const chip of Array.from(
+    panel.querySelectorAll<HTMLElement>(".margo-inbox-chip"),
+  )) {
+    chip.addEventListener("click", () => {
+      const dim = chip.dataset.chip as "open" | "all" | "mine" | "thisPage";
+      if (dim === "open") {
         if (showResolved) onShowResolvedChange(false);
-      } else if (dim === 'all') {
+      } else if (dim === "all") {
         if (!showResolved) {
           // "All" reads as "expand to everything" — silently leaving the
           // page-scope narrowing on contradicts that intent and made users
@@ -760,7 +812,7 @@ function renderInboxPanel(
           onShowResolvedChange(true);
           if (filters.thisPage) onFiltersChange({ thisPage: false });
         }
-      } else if (dim === 'mine') {
+      } else if (dim === "mine") {
         onFiltersChange({ mine: !filters.mine });
       } else {
         onFiltersChange({ thisPage: !filters.thisPage });
@@ -769,9 +821,11 @@ function renderInboxPanel(
   }
   // Search input — instant filter, no debounce. Capture+restore around the
   // re-render keeps the cursor put. The chip counts get recomputed too.
-  const searchInput = panel.querySelector<HTMLInputElement>('.margo-inbox-search-input');
+  const searchInput = panel.querySelector<HTMLInputElement>(
+    ".margo-inbox-search-input",
+  );
   if (searchInput) {
-    searchInput.addEventListener('input', () => {
+    searchInput.addEventListener("input", () => {
       onFiltersChange({ search: searchInput.value });
     });
   }
@@ -782,18 +836,25 @@ function renderInboxItem(
   isOrphan: boolean,
   onClick?: (item: HTMLElement) => void,
 ): HTMLElement {
-  const item = document.createElement('button');
-  item.type = 'button';
-  item.className = 'margo-inbox-item';
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "margo-inbox-item";
   item.dataset.commentId = c.frontmatter.id;
   item.dataset.status = c.frontmatter.status;
-  if (isOrphan) item.dataset.orphan = '';
-  const url = c.frontmatter.target.url || '/';
-  const preview = (c.body.split(/\n---\n/)[0] || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+  if (isOrphan) item.dataset.orphan = "";
+  const url = c.frontmatter.target.url || "/";
+  const preview = (c.body.split(/\n---\n/)[0] || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 100);
   const author = c.frontmatter.authorName || c.frontmatter.author;
-  const orphanBadge = isOrphan ? `<span class="margo-inbox-item-orphan" title="Anchor not found on this view">⚠ anchor lost</span>` : '';
+  const orphanBadge = isOrphan
+    ? `<span class="margo-inbox-item-orphan" title="Anchor not found on this view">${icon("warn", 10)}<span>anchor lost</span></span>`
+    : "";
   const avatarColor = colorForEmail(c.frontmatter.author);
-  const avatarInitial = initialOf(c.frontmatter.authorName || c.frontmatter.author);
+  const avatarInitial = initialOf(
+    c.frontmatter.authorName || c.frontmatter.author,
+  );
   item.innerHTML = `
     <span class="margo-inbox-item-avatar" style="background:${avatarColor.bg};color:${avatarColor.fg}" title="${escapeHtml(c.frontmatter.author)}">${escapeHtml(avatarInitial)}</span>
     <span class="margo-inbox-item-main">
@@ -803,7 +864,7 @@ function renderInboxItem(
         <span class="margo-inbox-item-url">${escapeHtml(url)}</span>
         <span class="margo-inbox-item-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
       </span>
-      <span class="margo-inbox-item-body">${escapeHtml(preview) || '<em>(empty)</em>'}</span>
+      <span class="margo-inbox-item-body">${escapeHtml(preview) || "<em>(empty)</em>"}</span>
       <span class="margo-inbox-item-foot">
         <span>${escapeHtml(author)}</span>
         <span>${escapeHtml(formatTime(c.frontmatter.created))}</span>
@@ -811,9 +872,11 @@ function renderInboxItem(
     </span>
   `;
   if (onClick) {
-    item.addEventListener('click', () => onClick(item));
+    item.addEventListener("click", () => onClick(item));
   } else {
-    item.addEventListener('click', () => navigateToComment(c.frontmatter.target.url, c.frontmatter.id));
+    item.addEventListener("click", () =>
+      navigateToComment(c.frontmatter.target.url, c.frontmatter.id),
+    );
   }
   return item;
 }
@@ -822,11 +885,13 @@ function navigateToComment(targetUrl: string, commentId: string): void {
   // Same-route → just scroll. The pin is already in the DOM (or will be on
   // the next render cycle if it was off-screen).
   const currentRoute = window.location.pathname + window.location.search;
-  const targetPath = targetUrl.split('#')[0];
+  const targetPath = targetUrl.split("#")[0];
   if (currentRoute === targetPath || currentRoute === targetUrl) {
     suppressNextPanelAnim = true;
     scrollToPin(commentId);
-    requestAnimationFrame(() => { suppressNextPanelAnim = false; });
+    requestAnimationFrame(() => {
+      suppressNextPanelAnim = false;
+    });
     return;
   }
   // Different route → hard navigation. There's no framework-agnostic way
@@ -834,7 +899,9 @@ function navigateToComment(targetUrl: string, commentId: string): void {
   // accessible via a React hook; React Router's API is similar). The
   // overlay's session-restored inbox + suppressed entrance animations on
   // the new page make the transition as smooth as the platform allows.
-  window.location.assign(`${targetUrl}${targetUrl.includes('#') ? '&' : '#'}margo=${commentId}`);
+  window.location.assign(
+    `${targetUrl}${targetUrl.includes("#") ? "&" : "#"}margo=${commentId}`,
+  );
 }
 
 function scrollToPin(commentId: string): void {
@@ -844,11 +911,13 @@ function scrollToPin(commentId: string): void {
   // for typical Next.js / Vite re-render after a pushState.
   let tries = 0;
   const attempt = () => {
-    const pin = document.querySelector(`[data-margo-pin="${CSS.escape(commentId)}"]`) as HTMLElement | null;
+    const pin = document.querySelector(
+      `[data-margo-pin="${CSS.escape(commentId)}"]`,
+    ) as HTMLElement | null;
     if (pin) {
-      pin.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      pin.classList.add('margo-pin-pulse');
-      setTimeout(() => pin.classList.remove('margo-pin-pulse'), 1500);
+      pin.scrollIntoView({ behavior: "smooth", block: "center" });
+      pin.classList.add("margo-pin-pulse");
+      setTimeout(() => pin.classList.remove("margo-pin-pulse"), 1500);
       // Bonus: open the comment panel so the user lands on the body, not just the dot.
       pin.click();
       return;
@@ -871,8 +940,12 @@ function handleHashDeepLink(): void {
   if (!m) return;
   const id = m[1];
   // Strip the margo segment from the hash so re-renders don't re-trigger.
-  const cleaned = hash.replace(/[#&]margo=[\w.-]+/, '').replace(/^#$/, '');
-  history.replaceState(null, '', window.location.pathname + window.location.search + cleaned);
+  const cleaned = hash.replace(/[#&]margo=[\w.-]+/, "").replace(/^#$/, "");
+  history.replaceState(
+    null,
+    "",
+    window.location.pathname + window.location.search + cleaned,
+  );
   // Defer until the snapshot lands and the resolver has a shot at the pin.
   setTimeout(() => {
     suppressNextPanelAnim = true;
@@ -880,45 +953,57 @@ function handleHashDeepLink(): void {
     // If scrollToPin finds the pin, openCommentPanel runs synchronously and
     // consumes the flag. If not, clear it on the next frame so a later
     // user-initiated pin click still gets its animation.
-    requestAnimationFrame(() => { suppressNextPanelAnim = false; });
+    requestAnimationFrame(() => {
+      suppressNextPanelAnim = false;
+    });
   }, 400);
 }
 
 function renderRemoteChangesBanner(
   root: HTMLElement,
-  state: { added: string[]; modified: string[]; deleted: string[]; total: number } | null,
+  state: {
+    added: string[];
+    modified: string[];
+    deleted: string[];
+    total: number;
+  } | null,
   onPull: () => Promise<void> | void,
 ): void {
-  const existing = root.querySelector('.margo-remote-banner');
+  const existing = root.querySelector(".margo-remote-banner");
   if (!state) {
     existing?.remove();
     return;
   }
   // Reuse the existing node when present so the banner doesn't flicker if a
   // subsequent remote-changes event arrives with a different count.
-  const banner = (existing as HTMLDivElement | null) ?? document.createElement('div');
+  const banner =
+    (existing as HTMLDivElement | null) ?? document.createElement("div");
   if (!existing) {
-    banner.className = 'margo-remote-banner';
-    banner.setAttribute('role', 'status');
+    banner.className = "margo-remote-banner";
+    banner.setAttribute("role", "status");
     root.appendChild(banner);
   }
-  const noun = state.total === 1 ? 'comment' : 'comments';
+  const noun = state.total === 1 ? "comment" : "comments";
   banner.innerHTML = `
     <span class="margo-remote-banner-text">${state.total} new ${noun} on origin</span>
     <button type="button" class="margo-remote-banner-pull">Pull</button>
     <button type="button" class="margo-remote-banner-dismiss" aria-label="dismiss">×</button>
   `;
-  const pullBtn = banner.querySelector('.margo-remote-banner-pull') as HTMLButtonElement;
-  const dismissBtn = banner.querySelector('.margo-remote-banner-dismiss') as HTMLButtonElement;
-  pullBtn.addEventListener('click', async () => {
+  const pullBtn = banner.querySelector(
+    ".margo-remote-banner-pull",
+  ) as HTMLButtonElement;
+  const dismissBtn = banner.querySelector(
+    ".margo-remote-banner-dismiss",
+  ) as HTMLButtonElement;
+  pullBtn.addEventListener("click", async () => {
     pullBtn.disabled = true;
-    pullBtn.textContent = 'Pulling…';
+    pullBtn.textContent = "Pulling…";
     await onPull();
   });
   // Dismiss is local-only: the next poller tick will re-surface the banner
   // if upstream still has changes the user hasn't pulled. That's deliberate —
   // the user can stash the nag for a minute without losing it for good.
-  dismissBtn.addEventListener('click', () => banner.remove());
+  dismissBtn.addEventListener("click", () => banner.remove());
 }
 
 function renderHidePinsToggle(
@@ -929,22 +1014,27 @@ function renderHidePinsToggle(
   // Stays visible at all times — it's the only escape hatch out of focus
   // mode once the user toggles the rest of the overlay off. The `pinned`
   // dataset bit raises its z-index/contrast above other overlay UI.
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'margo-hide-pins';
-  btn.dataset.margoToggle = 'hide-pins';
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "margo-hide-pins";
+  btn.dataset.margoToggle = "hide-pins";
   let value = initial;
   const refresh = () => {
-    btn.classList.toggle('margo-hide-pins-on', value);
-    btn.setAttribute('aria-pressed', String(value));
-    btn.setAttribute('aria-label', value ? 'show margo pins' : 'hide margo pins');
-    btn.title = value ? 'Pins hidden — click to show' : 'Hide pins to view your product without overlay';
+    btn.classList.toggle("margo-hide-pins-on", value);
+    btn.setAttribute("aria-pressed", String(value));
+    btn.setAttribute(
+      "aria-label",
+      value ? "show margo pins" : "hide margo pins",
+    );
+    btn.title = value
+      ? "Pins hidden — click to show"
+      : "Hide pins to view your product without overlay";
     btn.innerHTML = value
-      ? `<span class="margo-eye">👁</span><span>show pins</span>`
-      : `<span class="margo-eye">⊘</span><span>hide pins</span>`;
+      ? `<span class="margo-eye">${icon("eye", 13)}</span><span>show pins</span>`
+      : `<span class="margo-eye">${icon("eye-off", 13)}</span><span>hide pins</span>`;
   };
   refresh();
-  btn.addEventListener('click', () => {
+  btn.addEventListener("click", () => {
     value = !value;
     refresh();
     onChange(value);
@@ -958,7 +1048,7 @@ async function bulkResolve(
   sync: SyncClient,
   scopeLabel: string,
 ): Promise<void> {
-  const noun = comments.length === 1 ? 'comment' : 'comments';
+  const noun = comments.length === 1 ? "comment" : "comments";
   // Single dialog: one shared summary applied to every comment, with the
   // count + scope explained in the message. Leaving blank still resolves but
   // skips the decisions log.
@@ -980,13 +1070,13 @@ async function bulkResolve(
     trigger.textContent = `resolving ${++done}/${comments.length}…`;
     try {
       await sync.patchComment(c.frontmatter.id, {
-        status: 'resolved',
+        status: "resolved",
         ...(trimmedSummary ? { decisionSummary: trimmedSummary } : {}),
       });
     } catch (err) {
       await uiAlert(
         `Stopped after ${done - 1}/${comments.length}: ${(err as Error).message}`,
-        'Bulk resolve failed',
+        "Bulk resolve failed",
       );
       trigger.disabled = false;
       trigger.innerHTML = original;
@@ -1000,19 +1090,23 @@ async function promptDecisionSummary(c: Comment): Promise<string | null> {
   // Pre-fill with the first non-empty line of the comment so trivial cases
   // ("fix the typo") can be accepted in one click. Returns null on cancel,
   // empty string if user explicitly cleared and accepted (skip the log).
-  const seed = (c.body.split('\n').find((l) => l.trim()) ?? '').trim().slice(0, 120);
+  const seed = (c.body.split("\n").find((l) => l.trim()) ?? "")
+    .trim()
+    .slice(0, 120);
   const result = await uiPrompt({
-    title: 'Resolve comment',
-    message: 'One-line decision summary — what was decided and why. Leave blank to resolve without logging.',
+    title: "Resolve comment",
+    message:
+      "One-line decision summary — what was decided and why. Leave blank to resolve without logging.",
     defaultValue: seed,
-    placeholder: 'e.g. "Removed pricing nav — single-page layout doesn\'t need it"',
-    confirmLabel: 'Resolve',
+    placeholder:
+      'e.g. "Removed pricing nav — single-page layout doesn\'t need it"',
+    confirmLabel: "Resolve",
   });
   return result === null ? null : result.trim();
 }
 
 function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
 // Diagnose why a comment failed to anchor on this view.
@@ -1020,10 +1114,13 @@ function truncate(s: string, max: number): string {
 // of commit match, so we surface that first. After that, commit drift is the
 // most common cause; viewer's own dirty WT is checked last because it's the
 // most recoverable.
-function diagnoseOrphan(c: Comment, gitState: GitState | null): { label: string; hint: string | null } {
+function diagnoseOrphan(
+  c: Comment,
+  gitState: GitState | null,
+): { label: string; hint: string | null } {
   const target = c.frontmatter.target;
   if (!gitState) {
-    return { label: 'Anchor not found in this view.', hint: null };
+    return { label: "Anchor not found in this view.", hint: null };
   }
   // Commit mismatch is the dominant signal — when the pin's commit and the
   // viewer's commit differ, anything else (author-was-dirty, viewer-is-dirty)
@@ -1031,9 +1128,10 @@ function diagnoseOrphan(c: Comment, gitState: GitState | null): { label: string;
   // removed, or restructured between commits.
   if (target.commit && gitState.commit && target.commit !== gitState.commit) {
     const behind = gitState.behind ?? 0;
-    const hint = behind > 0
-      ? `You're ${behind} commit${behind === 1 ? '' : 's'} behind upstream — try \`git pull\`.`
-      : `Author was on commit \`${target.commit}\`; you're on \`${gitState.commit}\`. The element may exist on a different branch or commit.`;
+    const hint =
+      behind > 0
+        ? `You're ${behind} commit${behind === 1 ? "" : "s"} behind upstream — try \`git pull\`.`
+        : `Author was on commit \`${target.commit}\`; you're on \`${gitState.commit}\`. The element may exist on a different branch or commit.`;
     return {
       label: `Pinned at ${target.commit} — you're on ${gitState.commit}.`,
       hint,
@@ -1043,8 +1141,8 @@ function diagnoseOrphan(c: Comment, gitState: GitState | null): { label: string;
   // in HEAD — surface that before pointing fingers at the author.
   if (gitState.dirty) {
     return {
-      label: `Your working tree has ${gitState.dirtyCount} uncommitted file${gitState.dirtyCount === 1 ? '' : 's'}.`,
-      hint: 'This anchor may exist in HEAD but be hidden by your local changes. Stash or revert to re-check.',
+      label: `Your working tree has ${gitState.dirtyCount} uncommitted file${gitState.dirtyCount === 1 ? "" : "s"}.`,
+      hint: "This anchor may exist in HEAD but be hidden by your local changes. Stash or revert to re-check.",
     };
   }
   // Same commit, viewer is clean. Now author-was-dirty is a real
@@ -1056,7 +1154,7 @@ function diagnoseOrphan(c: Comment, gitState: GitState | null): { label: string;
     };
   }
   return {
-    label: 'Element no longer exists in the code at this commit.',
+    label: "Element no longer exists in the code at this commit.",
     hint: null,
   };
 }
@@ -1069,14 +1167,14 @@ function diagnoseOrphan(c: Comment, gitState: GitState | null): { label: string;
 function buildOrphanBannerHtml(c: Comment, gitState: GitState | null): string {
   const diag = diagnoseOrphan(c, gitState);
   const target = c.frontmatter.target;
-  const quoted = target.textAnchor?.phrase ?? target.text ?? '';
-  const role = target.role ?? '';
-  const wasAt = `${role ? `&lt;${escapeHtml(role)}&gt;` : ''}${role ? ' on ' : ''}${escapeHtml(target.url || '/')}`;
+  const quoted = target.textAnchor?.phrase ?? target.text ?? "";
+  const role = target.role ?? "";
+  const wasAt = `${role ? `&lt;${escapeHtml(role)}&gt;` : ""}${role ? " on " : ""}${escapeHtml(target.url || "/")}`;
   return `
     <div class="margo-panel-orphan">
       <p class="margo-panel-orphan-label">${escapeHtml(diag.label)}</p>
-      ${diag.hint ? `<p class="margo-panel-orphan-hint">${escapeHtml(diag.hint)}</p>` : ''}
-      ${quoted ? `<blockquote class="margo-panel-orphan-quote"><span class="margo-panel-orphan-quote-text">${escapeHtml(truncate(quoted, 200))}</span></blockquote>` : ''}
+      ${diag.hint ? `<p class="margo-panel-orphan-hint">${escapeHtml(diag.hint)}</p>` : ""}
+      ${quoted ? `<blockquote class="margo-panel-orphan-quote"><span class="margo-panel-orphan-quote-text">${escapeHtml(truncate(quoted, 200))}</span></blockquote>` : ""}
       <p class="margo-panel-orphan-meta">${wasAt}</p>
     </div>
   `;
@@ -1090,12 +1188,12 @@ function enablePinComposer(
   // Two launchers, mutually exclusive — clicking one cancels the other.
   // pin mode: single click / drag-select → comment on element or text
   // gap mode: two clicks → comment on the space between two elements
-  const launcher = document.createElement('button');
-  launcher.className = 'margo-launcher';
-  launcher.textContent = '+ pin';
-  const gapLauncher = document.createElement('button');
-  gapLauncher.className = 'margo-launcher margo-launcher-gap';
-  gapLauncher.textContent = '+ gap';
+  const launcher = document.createElement("button");
+  launcher.className = "margo-launcher";
+  launcher.textContent = "+ pin";
+  const gapLauncher = document.createElement("button");
+  gapLauncher.className = "margo-launcher margo-launcher-gap";
+  gapLauncher.textContent = "+ gap";
 
   let active = false;
   let gapActive = false;
@@ -1103,25 +1201,25 @@ function enablePinComposer(
 
   const setPin = (on: boolean) => {
     active = on;
-    document.body.classList.toggle('margo-targeting', on);
-    launcher.textContent = on ? 'cancel' : '+ pin';
+    document.body.classList.toggle("margo-targeting", on);
+    launcher.textContent = on ? "cancel" : "+ pin";
     if (on) setGap(false);
     if (!on) clearHoverHint();
   };
   const setGap = (on: boolean) => {
     gapActive = on;
     gapFirst = null;
-    document.body.classList.toggle('margo-gap-targeting', on);
-    document.body.classList.toggle('margo-gap-step1', on);
-    document.body.classList.toggle('margo-gap-step2', false);
-    gapLauncher.textContent = on ? 'cancel' : '+ gap';
+    document.body.classList.toggle("margo-gap-targeting", on);
+    document.body.classList.toggle("margo-gap-step1", on);
+    document.body.classList.toggle("margo-gap-step2", false);
+    gapLauncher.textContent = on ? "cancel" : "+ gap";
     clearGapHighlight();
     if (on) setPin(false);
     if (!on) clearHoverHint();
   };
 
-  launcher.addEventListener('click', () => setPin(!active));
-  gapLauncher.addEventListener('click', () => setGap(!gapActive));
+  launcher.addEventListener("click", () => setPin(!active));
+  gapLauncher.addEventListener("click", () => setGap(!gapActive));
   root.appendChild(gapLauncher);
   root.appendChild(launcher);
 
@@ -1140,40 +1238,46 @@ function enablePinComposer(
     else clearHoverHint();
   };
 
-  document.addEventListener('mousemove', (e) => {
+  document.addEventListener("mousemove", (e) => {
     if (!active && !gapActive) return;
     // Lock the hint on the chosen target while the comment composer is open —
     // otherwise the outline would follow the cursor into the modal, obscuring
     // which element the comment is actually being attached to.
-    if (root.querySelector('[data-margo-modal]')) return;
+    if (root.querySelector("[data-margo-modal]")) return;
     const leaf = leafmostNonOverlayAt(e.clientX, e.clientY);
     // If user picked a specific ancestor and the cursor is still inside
     // that walked-up element, preserve their choice. Move the cursor out
     // and the hint resets to the new leafmost.
-    if (walkedUp && currentTarget && leaf && currentTarget.contains(leaf)) return;
+    if (walkedUp && currentTarget && leaf && currentTarget.contains(leaf))
+      return;
     walkedUp = false;
     setHoverTarget(leaf);
   });
 
   // Esc cancels pin/gap mode. Skipped when a modal or panel is open so
   // those handlers (which Esc-close themselves) take precedence.
-  document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
-    if (root.querySelector('[data-margo-modal]')) return;
-    if (root.querySelector('.margo-panel')) return;
-    if (active) { e.preventDefault(); setPin(false); }
-    else if (gapActive) { e.preventDefault(); setGap(false); }
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (root.querySelector("[data-margo-modal]")) return;
+    if (root.querySelector(".margo-panel")) return;
+    if (active) {
+      e.preventDefault();
+      setPin(false);
+    } else if (gapActive) {
+      e.preventDefault();
+      setGap(false);
+    }
   });
 
   // Breadcrumb crumb click (delegated on overlay root). Each crumb maps
   // back to a stored ancestor by index — clicking it sets the target to
   // that ancestor without leaving the cursor.
-  root.addEventListener('click', (e) => {
+  root.addEventListener("click", (e) => {
     const t = e.target as HTMLElement | null;
-    if (t && t.classList.contains('margo-hover-hint-crumb')) {
+    if (t && t.classList.contains("margo-hover-hint-crumb")) {
       e.stopPropagation();
       e.preventDefault();
-      const idx = parseInt(t.dataset.margoCrumbIndex ?? '-1', 10);
+      const idx = parseInt(t.dataset.margoCrumbIndex ?? "-1", 10);
       if (idx >= 0 && idx < currentChain.length) {
         const picked = currentChain[idx];
         walkedUp = true;
@@ -1185,105 +1289,130 @@ function enablePinComposer(
 
   // Gap mode: two-click selection. First click marks element A (visual
   // outline), second click captures A + B, computes the gap, opens composer.
-  document.addEventListener('click', async (e) => {
-    if (!gapActive) return;
-    const target = e.target as Element | null;
-    if (!target || target.closest('[data-margo]')) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (!gapFirst) {
-      gapFirst = target;
-      paintGapHighlight(gapFirst, 'first');
-      document.body.classList.remove('margo-gap-step1');
-      document.body.classList.add('margo-gap-step2');
-      return;
-    }
-    if (gapFirst === target) return; // ignore double-click on same element
-    paintGapHighlight(target, 'second');
-    const captured = captureTargetFromGap(gapFirst, target, currentRoute());
-    const body = await uiPrompt({
-      title: 'Comment on this gap',
-      message: `Pinned to the space between two elements (axis: ${captured.gapAnchor!.axis}).`,
-      placeholder: 'What\'s up with this spacing? Prefix with ? for question, // for discussion.',
-      multiline: true,
-      confirmLabel: 'Post',
-    });
-    setGap(false);
-    if (!body || !body.trim()) return;
-    const trimmed = body.trim();
-    const type: CommentType = trimmed.startsWith('?') ? 'question' : trimmed.startsWith('//') ? 'discussion' : 'task';
-    const cleanedBody = trimmed.replace(/^(\?|\/\/)\s*/, '');
-    await sync.createComment({ type, body: cleanedBody, target: captured });
-    renderPins();
-  }, true);
+  document.addEventListener(
+    "click",
+    async (e) => {
+      if (!gapActive) return;
+      const target = e.target as Element | null;
+      if (!target || target.closest("[data-margo]")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (!gapFirst) {
+        gapFirst = target;
+        paintGapHighlight(gapFirst, "first");
+        document.body.classList.remove("margo-gap-step1");
+        document.body.classList.add("margo-gap-step2");
+        return;
+      }
+      if (gapFirst === target) return; // ignore double-click on same element
+      paintGapHighlight(target, "second");
+      const captured = captureTargetFromGap(gapFirst, target, currentRoute());
+      const body = await uiPrompt({
+        title: "Comment on this gap",
+        message: `Pinned to the space between two elements (axis: ${captured.gapAnchor!.axis}).`,
+        placeholder:
+          "What's up with this spacing? Prefix with ? for question, // for discussion.",
+        multiline: true,
+        confirmLabel: "Post",
+      });
+      setGap(false);
+      if (!body || !body.trim()) return;
+      const trimmed = body.trim();
+      const type: CommentType = trimmed.startsWith("?")
+        ? "question"
+        : trimmed.startsWith("//")
+          ? "discussion"
+          : "task";
+      const cleanedBody = trimmed.replace(/^(\?|\/\/)\s*/, "");
+      await sync.createComment({ type, body: cleanedBody, target: captured });
+      renderPins();
+    },
+    true,
+  );
 
   // Capture on mouseup (not click) so drag-to-select selections are still in
   // window.getSelection() — a click event would have collapsed them.
-  document.addEventListener('mouseup', async (e) => {
-    if (!active) return;
-    const target = e.target as Element | null;
-    if (!target || target.closest('[data-margo]')) return;
-    e.preventDefault();
-    e.stopPropagation();
-    // Defer one tick so the browser has finalized the selection state.
-    await Promise.resolve();
-    const sel = window.getSelection();
-    const hasSelection = !!sel && !sel.isCollapsed && sel.rangeCount > 0
-      && sel.toString().trim().length > 0;
-    const captured = hasSelection
-      ? captureTargetFromRange(sel!.getRangeAt(0), currentRoute())
-      : (walkedUp && currentTarget)
-        ? captureTarget(currentTarget, currentRoute())
-        : captureTargetFromEvent(e, currentRoute());
-    // Override coords with the actual click point (in viewport space). For
-    // element/container anchors this is what positions the pin — without
-    // this, the pin lands at the resolved rect's corner, which for a tall
-    // container is the top edge (far from where the user clicked, often
-    // visually overlapping the first child).
-    if (!hasSelection) {
-      captured.coords = { x: e.clientX, y: e.clientY };
-      captured.viewport = { w: window.innerWidth, h: window.innerHeight };
-    }
-    const body = await uiPrompt({
-      title: 'New comment',
-      message: hasSelection
-        ? `On selected text: "${truncate(sel!.toString().trim().replace(/\s+/g, ' '), 80)}"`
-        : undefined,
-      placeholder: 'What\'s up with this? Prefix with ? for question, // for discussion.',
-      multiline: true,
-      confirmLabel: 'Post',
-    });
-    sel?.removeAllRanges();
-    if (!body || !body.trim()) {
+  document.addEventListener(
+    "mouseup",
+    async (e) => {
+      if (!active) return;
+      const target = e.target as Element | null;
+      if (!target || target.closest("[data-margo]")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Defer one tick so the browser has finalized the selection state.
+      await Promise.resolve();
+      const sel = window.getSelection();
+      const hasSelection =
+        !!sel &&
+        !sel.isCollapsed &&
+        sel.rangeCount > 0 &&
+        sel.toString().trim().length > 0;
+      const captured = hasSelection
+        ? captureTargetFromRange(sel!.getRangeAt(0), currentRoute())
+        : walkedUp && currentTarget
+          ? captureTarget(currentTarget, currentRoute())
+          : captureTargetFromEvent(e, currentRoute());
+      // Override coords with the actual click point (in viewport space). For
+      // element/container anchors this is what positions the pin — without
+      // this, the pin lands at the resolved rect's corner, which for a tall
+      // container is the top edge (far from where the user clicked, often
+      // visually overlapping the first child).
+      if (!hasSelection) {
+        captured.coords = { x: e.clientX, y: e.clientY };
+        captured.viewport = { w: window.innerWidth, h: window.innerHeight };
+      }
+      const body = await uiPrompt({
+        title: "New comment",
+        message: hasSelection
+          ? `On selected text: "${truncate(sel!.toString().trim().replace(/\s+/g, " "), 80)}"`
+          : undefined,
+        placeholder:
+          "What's up with this? Prefix with ? for question, // for discussion.",
+        multiline: true,
+        confirmLabel: "Post",
+      });
+      sel?.removeAllRanges();
+      if (!body || !body.trim()) {
+        setPin(false);
+        return;
+      }
+      const trimmed = body.trim();
+      const type: CommentType = trimmed.startsWith("?")
+        ? "question"
+        : trimmed.startsWith("//")
+          ? "discussion"
+          : "task";
+      const cleanedBody = trimmed.replace(/^(\?|\/\/)\s*/, "");
+      await sync.createComment({ type, body: cleanedBody, target: captured });
       setPin(false);
-      return;
-    }
-    const trimmed = body.trim();
-    const type: CommentType = trimmed.startsWith('?') ? 'question' : trimmed.startsWith('//') ? 'discussion' : 'task';
-    const cleanedBody = trimmed.replace(/^(\?|\/\/)\s*/, '');
-    await sync.createComment({ type, body: cleanedBody, target: captured });
-    setPin(false);
-    renderPins();
-  }, true);
+      renderPins();
+    },
+    true,
+  );
   // Suppress the synthetic click that follows mouseup so the underlying app
   // doesn't react (e.g. navigating, toggling). Note: gap mode has its own
   // click handler above (capture phase) — that runs first and preventDefaults.
-  document.addEventListener('click', (e) => {
-    if (!active) return;
-    const target = e.target as Element | null;
-    if (!target || target.closest('[data-margo]')) return;
-    e.preventDefault();
-    e.stopPropagation();
-  }, true);
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (!active) return;
+      const target = e.target as Element | null;
+      if (!target || target.closest("[data-margo]")) return;
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    true,
+  );
 }
 
 // Visual feedback for gap-mode element selection. Two divs in the overlay
 // root, absolutely positioned over the chosen elements with dashed outlines.
-function paintGapHighlight(el: Element, slot: 'first' | 'second'): void {
+function paintGapHighlight(el: Element, slot: "first" | "second"): void {
   const root = document.getElementById(ROOT_ID);
   if (!root) return;
   const r = el.getBoundingClientRect();
-  const div = document.createElement('div');
+  const div = document.createElement("div");
   div.dataset.margoGapPick = slot;
   div.className = `margo-gap-pick margo-gap-pick-${slot}`;
   div.style.left = `${r.left + window.scrollX}px`;
@@ -1296,7 +1425,8 @@ function paintGapHighlight(el: Element, slot: 'first' | 'second'): void {
 function clearGapHighlight(): void {
   const root = document.getElementById(ROOT_ID);
   if (!root) return;
-  for (const el of Array.from(root.querySelectorAll('[data-margo-gap-pick]'))) el.remove();
+  for (const el of Array.from(root.querySelectorAll("[data-margo-gap-pick]")))
+    el.remove();
 }
 
 // Single-element hover hint shared by pin + gap modes. Outlines exactly one
@@ -1307,14 +1437,14 @@ function paintHoverHint(el: Element, chain: Element[], walkedUp = false): void {
   const root = document.getElementById(ROOT_ID);
   if (!root) return;
   const r = el.getBoundingClientRect();
-  let div = root.querySelector('[data-margo-hover-hint]') as HTMLElement | null;
+  let div = root.querySelector("[data-margo-hover-hint]") as HTMLElement | null;
   if (!div) {
-    div = document.createElement('div');
-    div.dataset.margoHoverHint = '';
-    div.className = 'margo-hover-hint';
+    div = document.createElement("div");
+    div.dataset.margoHoverHint = "";
+    div.className = "margo-hover-hint";
     root.appendChild(div);
   }
-  div.classList.toggle('margo-hover-hint-walked', walkedUp);
+  div.classList.toggle("margo-hover-hint-walked", walkedUp);
   div.style.left = `${r.left + window.scrollX}px`;
   div.style.top = `${r.top + window.scrollY}px`;
   div.style.width = `${r.width}px`;
@@ -1322,30 +1452,33 @@ function paintHoverHint(el: Element, chain: Element[], walkedUp = false): void {
   // Breadcrumb of ancestors (root → leaf). Click any crumb to jump-target
   // that ancestor — solves the "pure container fully filled by children"
   // case where there's no empty area to hover-target the container directly.
-  const crumbs = chain.map((a, i) => {
-    const active = a === el ? ' margo-hover-hint-crumb-active' : '';
-    return `<button class="margo-hover-hint-crumb${active}" type="button" data-margo-crumb-index="${i}">${escapeHtml(describeElement(a))}</button>`;
-  }).join('<span class="margo-hover-hint-sep">›</span>');
+  const crumbs = chain
+    .map((a, i) => {
+      const active = a === el ? " margo-hover-hint-crumb-active" : "";
+      return `<button class="margo-hover-hint-crumb${active}" type="button" data-margo-crumb-index="${i}">${escapeHtml(describeElement(a))}</button>`;
+    })
+    .join('<span class="margo-hover-hint-sep">›</span>');
   div.innerHTML = `<div class="margo-hover-hint-tag">${crumbs}</div>`;
 }
 
 function clearHoverHint(): void {
   const root = document.getElementById(ROOT_ID);
   if (!root) return;
-  for (const el of Array.from(root.querySelectorAll('[data-margo-hover-hint]'))) el.remove();
+  for (const el of Array.from(root.querySelectorAll("[data-margo-hover-hint]")))
+    el.remove();
 }
 
 function describeElement(el: Element): string {
   const tag = el.tagName.toLowerCase();
-  const id = (el as HTMLElement).id ? `#${(el as HTMLElement).id}` : '';
-  const cls = el.classList.length > 0 ? `.${el.classList[0]}` : '';
+  const id = (el as HTMLElement).id ? `#${(el as HTMLElement).id}` : "";
+  const cls = el.classList.length > 0 ? `.${el.classList[0]}` : "";
   return `${tag}${id}${cls}`;
 }
 
 function ancestorChain(el: Element, max = 5): Element[] {
   const chain: Element[] = [];
   let cur: Element | null = el;
-  while (cur && cur.tagName !== 'HTML' && cur.tagName !== 'BODY') {
+  while (cur && cur.tagName !== "HTML" && cur.tagName !== "BODY") {
     chain.push(cur);
     cur = cur.parentElement;
     if (chain.length >= max) break;
@@ -1358,11 +1491,10 @@ function ancestorChain(el: Element, max = 5): Element[] {
 function leafmostNonOverlayAt(x: number, y: number): Element | null {
   const stack = document.elementsFromPoint(x, y);
   for (const el of stack) {
-    if (!el.closest('[data-margo]')) return el;
+    if (!el.closest("[data-margo]")) return el;
   }
   return null;
 }
-
 
 interface OpenPanelOptions {
   // When present, render a small diagnostic banner near the top of the
@@ -1384,14 +1516,16 @@ function openCommentPanel(
   // Reuse the existing panel element when present so swapping between
   // comments (clicking through the inbox) doesn't destroy + rebuild the
   // DOM. Only the inner content + handlers + position get updated.
-  let panel = root.querySelector('.margo-panel') as HTMLElement | null;
+  let panel = root.querySelector(".margo-panel") as HTMLElement | null;
   const isUpdate = !!panel;
   if (!panel) {
-    panel = document.createElement('div');
+    panel = document.createElement("div");
     // Skip the entrance animation when the deep-link handler set the flag.
     // The user already feels mid-flow (just clicked from inbox + crossed
     // page); a pop-in here reads as a re-render.
-    panel.className = suppressNextPanelAnim ? 'margo-panel margo-panel-no-animate' : 'margo-panel';
+    panel.className = suppressNextPanelAnim
+      ? "margo-panel margo-panel-no-animate"
+      : "margo-panel";
     suppressNextPanelAnim = false;
     root.appendChild(panel);
   }
@@ -1403,16 +1537,18 @@ function openCommentPanel(
   // and forces the toolbar buttons off the visible row. Hovering surfaces
   // the canonical email for cases where two teammates share a first name.
   const displayName = displayNameOf(c.frontmatter);
-  const orphanBanner = options?.orphan ? buildOrphanBannerHtml(c, options.orphan.gitState) : '';
+  const orphanBanner = options?.orphan
+    ? buildOrphanBannerHtml(c, options.orphan.gitState)
+    : "";
   panel.innerHTML = `
     <header>
       <div class="margo-panel-titlebar">
         <div class="margo-panel-identity">
           <strong class="margo-panel-author" title="${escapeHtml(c.frontmatter.author)}">${escapeHtml(displayName)}</strong>
           <div class="margo-panel-meta">
-            ${c.frontmatter.role ? `<span class="margo-role">${escapeHtml(c.frontmatter.role)}</span>` : ''}
+            ${c.frontmatter.role ? `<span class="margo-role">${escapeHtml(c.frontmatter.role)}</span>` : ""}
             <span class="margo-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
-            ${options?.orphan ? '<span class="margo-status margo-status-orphan" title="Anchor not found on this view">⚠ anchor lost</span>' : ''}
+            ${options?.orphan ? `<span class="margo-status margo-status-orphan" title="Anchor not found on this view">${icon("warn", 10)}<span>anchor lost</span></span>` : ""}
           </div>
         </div>
         <div class="margo-panel-toolbar" data-margo-toolbar></div>
@@ -1421,23 +1557,23 @@ function openCommentPanel(
     </header>
     ${orphanBanner}
     ${renderThread(c)}
-    ${readOnly ? '<p class="margo-readonly">read-only — run <code>npm run dev</code> locally to reply</p>' : ''}
+    ${readOnly ? '<p class="margo-readonly">read-only — run <code>npm run dev</code> locally to reply</p>' : ""}
   `;
 
   const close = () => panel!.remove();
-  panel.querySelector('.margo-close')!.addEventListener('click', close);
+  panel.querySelector(".margo-close")!.addEventListener("click", close);
   // Esc closes the panel — wire only on first open. The handler queries
   // the live DOM, so it correctly closes whichever comment is currently in
   // the panel even after swaps.
   if (!isUpdate) {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        const live = document.querySelector('.margo-panel');
+      if (e.key === "Escape") {
+        const live = document.querySelector(".margo-panel");
         if (live) live.remove();
-        document.removeEventListener('keydown', onKey);
+        document.removeEventListener("keydown", onKey);
       }
     };
-    document.addEventListener('keydown', onKey);
+    document.addEventListener("keydown", onKey);
     // Outside-click closes the panel. Bound on the next tick so the click
     // that just opened it doesn't immediately close it. The bubble-phase
     // listener runs after element-level handlers (pin click, inbox-item
@@ -1447,27 +1583,30 @@ function openCommentPanel(
     // skipped too because the panel triggered them, not the user dismissing
     // the panel.
     const SKIP_CLOSE_SELECTOR =
-      '.margo-panel, .margo-pin, .margo-inbox-item, [data-margo-modal], .margo-modal-backdrop';
+      ".margo-panel, .margo-pin, .margo-inbox-item, [data-margo-modal], .margo-modal-backdrop";
     let onOutsideClick: ((e: MouseEvent) => void) | null = null;
     setTimeout(() => {
       onOutsideClick = (e: MouseEvent) => {
-        const live = document.querySelector('.margo-panel');
+        const live = document.querySelector(".margo-panel");
         if (!live) {
-          if (onOutsideClick) document.removeEventListener('click', onOutsideClick);
+          if (onOutsideClick)
+            document.removeEventListener("click", onOutsideClick);
           return;
         }
         const target = e.target as Element | null;
         if (!target || target.closest(SKIP_CLOSE_SELECTOR)) return;
         live.remove();
-        if (onOutsideClick) document.removeEventListener('click', onOutsideClick);
+        if (onOutsideClick)
+          document.removeEventListener("click", onOutsideClick);
       };
-      document.addEventListener('click', onOutsideClick);
+      document.addEventListener("click", onOutsideClick);
     }, 0);
   }
 
   if (!readOnly) {
-    const toolbar = panel.querySelector('[data-margo-toolbar]') as HTMLElement;
-    for (const el of buildHeaderActions(c, sync, close, me)) toolbar.appendChild(el);
+    const toolbar = panel.querySelector("[data-margo-toolbar]") as HTMLElement;
+    for (const el of buildHeaderActions(c, sync, close, me))
+      toolbar.appendChild(el);
     const replyForm = buildReplyForm(c, sync);
     if (replyForm) panel.appendChild(replyForm);
   }
@@ -1486,16 +1625,18 @@ function positionPanelNearAnchor(panel: HTMLElement, anchor: Element): void {
   // The inbox is the one fixed margo affordance that takes meaningful screen
   // real estate. When it's open we treat its left edge as the right edge of
   // the placement viewport so the comment panel never lands behind it.
-  const inbox = document.querySelector('[data-margo-inbox]') as HTMLElement | null;
+  const inbox = document.querySelector(
+    "[data-margo-inbox]",
+  ) as HTMLElement | null;
   const inboxRect = inbox ? inbox.getBoundingClientRect() : null;
   const rightLimit = inboxRect ? inboxRect.left - PAD : window.innerWidth - PAD;
   const vh = window.innerHeight;
   // Force position-fixed + measure rendered size. The panel was rendered
   // with the default bottom-right CSS, but those rules are overridden here.
-  panel.style.right = 'auto';
-  panel.style.bottom = 'auto';
-  panel.style.left = '0px';
-  panel.style.top = '0px';
+  panel.style.right = "auto";
+  panel.style.bottom = "auto";
+  panel.style.left = "0px";
+  panel.style.top = "0px";
   const pw = panel.offsetWidth;
   const ph = panel.offsetHeight;
 
@@ -1506,7 +1647,10 @@ function positionPanelNearAnchor(panel: HTMLElement, anchor: Element): void {
   } else if (a.left - PAD - pw >= PAD) {
     left = a.left - PAD - pw;
   } else {
-    left = Math.max(PAD, Math.min(rightLimit - pw, a.left - pw / 2 + a.width / 2));
+    left = Math.max(
+      PAD,
+      Math.min(rightLimit - pw, a.left - pw / 2 + a.width / 2),
+    );
   }
   // Prefer aligning panel's top with pin's top, but clamp to viewport so
   // the panel never overflows top/bottom.
@@ -1519,17 +1663,17 @@ function positionPanelNearAnchor(panel: HTMLElement, anchor: Element): void {
 }
 
 function makeIdFooter(id: string): HTMLElement {
-  const footer = document.createElement('div');
-  footer.className = 'margo-panel-footer';
+  const footer = document.createElement("div");
+  footer.className = "margo-panel-footer";
   footer.innerHTML = `
     <span class="margo-footer-label">ID</span>
     <button class="margo-id" type="button" aria-label="Copy comment ID for AI invocation">
       <code>${escapeHtml(id)}</code>
-      <span class="margo-id-icon" aria-hidden="true">⎘</span>
+      <span class="margo-id-icon" aria-hidden="true">${icon("copy", 12)}</span>
       <span class="margo-id-hint">copy for /margo</span>
     </button>
   `;
-  wireCopyId(footer.querySelector('.margo-id') as HTMLButtonElement, id);
+  wireCopyId(footer.querySelector(".margo-id") as HTMLButtonElement, id);
   return footer;
 }
 
@@ -1551,27 +1695,32 @@ function buildHeaderActions(
   close: () => void,
   me: { email: string } | null,
 ): HTMLElement[] {
-  const isResolved = c.frontmatter.status === 'resolved' || c.frontmatter.status === 'wontfix';
+  const isResolved =
+    c.frontmatter.status === "resolved" || c.frontmatter.status === "wontfix";
   const buttons: HTMLElement[] = [];
 
   if (isResolved) {
-    const reopen = document.createElement('button');
-    reopen.type = 'button';
-    reopen.dataset.margoAction = 'reopen';
-    reopen.className = 'margo-btn margo-btn-primary';
-    reopen.textContent = 'Reopen';
-    reopen.addEventListener('click', async () => {
+    const reopen = document.createElement("button");
+    reopen.type = "button";
+    reopen.dataset.margoAction = "reopen";
+    reopen.className = "margo-btn margo-btn-primary";
+    reopen.textContent = "Reopen";
+    reopen.addEventListener("click", async () => {
       reopen.disabled = true;
       try {
-        await sync.patchComment(c.frontmatter.id, { status: 'open' });
+        await sync.patchComment(c.frontmatter.id, { status: "open" });
         close();
       } catch (err) {
         reopen.disabled = false;
-        await uiAlert((err as Error).message, 'Reopen failed');
+        await uiAlert((err as Error).message, "Reopen failed");
       }
     });
     buttons.push(reopen);
-    buttons.push(makeOverflowMenu(buildOverflowItems(c, sync, close, me, /* showDismiss */ false)));
+    buttons.push(
+      makeOverflowMenu(
+        buildOverflowItems(c, sync, close, me, /* showDismiss */ false),
+      ),
+    );
     return buttons;
   }
 
@@ -1579,43 +1728,50 @@ function buildHeaderActions(
   // data-attribute rather than holding a reference, so this button works
   // even if openCommentPanel rebuilds the panel for a different comment
   // and the form is recreated.
-  const replyBtn = document.createElement('button');
-  replyBtn.type = 'button';
-  replyBtn.dataset.margoAction = 'reply-toggle';
-  replyBtn.className = 'margo-btn';
-  replyBtn.textContent = 'Reply';
-  replyBtn.addEventListener('click', () => {
-    const form = document.querySelector('[data-margo-reply-form]') as HTMLElement | null;
+  const replyBtn = document.createElement("button");
+  replyBtn.type = "button";
+  replyBtn.dataset.margoAction = "reply-toggle";
+  replyBtn.className = "margo-btn";
+  replyBtn.textContent = "Reply";
+  replyBtn.addEventListener("click", () => {
+    const form = document.querySelector(
+      "[data-margo-reply-form]",
+    ) as HTMLElement | null;
     if (!form) return;
     const willOpen = form.hidden;
     form.hidden = !willOpen;
-    if (willOpen) form.querySelector('textarea')?.focus();
+    if (willOpen) form.querySelector("textarea")?.focus();
   });
   buttons.push(replyBtn);
 
-  const resolve = document.createElement('button');
-  resolve.type = 'button';
-  resolve.dataset.margoAction = 'resolve';
-  resolve.className = 'margo-btn margo-btn-primary';
-  resolve.innerHTML = '<span class="margo-btn-icon-inline" aria-hidden="true">✓</span><span>Resolve</span>';
-  resolve.addEventListener('click', async () => {
+  const resolve = document.createElement("button");
+  resolve.type = "button";
+  resolve.dataset.margoAction = "resolve";
+  resolve.className = "margo-btn margo-btn-primary";
+  resolve.innerHTML =
+    `<span class="margo-btn-icon-inline" aria-hidden="true">${icon("check", 12)}</span><span>Resolve</span>`;
+  resolve.addEventListener("click", async () => {
     const summary = await promptDecisionSummary(c);
     if (summary === null) return;
     resolve.disabled = true;
     try {
       await sync.patchComment(c.frontmatter.id, {
-        status: 'resolved',
+        status: "resolved",
         ...(summary ? { decisionSummary: summary } : {}),
       });
       close();
     } catch (err) {
       resolve.disabled = false;
-      await uiAlert((err as Error).message, 'Resolve failed');
+      await uiAlert((err as Error).message, "Resolve failed");
     }
   });
   buttons.push(resolve);
 
-  buttons.push(makeOverflowMenu(buildOverflowItems(c, sync, close, me, /* showDismiss */ true)));
+  buttons.push(
+    makeOverflowMenu(
+      buildOverflowItems(c, sync, close, me, /* showDismiss */ true),
+    ),
+  );
   return buttons;
 }
 
@@ -1630,42 +1786,43 @@ function buildHeaderActions(
  * panel's thread; we just collapse + clear the form here.
  */
 function buildReplyForm(c: Comment, sync: SyncClient): HTMLElement | null {
-  const isResolved = c.frontmatter.status === 'resolved' || c.frontmatter.status === 'wontfix';
+  const isResolved =
+    c.frontmatter.status === "resolved" || c.frontmatter.status === "wontfix";
   if (isResolved) return null;
 
-  const form = document.createElement('form');
-  form.className = 'margo-reply-form';
-  form.dataset.margoReplyForm = '';
+  const form = document.createElement("form");
+  form.className = "margo-reply-form";
+  form.dataset.margoReplyForm = "";
   form.hidden = true;
 
-  const ta = document.createElement('textarea');
-  ta.className = 'margo-reply-input';
-  ta.placeholder = 'Reply…';
+  const ta = document.createElement("textarea");
+  ta.className = "margo-reply-input";
+  ta.placeholder = "Reply…";
   ta.rows = 2;
 
-  const submit = document.createElement('button');
-  submit.type = 'submit';
-  submit.className = 'margo-btn margo-reply-submit';
-  submit.textContent = 'Reply';
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.className = "margo-btn margo-reply-submit";
+  submit.textContent = "Reply";
   submit.disabled = true;
 
-  ta.addEventListener('input', () => {
+  ta.addEventListener("input", () => {
     submit.disabled = !ta.value.trim();
-    ta.style.height = 'auto';
+    ta.style.height = "auto";
     ta.style.height = `${ta.scrollHeight}px`;
   });
-  ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       form.requestSubmit();
     }
-    if (e.key === 'Escape') {
+    if (e.key === "Escape") {
       form.hidden = true;
-      ta.value = '';
+      ta.value = "";
       submit.disabled = true;
     }
   });
-  form.addEventListener('submit', async (e) => {
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = ta.value.trim();
     if (!body) return;
@@ -1675,15 +1832,15 @@ function buildReplyForm(c: Comment, sync: SyncClient): HTMLElement | null {
       await sync.patchComment(c.frontmatter.id, { reply: { body } });
       // Reset the form for the next reply. Don't close the panel; the
       // SSE-driven thread refresh will surface the just-posted reply.
-      ta.value = '';
-      ta.style.height = 'auto';
+      ta.value = "";
+      ta.style.height = "auto";
       ta.disabled = false;
       submit.disabled = true;
       form.hidden = true;
     } catch (err) {
       submit.disabled = false;
       ta.disabled = false;
-      await uiAlert((err as Error).message, 'Reply failed');
+      await uiAlert((err as Error).message, "Reply failed");
     }
   });
 
@@ -1708,45 +1865,51 @@ function buildOverflowItems(
       // for a feedback tool. Internally the status remains 'wontfix' — same
       // bug-tracker convention, same AI-skip rule. The UI label is the
       // human-facing knob; the persisted status is the machine-facing one.
-      label: 'Dismiss',
-      hint: 'AI skips dismissed comments. Reversible via Reopen.',
+      label: "Dismiss",
+      hint: "AI skips dismissed comments. Reversible via Reopen.",
       onSelect: async () => {
         try {
-          await sync.patchComment(c.frontmatter.id, { status: 'wontfix' });
+          await sync.patchComment(c.frontmatter.id, { status: "wontfix" });
           close();
         } catch (err) {
-          await uiAlert((err as Error).message, 'Dismiss failed');
+          await uiAlert((err as Error).message, "Dismiss failed");
         }
       },
     });
   }
 
   items.push({
-    label: 'Copy link',
-    hint: 'Direct link to this comment — paste in PR / Slack',
+    label: "Copy link",
+    hint: "Direct link to this comment — paste in PR / Slack",
     onSelect: async () => {
       // The overlay already handles `#margo=<id>` on load (scrolls to the
       // pin + opens this panel). Build that URL against the captured page
       // URL so the link works across the user's local + preview environments.
       const base = (() => {
-        try { return new URL(c.frontmatter.target.url, window.location.origin).toString(); }
-        catch { return window.location.origin + c.frontmatter.target.url; }
+        try {
+          return new URL(
+            c.frontmatter.target.url,
+            window.location.origin,
+          ).toString();
+        } catch {
+          return window.location.origin + c.frontmatter.target.url;
+        }
       })();
-      const href = `${base}${base.includes('#') ? '&' : '#'}margo=${encodeURIComponent(c.frontmatter.id)}`;
+      const href = `${base}${base.includes("#") ? "&" : "#"}margo=${encodeURIComponent(c.frontmatter.id)}`;
       try {
         await navigator.clipboard.writeText(href);
       } catch {
         // Some browsers refuse writeText without a user gesture or over http;
         // surface the link so the user can copy manually.
-        await uiAlert(href, 'Copy this link');
+        await uiAlert(href, "Copy this link");
       }
     },
   });
 
   if (canDelete(c, me)) {
     items.push({
-      label: 'Delete comment',
-      hint: 'Hard delete (removes the file). Prefer Dismiss — this is for accidental commits.',
+      label: "Delete comment",
+      hint: "Hard delete (removes the file). Prefer Dismiss — this is for accidental commits.",
       destructive: true,
       onSelect: async () => {
         if (!(await confirmDelete(c))) return;
@@ -1754,7 +1917,7 @@ function buildOverflowItems(
           await sync.deleteComment(c.frontmatter.id);
           close();
         } catch (err) {
-          await uiAlert((err as Error).message, 'Delete failed');
+          await uiAlert((err as Error).message, "Delete failed");
         }
       },
     });
@@ -1776,31 +1939,33 @@ interface OverflowItem {
  * stays inside the comment panel. Closes on outside-click and Escape.
  */
 function makeOverflowMenu(items: OverflowItem[]): HTMLElement {
-  const container = document.createElement('div');
-  container.className = 'margo-overflow';
+  const container = document.createElement("div");
+  container.className = "margo-overflow";
 
-  const trigger = document.createElement('button');
-  trigger.type = 'button';
-  trigger.className = 'margo-btn margo-btn-icon margo-overflow-trigger';
-  trigger.setAttribute('aria-label', 'More actions');
-  trigger.setAttribute('aria-haspopup', 'menu');
-  trigger.setAttribute('aria-expanded', 'false');
-  trigger.innerHTML = '<span aria-hidden="true">⋯</span>';
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "margo-btn margo-btn-icon margo-overflow-trigger";
+  trigger.setAttribute("aria-label", "More actions");
+  trigger.setAttribute("aria-haspopup", "menu");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.innerHTML = `<span aria-hidden="true">${icon("more", 14)}</span>`;
   container.appendChild(trigger);
 
-  const menu = document.createElement('div');
-  menu.className = 'margo-overflow-menu';
-  menu.setAttribute('role', 'menu');
+  const menu = document.createElement("div");
+  menu.className = "margo-overflow-menu";
+  menu.setAttribute("role", "menu");
   menu.hidden = true;
 
   for (const it of items) {
-    const mi = document.createElement('button');
-    mi.type = 'button';
-    mi.className = 'margo-overflow-item' + (it.destructive ? ' margo-overflow-item-destructive' : '');
-    mi.setAttribute('role', 'menuitem');
+    const mi = document.createElement("button");
+    mi.type = "button";
+    mi.className =
+      "margo-overflow-item" +
+      (it.destructive ? " margo-overflow-item-destructive" : "");
+    mi.setAttribute("role", "menuitem");
     mi.textContent = it.label;
     if (it.hint) mi.title = it.hint;
-    mi.addEventListener('click', async () => {
+    mi.addEventListener("click", async () => {
       close();
       await it.onSelect();
     });
@@ -1810,25 +1975,25 @@ function makeOverflowMenu(items: OverflowItem[]): HTMLElement {
 
   const open = () => {
     menu.hidden = false;
-    trigger.setAttribute('aria-expanded', 'true');
+    trigger.setAttribute("aria-expanded", "true");
     setTimeout(() => {
-      document.addEventListener('click', onDocClick, { capture: true });
-      document.addEventListener('keydown', onKey);
+      document.addEventListener("click", onDocClick, { capture: true });
+      document.addEventListener("keydown", onKey);
     }, 0);
   };
   const close = () => {
     menu.hidden = true;
-    trigger.setAttribute('aria-expanded', 'false');
-    document.removeEventListener('click', onDocClick, { capture: true });
-    document.removeEventListener('keydown', onKey);
+    trigger.setAttribute("aria-expanded", "false");
+    document.removeEventListener("click", onDocClick, { capture: true });
+    document.removeEventListener("keydown", onKey);
   };
   const onDocClick = (e: Event) => {
     if (!container.contains(e.target as Node)) close();
   };
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') close();
+    if (e.key === "Escape") close();
   };
-  trigger.addEventListener('click', (e) => {
+  trigger.addEventListener("click", (e) => {
     e.stopPropagation();
     if (menu.hidden) open();
     else close();
@@ -1844,17 +2009,21 @@ function canDelete(c: Comment, me: { email: string } | null): boolean {
 }
 
 async function confirmDelete(c: Comment): Promise<boolean> {
-  const preview = c.body.split('\n').find((l) => l.trim())?.slice(0, 80) ?? '';
+  const preview =
+    c.body
+      .split("\n")
+      .find((l) => l.trim())
+      ?.slice(0, 80) ?? "";
   return uiConfirm({
     title: `Delete comment ${c.frontmatter.id}?`,
     message: `"${preview}"\n\nThis removes the file from .margo/comments/. Git history retains it, but it won't appear in the inbox.`,
-    confirmLabel: 'Delete',
+    confirmLabel: "Delete",
     destructive: true,
   });
 }
 
 function setBusy(row: HTMLElement, busy: boolean): void {
-  for (const b of Array.from(row.querySelectorAll('button'))) {
+  for (const b of Array.from(row.querySelectorAll("button"))) {
     (b as HTMLButtonElement).disabled = busy;
   }
 }
@@ -1863,11 +2032,11 @@ function setBusy(row: HTMLElement, busy: boolean): void {
 function showTooltip(anchor: HTMLElement, text: string, id?: string): void {
   const root = document.getElementById(ROOT_ID);
   if (!root) return;
-  let tip = root.querySelector('.margo-tip') as HTMLElement | null;
+  let tip = root.querySelector(".margo-tip") as HTMLElement | null;
   if (!tip) {
-    tip = document.createElement('div');
-    tip.className = 'margo-tip';
-    tip.dataset.margoTip = '';
+    tip = document.createElement("div");
+    tip.className = "margo-tip";
+    tip.dataset.margoTip = "";
     root.appendChild(tip);
   }
   // Render the id as a separate dim/monospace span so it reads as metadata,
@@ -1879,17 +2048,17 @@ function showTooltip(anchor: HTMLElement, text: string, id?: string): void {
   }
   // Measure with display:block but invisible so the layout is correct before
   // we calculate placement.
-  tip.style.display = 'block';
-  tip.style.visibility = 'hidden';
+  tip.style.display = "block";
+  tip.style.visibility = "hidden";
   const tipRect = tip.getBoundingClientRect();
   const anchorRect = anchor.getBoundingClientRect();
   const margin = 6;
   // Try above first (above the pin), flip below if there isn't room.
   let top = anchorRect.top - tipRect.height - margin;
-  let placement: 'top' | 'bottom' = 'top';
+  let placement: "top" | "bottom" = "top";
   if (top < margin) {
     top = anchorRect.bottom + margin;
-    placement = 'bottom';
+    placement = "bottom";
   }
   let left = anchorRect.left + anchorRect.width / 2 - tipRect.width / 2;
   // Clamp horizontally to viewport with margin so it never clips off-screen.
@@ -1899,22 +2068,22 @@ function showTooltip(anchor: HTMLElement, text: string, id?: string): void {
   tip.style.left = `${left + window.scrollX}px`;
   tip.style.top = `${top + window.scrollY}px`;
   tip.dataset.placement = placement;
-  tip.style.visibility = 'visible';
+  tip.style.visibility = "visible";
 }
 
 function hideTooltip(): void {
   const root = document.getElementById(ROOT_ID);
-  const tip = root?.querySelector('.margo-tip') as HTMLElement | null;
-  if (tip) tip.style.display = 'none';
+  const tip = root?.querySelector(".margo-tip") as HTMLElement | null;
+  if (tip) tip.style.display = "none";
 }
 
 // ——— thread rendering: parse the markdown body into messages, render as chat ———
 
 interface Message {
-  kind: 'human' | 'ai';
-  author: string;            // email (humans) or model name (ai)
-  authorName?: string;       // friendly display name when known (frontmatter.authorName)
-  role?: string;             // designer/dev/pm — only on humans
+  kind: "human" | "ai";
+  author: string; // email (humans) or model name (ai)
+  authorName?: string; // friendly display name when known (frontmatter.authorName)
+  role?: string; // designer/dev/pm — only on humans
   timestamp?: string;
   body: string;
 }
@@ -1924,29 +2093,44 @@ function parseThread(c: Comment): Message[] {
   // First chunk before any `---` separator is the original comment.
   const parts = c.body.split(/\n---\n/);
   out.push({
-    kind: 'human',
+    kind: "human",
     author: c.frontmatter.author,
     authorName: c.frontmatter.authorName,
     role: c.frontmatter.role,
     timestamp: c.frontmatter.created,
-    body: (parts[0] ?? '').trim(),
+    body: (parts[0] ?? "").trim(),
   });
   for (const part of parts.slice(1)) {
     const trimmed = part.trim();
     // `**ai-reply** — <model> — <ts>\n\n<body>`
-    const ai = trimmed.match(/^\*\*ai-reply\*\*\s*—\s*([^—\n]+?)\s*—\s*([^\n]+)\n+([\s\S]*)$/);
+    const ai = trimmed.match(
+      /^\*\*ai-reply\*\*\s*—\s*([^—\n]+?)\s*—\s*([^\n]+)\n+([\s\S]*)$/,
+    );
     if (ai) {
-      out.push({ kind: 'ai', author: ai[1].trim(), timestamp: ai[2].trim(), body: ai[3].trim() });
+      out.push({
+        kind: "ai",
+        author: ai[1].trim(),
+        timestamp: ai[2].trim(),
+        body: ai[3].trim(),
+      });
       continue;
     }
     // `**reply** — <author> (<role>) — <ts>\n\n<body>`
-    const human = trimmed.match(/^\*\*reply\*\*\s*—\s*(\S+)(?:\s*\(([^)]+)\))?\s*—\s*([^\n]+)\n+([\s\S]*)$/);
+    const human = trimmed.match(
+      /^\*\*reply\*\*\s*—\s*(\S+)(?:\s*\(([^)]+)\))?\s*—\s*([^\n]+)\n+([\s\S]*)$/,
+    );
     if (human) {
-      out.push({ kind: 'human', author: human[1].trim(), role: human[2]?.trim(), timestamp: human[3].trim(), body: human[4].trim() });
+      out.push({
+        kind: "human",
+        author: human[1].trim(),
+        role: human[2]?.trim(),
+        timestamp: human[3].trim(),
+        body: human[4].trim(),
+      });
       continue;
     }
     // Fallback — preserve unparseable block as a generic note so nothing is lost.
-    out.push({ kind: 'human', author: 'unknown', body: trimmed });
+    out.push({ kind: "human", author: "unknown", body: trimmed });
   }
   return out;
 }
@@ -1954,8 +2138,8 @@ function parseThread(c: Comment): Message[] {
 function renderThread(c: Comment): string {
   const messages = parseThread(c);
   const items = messages
-    .map((m) => (m.kind === 'ai' ? renderAiMessage(m) : renderHumanMessage(m)))
-    .join('');
+    .map((m) => (m.kind === "ai" ? renderAiMessage(m) : renderHumanMessage(m)))
+    .join("");
   return `<div class="margo-thread">${items}</div>`;
 }
 
@@ -1963,15 +2147,15 @@ function renderHumanMessage(m: Message): string {
   const display = displayNameOf(m);
   const initial = initialOf(display);
   const color = colorForEmail(m.author);
-  const time = m.timestamp ? formatTime(m.timestamp) : '';
+  const time = m.timestamp ? formatTime(m.timestamp) : "";
   return `
     <div class="margo-msg margo-msg-human">
       <div class="margo-avatar margo-avatar-human" style="background:${color.bg};color:${color.fg}" title="${escapeHtml(m.author)}">${escapeHtml(initial)}</div>
       <div class="margo-msg-stack">
         <div class="margo-msg-meta">
           <span class="margo-msg-author" title="${escapeHtml(m.author)}">${escapeHtml(display)}</span>
-          ${m.role ? `<span class="margo-msg-role">${escapeHtml(m.role)}</span>` : ''}
-          ${time ? `<span class="margo-msg-time">${escapeHtml(time)}</span>` : ''}
+          ${m.role ? `<span class="margo-msg-role">${escapeHtml(m.role)}</span>` : ""}
+          ${time ? `<span class="margo-msg-time">${escapeHtml(time)}</span>` : ""}
         </div>
         <div class="margo-bubble">${escapeHtml(m.body)}</div>
       </div>
@@ -1989,23 +2173,23 @@ function renderHumanMessage(m: Message): string {
 // Song" reads as a name; "xhsong@fortinet.com" reads as metadata.
 function displayNameOf(m: { author: string; authorName?: string }): string {
   if (m.authorName && m.authorName.trim()) return m.authorName.trim();
-  const local = (m.author.split('@')[0] ?? m.author).trim();
+  const local = (m.author.split("@")[0] ?? m.author).trim();
   if (!local) return m.author;
   if (/[._-]/.test(local)) {
     return local
       .split(/[._-]+/)
       .filter(Boolean)
       .map((w) => w[0]!.toUpperCase() + w.slice(1).toLowerCase())
-      .join(' ');
+      .join(" ");
   }
   return local;
 }
 
 function renderAiMessage(m: Message): string {
-  const time = m.timestamp ? formatTime(m.timestamp) : '';
+  const time = m.timestamp ? formatTime(m.timestamp) : "";
   return `
     <div class="margo-msg margo-msg-ai">
-      <div class="margo-avatar margo-avatar-ai" aria-label="AI">✦</div>
+      <div class="margo-avatar margo-avatar-ai" aria-label="AI">${icon("sparkle", 14)}</div>
       <div class="margo-msg-stack">
         <div class="margo-msg-meta">
           <span class="margo-msg-author">AI</span>
@@ -2019,14 +2203,15 @@ function renderAiMessage(m: Message): string {
 }
 
 function initialOf(displayOrEmail: string): string {
-  const s = (displayOrEmail.split('@')[0] ?? displayOrEmail).trim();
-  return (s[0] ?? '?').toUpperCase();
+  const s = (displayOrEmail.split("@")[0] ?? displayOrEmail).trim();
+  return (s[0] ?? "?").toUpperCase();
 }
 
 function colorForEmail(email: string): { bg: string; fg: string } {
   // Stable per-email hue so the same person gets the same avatar color across renders.
   let h = 0;
-  for (let i = 0; i < email.length; i++) h = ((h << 5) - h + email.charCodeAt(i)) | 0;
+  for (let i = 0; i < email.length; i++)
+    h = ((h << 5) - h + email.charCodeAt(i)) | 0;
   const hue = Math.abs(h) % 360;
   return { bg: `hsl(${hue} 65% 90%)`, fg: `hsl(${hue} 60% 32%)` };
 }
@@ -2035,33 +2220,35 @@ function formatTime(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   const diff = Date.now() - d.getTime();
-  const min = 60_000, hr = 60 * min, day = 24 * hr;
-  if (diff < min) return 'just now';
+  const min = 60_000,
+    hr = 60 * min,
+    day = 24 * hr;
+  if (diff < min) return "just now";
   if (diff < hr) return `${Math.floor(diff / min)}m ago`;
   if (diff < day) return `${Math.floor(diff / hr)}h ago`;
   if (diff < 7 * day) return `${Math.floor(diff / day)}d ago`;
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function wireCopyId(btn: HTMLButtonElement, id: string): void {
   // Copy ID to clipboard, briefly swap the icon to a check + show "copied"
   // text so the user gets confirmation without an alert.
   const original = btn.innerHTML;
-  btn.addEventListener('click', async (e) => {
+  btn.addEventListener("click", async (e) => {
     e.stopPropagation();
     try {
       await navigator.clipboard.writeText(id);
-      btn.innerHTML = `<code>${escapeHtml(id)}</code><span class="margo-id-icon" aria-hidden="true">✓</span>`;
-      btn.classList.add('margo-id-copied');
+      btn.innerHTML = `<code>${escapeHtml(id)}</code><span class="margo-id-icon" aria-hidden="true">${icon("check", 12)}</span>`;
+      btn.classList.add("margo-id-copied");
       setTimeout(() => {
         btn.innerHTML = original;
-        btn.classList.remove('margo-id-copied');
+        btn.classList.remove("margo-id-copied");
       }, 1200);
     } catch {
       // Clipboard API can be blocked (insecure context, permissions); fall
       // back to selecting the ID text so the user can ⌘C manually.
       const range = document.createRange();
-      range.selectNode(btn.querySelector('code')!);
+      range.selectNode(btn.querySelector("code")!);
       const sel = window.getSelection();
       sel?.removeAllRanges();
       sel?.addRange(range);
@@ -2069,13 +2256,39 @@ function wireCopyId(btn: HTMLButtonElement, id: string): void {
   });
 }
 
+// Inline icon set — feather/lucide-inspired line icons used across the
+// overlay UI in place of emoji. `currentColor` lets the icon pick up the
+// surrounding text color, so theming + button-state styles just work. Sized
+// in 24×24 viewBox so consumers can request any pixel size without re-
+// scaling the geometry.
+const ICON_PATHS: Record<string, string> = {
+  pin: `<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>`,
+  inbox: `<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/>`,
+  eye: `<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>`,
+  'eye-off': `<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/>`,
+  warn: `<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>`,
+  check: `<polyline points="20 6 9 17 4 12"/>`,
+  copy: `<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>`,
+  more: `<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>`,
+  sparkle: `<path d="m12 3 1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"/>`,
+};
+
+function icon(name: keyof typeof ICON_PATHS, size: number = 14): string {
+  const paths = ICON_PATHS[name];
+  return `<svg class="margo-icon" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+}
+
 function escapeHtml(s: string | null | undefined): string {
   // Defensive against optional fields slipping through (e.g. role can be
   // undefined for users not in the roster). Without this, a single
   // undefined value crashes the whole HTML render.
-  if (s == null) return '';
-  return s.replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!,
+  if (s == null) return "";
+  return s.replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ]!,
   );
 }
 
@@ -2089,7 +2302,7 @@ function escapeHtml(s: string | null | undefined): string {
 interface DialogOpts {
   title?: string;
   message?: string;
-  defaultValue?: string;       // when defined, an input is rendered
+  defaultValue?: string; // when defined, an input is rendered
   multiline?: boolean;
   placeholder?: string;
   confirmLabel?: string;
@@ -2101,49 +2314,52 @@ interface DialogOpts {
 function openDialog(opts: DialogOpts): Promise<string | null> {
   return new Promise<string | null>((resolve) => {
     const root = document.getElementById(ROOT_ID);
-    if (!root) { resolve(null); return; }
+    if (!root) {
+      resolve(null);
+      return;
+    }
 
     // Only one modal at a time — drop any previous one.
-    root.querySelector('[data-margo-modal]')?.remove();
+    root.querySelector("[data-margo-modal]")?.remove();
 
-    const backdrop = document.createElement('div');
-    backdrop.className = 'margo-modal-backdrop';
-    backdrop.dataset.margoModal = '';
+    const backdrop = document.createElement("div");
+    backdrop.className = "margo-modal-backdrop";
+    backdrop.dataset.margoModal = "";
 
-    const modal = document.createElement('div');
-    modal.className = 'margo-modal';
-    modal.setAttribute('role', 'dialog');
-    modal.setAttribute('aria-modal', 'true');
+    const modal = document.createElement("div");
+    modal.className = "margo-modal";
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
 
-    const header = document.createElement('header');
+    const header = document.createElement("header");
     if (opts.title) {
-      const h = document.createElement('h3');
+      const h = document.createElement("h3");
       h.textContent = opts.title;
       header.appendChild(h);
     }
-    const close = document.createElement('button');
-    close.className = 'margo-close';
-    close.type = 'button';
-    close.setAttribute('aria-label', 'close');
-    close.textContent = '×';
-    close.addEventListener('click', () => done(null));
+    const close = document.createElement("button");
+    close.className = "margo-close";
+    close.type = "button";
+    close.setAttribute("aria-label", "close");
+    close.textContent = "×";
+    close.addEventListener("click", () => done(null));
     header.appendChild(close);
     modal.appendChild(header);
 
-    const body = document.createElement('div');
-    body.className = 'margo-modal-body';
+    const body = document.createElement("div");
+    body.className = "margo-modal-body";
     if (opts.message) {
-      const p = document.createElement('p');
-      p.className = 'margo-modal-message';
+      const p = document.createElement("p");
+      p.className = "margo-modal-message";
       p.textContent = opts.message;
       body.appendChild(p);
     }
     let input: HTMLInputElement | HTMLTextAreaElement | null = null;
     if (opts.defaultValue !== undefined) {
       input = opts.multiline
-        ? document.createElement('textarea')
-        : document.createElement('input');
-      input.className = 'margo-modal-input';
+        ? document.createElement("textarea")
+        : document.createElement("input");
+      input.className = "margo-modal-input";
       input.value = opts.defaultValue;
       if (opts.placeholder) input.placeholder = opts.placeholder;
       if (opts.multiline) (input as HTMLTextAreaElement).rows = 4;
@@ -2151,44 +2367,44 @@ function openDialog(opts: DialogOpts): Promise<string | null> {
     }
     modal.appendChild(body);
 
-    const footer = document.createElement('footer');
+    const footer = document.createElement("footer");
     if (!opts.hideCancel) {
-      const cancel = document.createElement('button');
-      cancel.className = 'margo-modal-cancel';
-      cancel.type = 'button';
-      cancel.textContent = opts.cancelLabel ?? 'Cancel';
-      cancel.addEventListener('click', () => done(null));
+      const cancel = document.createElement("button");
+      cancel.className = "margo-modal-cancel";
+      cancel.type = "button";
+      cancel.textContent = opts.cancelLabel ?? "Cancel";
+      cancel.addEventListener("click", () => done(null));
       footer.appendChild(cancel);
     }
-    const confirm = document.createElement('button');
-    confirm.className = 'margo-modal-confirm';
-    if (opts.destructive) confirm.classList.add('margo-modal-destructive');
-    confirm.type = 'button';
-    confirm.textContent = opts.confirmLabel ?? 'OK';
-    confirm.addEventListener('click', () => done(input ? input.value : ''));
+    const confirm = document.createElement("button");
+    confirm.className = "margo-modal-confirm";
+    if (opts.destructive) confirm.classList.add("margo-modal-destructive");
+    confirm.type = "button";
+    confirm.textContent = opts.confirmLabel ?? "OK";
+    confirm.addEventListener("click", () => done(input ? input.value : ""));
     footer.appendChild(confirm);
     modal.appendChild(footer);
 
     backdrop.appendChild(modal);
-    backdrop.addEventListener('mousedown', (e) => {
+    backdrop.addEventListener("mousedown", (e) => {
       if (e.target === backdrop) done(null);
     });
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === "Escape") {
         e.stopPropagation();
         done(null);
-      } else if (e.key === 'Enter' && !e.shiftKey) {
+      } else if (e.key === "Enter" && !e.shiftKey) {
         // Multiline accepts Enter for newline; require Cmd/Ctrl+Enter to submit.
         if (opts.multiline && !(e.metaKey || e.ctrlKey)) return;
         e.preventDefault();
         confirm.click();
       }
     };
-    document.addEventListener('keydown', onKey, true);
+    document.addEventListener("keydown", onKey, true);
 
     function done(result: string | null): void {
-      document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener("keydown", onKey, true);
       backdrop.remove();
       resolve(result);
     }
@@ -2197,7 +2413,7 @@ function openDialog(opts: DialogOpts): Promise<string | null> {
     requestAnimationFrame(() => {
       if (input) {
         input.focus();
-        if ('select' in input) input.select();
+        if ("select" in input) input.select();
       } else {
         confirm.focus();
       }
@@ -2216,10 +2432,10 @@ async function uiPrompt(opts: {
   return openDialog({
     title: opts.title,
     message: opts.message,
-    defaultValue: opts.defaultValue ?? '',
+    defaultValue: opts.defaultValue ?? "",
     placeholder: opts.placeholder,
     multiline: opts.multiline,
-    confirmLabel: opts.confirmLabel ?? 'Save',
+    confirmLabel: opts.confirmLabel ?? "Save",
   });
 }
 
@@ -2233,18 +2449,18 @@ async function uiConfirm(opts: {
   const r = await openDialog({
     title: opts.title,
     message: opts.message,
-    confirmLabel: opts.confirmLabel ?? 'Confirm',
-    cancelLabel: opts.cancelLabel ?? 'Cancel',
+    confirmLabel: opts.confirmLabel ?? "Confirm",
+    cancelLabel: opts.cancelLabel ?? "Cancel",
     destructive: opts.destructive,
   });
   return r !== null;
 }
 
-async function uiAlert(message: string, title = 'Heads up'): Promise<void> {
+async function uiAlert(message: string, title = "Heads up"): Promise<void> {
   await openDialog({
     title,
     message,
-    confirmLabel: 'OK',
+    confirmLabel: "OK",
     hideCancel: true,
   });
 }
@@ -2262,101 +2478,109 @@ async function uiAlert(message: string, title = 'Heads up'): Promise<void> {
  */
 function openIdentitySetup(
   sync: SyncClient,
-  seed: { name: string; email: string } = { name: '', email: '' },
+  seed: { name: string; email: string } = { name: "", email: "" },
 ): Promise<{ email: string; name: string } | null> {
   return new Promise((resolve) => {
     const root = document.getElementById(ROOT_ID);
-    if (!root) { resolve(null); return; }
-    root.querySelector('[data-margo-modal]')?.remove();
+    if (!root) {
+      resolve(null);
+      return;
+    }
+    root.querySelector("[data-margo-modal]")?.remove();
 
-    const backdrop = document.createElement('div');
-    backdrop.className = 'margo-modal-backdrop';
-    backdrop.dataset.margoModal = '';
+    const backdrop = document.createElement("div");
+    backdrop.className = "margo-modal-backdrop";
+    backdrop.dataset.margoModal = "";
 
-    const modal = document.createElement('div');
-    modal.className = 'margo-modal';
-    modal.setAttribute('role', 'dialog');
-    modal.setAttribute('aria-modal', 'true');
+    const modal = document.createElement("div");
+    modal.className = "margo-modal";
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
 
-    const header = document.createElement('header');
-    const h = document.createElement('h3');
-    h.textContent = 'Set up your margo identity';
+    const header = document.createElement("header");
+    const h = document.createElement("h3");
+    h.textContent = "Set up your margo identity";
     header.appendChild(h);
-    const close = document.createElement('button');
-    close.className = 'margo-close';
-    close.type = 'button';
-    close.setAttribute('aria-label', 'close');
-    close.textContent = '×';
-    close.addEventListener('click', () => done(null));
+    const close = document.createElement("button");
+    close.className = "margo-close";
+    close.type = "button";
+    close.setAttribute("aria-label", "close");
+    close.textContent = "×";
+    close.addEventListener("click", () => done(null));
     header.appendChild(close);
     modal.appendChild(header);
 
-    const body = document.createElement('div');
-    body.className = 'margo-modal-body';
-    const p = document.createElement('p');
-    p.className = 'margo-modal-message';
+    const body = document.createElement("div");
+    body.className = "margo-modal-body";
+    const p = document.createElement("p");
+    p.className = "margo-modal-message";
     // Tailor the message to which half is missing so a user who only needs
     // to fill in a name doesn't see "user.email isn't set" and get confused.
     const missingName = !seed.name;
     const missingEmail = !seed.email;
     p.textContent =
       missingName && missingEmail
-        ? "git config user.name / user.email aren't set on this machine. "
-          + 'margo uses them to attribute every comment. Save once and you\'re done — '
-          + 'they\'ll be written to your global git config.'
+        ? "git config user.name / user.email aren't set on this machine. " +
+          "margo uses them to attribute every comment. Save once and you're done — " +
+          "they'll be written to your global git config."
         : missingName
-        ? 'git config user.name isn\'t set. margo attributes comments by name + email, so a name is required. It\'ll be written to your global git config.'
-        : 'git config user.email isn\'t set. margo attributes comments by name + email, so an email is required. It\'ll be written to your global git config.';
+          ? "git config user.name isn't set. margo attributes comments by name + email, so a name is required. It'll be written to your global git config."
+          : "git config user.email isn't set. margo attributes comments by name + email, so an email is required. It'll be written to your global git config.";
     body.appendChild(p);
 
-    const nameInput = document.createElement('input');
-    nameInput.className = 'margo-modal-input';
-    nameInput.type = 'text';
-    nameInput.placeholder = 'Your name';
-    nameInput.autocomplete = 'name';
+    const nameInput = document.createElement("input");
+    nameInput.className = "margo-modal-input";
+    nameInput.type = "text";
+    nameInput.placeholder = "Your name";
+    nameInput.autocomplete = "name";
     nameInput.value = seed.name;
     body.appendChild(nameInput);
 
-    const emailInput = document.createElement('input');
-    emailInput.className = 'margo-modal-input';
-    emailInput.type = 'email';
-    emailInput.placeholder = 'you@example.com';
-    emailInput.autocomplete = 'email';
+    const emailInput = document.createElement("input");
+    emailInput.className = "margo-modal-input";
+    emailInput.type = "email";
+    emailInput.placeholder = "you@example.com";
+    emailInput.autocomplete = "email";
     emailInput.value = seed.email;
     body.appendChild(emailInput);
 
-    const errorEl = document.createElement('p');
-    errorEl.className = 'margo-modal-error';
+    const errorEl = document.createElement("p");
+    errorEl.className = "margo-modal-error";
     body.appendChild(errorEl);
 
     modal.appendChild(body);
 
-    const footer = document.createElement('footer');
-    const cancel = document.createElement('button');
-    cancel.className = 'margo-modal-cancel';
-    cancel.type = 'button';
-    cancel.textContent = 'Later';
-    cancel.addEventListener('click', () => done(null));
+    const footer = document.createElement("footer");
+    const cancel = document.createElement("button");
+    cancel.className = "margo-modal-cancel";
+    cancel.type = "button";
+    cancel.textContent = "Later";
+    cancel.addEventListener("click", () => done(null));
     footer.appendChild(cancel);
 
-    const confirm = document.createElement('button');
-    confirm.className = 'margo-modal-confirm';
-    confirm.type = 'button';
-    confirm.textContent = 'Save';
-    confirm.addEventListener('click', () => void submit());
+    const confirm = document.createElement("button");
+    confirm.className = "margo-modal-confirm";
+    confirm.type = "button";
+    confirm.textContent = "Save";
+    confirm.addEventListener("click", () => void submit());
     footer.appendChild(confirm);
     modal.appendChild(footer);
 
     backdrop.appendChild(modal);
-    backdrop.addEventListener('mousedown', (e) => {
+    backdrop.addEventListener("mousedown", (e) => {
       if (e.target === backdrop) done(null);
     });
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.stopPropagation(); done(null); }
-      else if (e.key === 'Enter') { e.preventDefault(); void submit(); }
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        done(null);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        void submit();
+      }
     };
-    document.addEventListener('keydown', onKey, true);
+    document.addEventListener("keydown", onKey, true);
 
     root.appendChild(backdrop);
     // Land focus on the field that needs the input, so the user can start
@@ -2366,27 +2590,31 @@ function openIdentitySetup(
     async function submit(): Promise<void> {
       const name = nameInput.value.trim();
       const email = emailInput.value.trim();
-      if (!name) return showError('Name is required.');
-      if (!email) return showError('Email is required.');
-      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return showError('That email doesn\'t look right.');
+      if (!name) return showError("Name is required.");
+      if (!email) return showError("Email is required.");
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))
+        return showError("That email doesn't look right.");
       hideError();
       confirm.disabled = true;
-      confirm.textContent = 'Saving…';
+      confirm.textContent = "Saving…";
       const result = await sync.setMe(name, email);
       confirm.disabled = false;
-      confirm.textContent = 'Save';
-      if ('error' in result) { showError(result.error); return; }
+      confirm.textContent = "Save";
+      if ("error" in result) {
+        showError(result.error);
+        return;
+      }
       done(result);
     }
     function showError(msg: string): void {
       errorEl.textContent = msg;
-      errorEl.classList.add('margo-modal-error-shown');
+      errorEl.classList.add("margo-modal-error-shown");
     }
     function hideError(): void {
-      errorEl.classList.remove('margo-modal-error-shown');
+      errorEl.classList.remove("margo-modal-error-shown");
     }
     function done(result: { email: string; name: string } | null): void {
-      document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener("keydown", onKey, true);
       backdrop.remove();
       resolve(result);
     }
@@ -2395,7 +2623,7 @@ function openIdentitySetup(
 
 function injectStyles(): void {
   if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement('style');
+  const style = document.createElement("style");
   style.id = STYLE_ID;
   // Tokens mirror shadcn/ui defaults (zinc neutral palette, --radius: 0.5rem).
   // Scoped via #margo-overlay-root descendant selectors so we don't touch host styles.
@@ -2674,8 +2902,15 @@ function injectStyles(): void {
     }
     .margo-avatar-ai {
       background: linear-gradient(135deg, hsl(280 70% 60%), hsl(217 91% 60%));
-      color: white; font-size: 14px;
+      color: white;
+      display: inline-flex; align-items: center; justify-content: center;
     }
+    .margo-avatar-ai .margo-icon { stroke: white; fill: white; opacity: .95; }
+    /* Generic icon — keeps inline SVGs vertically centred next to text.
+       Containers that should center the icon vertically with surrounding
+       text wrap it in an inline-flex parent (see .margo-eye, .margo-id-icon
+       etc.); .margo-icon itself just disables the default baseline align. */
+    .margo-icon { display: block; }
     .margo-msg-meta {
       display: flex; gap: 6px; align-items: baseline;
       font-size: 10px; line-height: 1.2;
@@ -2737,8 +2972,7 @@ function injectStyles(): void {
     }
     .margo-btn-icon-inline {
       display: inline-flex; align-items: center; justify-content: center;
-      width: 13px; height: 13px; line-height: 1;
-      font-size: 11px;
+      line-height: 1;
     }
     /* ——— ⋯ overflow menu ——— */
     .margo-overflow { position: relative; margin-left: auto; }
@@ -2888,7 +3122,10 @@ function injectStyles(): void {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 11px; background: transparent; padding: 0; color: inherit;
     }
-    .margo-id-icon { font-size: 11px; opacity: .55; }
+    .margo-id-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      opacity: .55;
+    }
     .margo-id:hover .margo-id-icon { opacity: 1; }
     .margo-id-hint {
       font-size: 10px; color: var(--margo-muted-fg);
@@ -2984,6 +3221,7 @@ function injectStyles(): void {
       word-break: break-all;
     }
     .margo-status.margo-status-orphan {
+      display: inline-flex; align-items: center; gap: 3px;
       background: hsl(28 80% 92%); color: hsl(28 80% 30%);
       font-weight: 500;
     }
@@ -2999,7 +3237,10 @@ function injectStyles(): void {
     }
     .margo-inbox-bulk:hover { background: hsl(140 30% 92%); border-color: hsl(160 84% 60%); }
     .margo-inbox-bulk:disabled { opacity: .6; cursor: not-allowed; }
-    .margo-bulk-check { color: hsl(160 84% 39%); font-weight: 700; }
+    .margo-bulk-check, .margo-bulk-warn {
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .margo-bulk-check { color: hsl(160 84% 39%); }
     /* Orphan variant — warning tones so it reads as "needs attention" */
     .margo-inbox-bulk.margo-inbox-bulk-orphan {
       background: hsl(38 92% 96%); border-color: hsl(38 92% 75%); color: hsl(28 80% 28%);
@@ -3007,7 +3248,7 @@ function injectStyles(): void {
     .margo-inbox-bulk.margo-inbox-bulk-orphan:hover {
       background: hsl(38 92% 92%); border-color: hsl(38 92% 65%);
     }
-    .margo-bulk-warn { font-weight: 700; }
+    .margo-bulk-warn { color: hsl(28 80% 38%); }
     /* ——— inbox toggle (sits above hide-pins) ——— */
     .margo-inbox-toggle {
       position: fixed; bottom: 104px; right: 16px; z-index: 1000002;
@@ -3036,7 +3277,7 @@ function injectStyles(): void {
     }
     .margo-hide-pins:hover { background: var(--margo-muted); color: var(--margo-fg); }
     .margo-hide-pins:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
-    .margo-hide-pins .margo-eye { font-size: 14px; line-height: 1; }
+    .margo-eye { display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
     .margo-hide-pins-on { color: var(--margo-fg); border-color: var(--margo-ring); background: var(--margo-muted); }
     /* When focus mode is on, hide every other margo affordance — pins,
        highlights, the orphan tray, the bulk-resolve bar, the launcher,
@@ -3060,7 +3301,7 @@ function injectStyles(): void {
     }
     .margo-fab-main:hover { box-shadow: 0 6px 18px rgb(0 0 0 / .22); }
     .margo-fab-main:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 3px; }
-    .margo-fab-main-pin { font-size: 14px; line-height: 1; }
+    .margo-fab-main-pin { display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
     .margo-fab-main-label { line-height: 1; }
     .margo-fab-main-chev {
       font-size: 10px; opacity: .8; line-height: 1;
@@ -3137,15 +3378,17 @@ function injectStyles(): void {
       margin: 0 0 6px;
     }
     .margo-inbox-search-icon {
-      position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
-      font-size: 12px; opacity: .6; pointer-events: none;
+      position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
+      display: inline-flex; align-items: center; justify-content: center;
+      color: var(--margo-muted-fg);
+      pointer-events: none;
     }
     .margo-inbox-search-input {
-      width: 100%; height: 28px;
-      padding: 0 26px 0 28px;
+      width: 100%; height: 26px;
+      padding: 0 10px 0 26px;
       background: var(--margo-bg); color: var(--margo-fg);
       border: 1px solid var(--margo-border); border-radius: 6px;
-      font: inherit; font-size: 12px;
+      font: inherit; font-size: 11.5px;
       box-sizing: border-box;
     }
     .margo-inbox-search-input::placeholder { color: var(--margo-muted-fg); }
@@ -3154,12 +3397,19 @@ function injectStyles(): void {
       border-color: transparent;
     }
     /* Native clear button — works in Chromium/Safari. Firefox falls back to
-       the user clearing the field manually, which is fine. */
+       the user clearing the field manually, which is fine.
+       Use mask-image rather than background-image so the cross color
+       follows --margo-muted-fg (matches the leading magnifier icon). */
     .margo-inbox-search-input::-webkit-search-cancel-button {
       -webkit-appearance: none; appearance: none;
-      width: 14px; height: 14px;
-      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='%23999' d='M4 4l8 8M12 4l-8 8' stroke='%23999' stroke-width='1.5' stroke-linecap='round'/></svg>");
-      background-repeat: no-repeat; background-position: center;
+      width: 12px; height: 12px;
+      margin: 0 0 0 4px;
+      background-color: var(--margo-muted-fg);
+      -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'><path d='M4 4l8 8M12 4l-8 8'/></svg>");
+      mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'><path d='M4 4l8 8M12 4l-8 8'/></svg>");
+      -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+      -webkit-mask-position: center; mask-position: center;
+      -webkit-mask-size: contain; mask-size: contain;
       cursor: pointer; opacity: .7;
     }
     .margo-inbox-search-input::-webkit-search-cancel-button:hover { opacity: 1; }
@@ -3232,7 +3482,8 @@ function injectStyles(): void {
       font-size: 11px; color: var(--margo-muted-fg);
     }
     .margo-inbox-item-orphan {
-      font-size: 10px; padding: 1px 6px; border-radius: 9999px;
+      display: inline-flex; align-items: center; gap: 3px;
+      font-size: 10px; padding: 1px 6px 1px 5px; border-radius: 9999px;
       background: hsl(28 80% 92%); color: hsl(28 80% 30%);
       text-transform: uppercase; letter-spacing: .03em; font-weight: 500;
       white-space: nowrap;

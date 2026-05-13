@@ -84,13 +84,30 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
   //      fell through to 'lost-anchor', causing the inbox to mark the
   //      comment as orphaned even though its anchor was perfectly fine.
   let sawForeignViewCandidates = false;
-  const noteForeignView = (els: Element[]) => {
+  // Signal 2 ("captured view exists in DOM but is hidden") is reliable
+  // regardless of source — viewContext matching requires the same panel
+  // id/labelledBy/label or a state-attr exact match, none of which fire by
+  // accident.
+  //
+  // Signal 1 ("visible candidate doesn't match captured view") is only
+  // trustworthy when the candidate set itself already passed a similarity
+  // filter — text overlap, fuzzy text, etc. Without that, brittle generic
+  // selectors (e.g. `h2`, `div > div > a:nth-of-type(5)`) coincidentally
+  // match unrelated elements on a wholly different page (404, post-rename)
+  // and falsely report wrong-view, suppressing the orphan badge. So
+  // selector-derived candidates only fire signal 2; text-derived ones can
+  // fire both.
+  const noteForeignView = (els: Element[], allowVisibleNotMatchingSignal: boolean) => {
     if (!target.viewContext) return;
     if (sawForeignViewCandidates) return;
     for (const el of els) {
       const matches = viewContextMatches(el, target.viewContext);
       const visible = isVisible(el);
-      if ((matches && !visible) || (!matches && visible)) {
+      if (matches && !visible) {
+        sawForeignViewCandidates = true;
+        return;
+      }
+      if (allowVisibleNotMatchingSignal && !matches && visible) {
         sawForeignViewCandidates = true;
         return;
       }
@@ -101,7 +118,7 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
   let selectorMatches: Element[] = [];
   try {
     selectorMatches = Array.from(document.querySelectorAll(target.selector));
-    noteForeignView(selectorMatches);
+    noteForeignView(selectorMatches, /* allowVisibleNotMatchingSignal */ false);
     const exact = filterByContext(selectorMatches).filter((el) => matchesText(el, target.text));
     if (exact.length === 1) {
       return { kind: 'exact', el: exact[0], rects: rectsFor(exact[0], target.textAnchor) };
@@ -117,21 +134,33 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
   // 2. Selector still resolves but the visible text changed. Common case:
   //    a designer/dev renamed a button label or tweaked copy. The element
   //    itself is the same; we just can't text-match it anymore.
+  //
+  // Guard: require SOME textual relation before accepting. Brittle generic
+  // selectors (e.g. `div > div > span > a:nth-of-type(5)`) can coincidentally
+  // match an unrelated element on a different page — most often a 404 or a
+  // post-route-rename page that reuses similar layout shells. Without this
+  // check the pin lands on whatever happens to occupy the same DOM position
+  // and the inbox can't show the orphan badge. Legitimate copy edits still
+  // recover via the fuzzy-text steps below (3-5).
   const visibleSelectorMatches = filterByContext(selectorMatches);
   if (visibleSelectorMatches.length === 1) {
-    return { kind: 'moved', el: visibleSelectorMatches[0], rects: rectsFor(visibleSelectorMatches[0], target.textAnchor) };
+    const only = visibleSelectorMatches[0];
+    if (hasTextualRelation(only, target)) {
+      return { kind: 'moved', el: only, rects: rectsFor(only, target.textAnchor) };
+    }
   }
   if (visibleSelectorMatches.length > 1) {
     const fuzzy = pickByFuzzyText(visibleSelectorMatches, target.text)
-      ?? pickByCoords(visibleSelectorMatches, target)
-      ?? visibleSelectorMatches[0];
-    return { kind: 'moved', el: fuzzy, rects: rectsFor(fuzzy, target.textAnchor) };
+      ?? pickByCoords(visibleSelectorMatches, target);
+    if (fuzzy && hasTextualRelation(fuzzy, target)) {
+      return { kind: 'moved', el: fuzzy, rects: rectsFor(fuzzy, target.textAnchor) };
+    }
   }
 
   // 3. Text + role exact (scan candidates)
   if (target.text) {
     const exactTextRoleRaw = textCandidates(target, { fuzzy: false, requireRole: true });
-    noteForeignView(exactTextRoleRaw);
+    noteForeignView(exactTextRoleRaw, /* allowVisibleNotMatchingSignal */ true);
     const exactTextRole = filterByContext(exactTextRoleRaw);
     if (exactTextRole.length === 1) {
       return { kind: 'exact', el: exactTextRole[0], rects: rectsFor(exactTextRole[0], target.textAnchor) };
@@ -144,7 +173,7 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
     // 4. Text exact, role relaxed. Catches tag swaps (h2→h1, span→p),
     //    role-attribute removals, button → link conversions etc.
     const exactTextNoRoleRaw = textCandidates(target, { fuzzy: false, requireRole: false });
-    noteForeignView(exactTextNoRoleRaw);
+    noteForeignView(exactTextNoRoleRaw, /* allowVisibleNotMatchingSignal */ true);
     const exactTextNoRole = filterByContext(exactTextNoRoleRaw);
     if (exactTextNoRole.length >= 1) {
       const best = pickByCoords(exactTextNoRole, target) ?? exactTextNoRole[0];
@@ -154,7 +183,7 @@ export function resolveTarget(target: Target, currentUrl: string): ResolveResult
     // 5. Fuzzy text (Sørensen–Dice ≥ 0.6), role relaxed. Catches paraphrasing,
     //    typo fixes, translation, copy editing.
     const fuzzyTextRaw = textCandidates(target, { fuzzy: true, requireRole: false });
-    noteForeignView(fuzzyTextRaw);
+    noteForeignView(fuzzyTextRaw, /* allowVisibleNotMatchingSignal */ true);
     const fuzzyText = filterByContext(fuzzyTextRaw);
     if (fuzzyText.length >= 1) {
       const best = pickByCoords(fuzzyText, target) ?? fuzzyText[0];

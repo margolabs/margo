@@ -326,6 +326,198 @@ describe('resolveTarget — tab/wizard disambiguation', () => {
     expect(result.kind).toBe('wrong-view');
   });
 
+  // Earlier tests in this file stub document.elementFromPoint to return a
+  // specific element for their coord-fallback assertions. Happy-dom's
+  // document is shared across tests, so without a reset the stub bleeds
+  // into the next test and the cached element triggers the coord fallback
+  // in ways the new test wasn't expecting.
+  function resetElementFromPoint() {
+    delete (document as { elementFromPoint?: unknown }).elementFromPoint;
+  }
+
+  it('returns lost-anchor when a brittle nth-of-type selector coincidentally matches an unrelated link on a different page', () => {
+    resetElementFromPoint();
+    // Real-world repro: comment captured on a sidebar link "Capacity &
+    // Health" at /admin/operation. The route was later renamed to
+    // /admin/clusters, so /admin/operation is now a 404. The captured
+    // selector is a brittle nth-of-type chain that happens to resolve on
+    // the 404 page to an unrelated <a> (e.g. "Back to home"). Before the
+    // fix, step 2 of the resolver returned that <a> as `kind: 'moved'`
+    // because it was the only element matching the selector — completely
+    // ignoring that the live text bears no relation to "Capacity & Health".
+    // The inbox then showed the comment without an anchor-lost badge.
+    document.body.innerHTML = `
+      <div>
+        <div>
+          <div>nope</div>
+          <div>
+            <div>nope</div>
+            <div>
+              <span>nope</span>
+              <span>
+                <a>one</a><a>two</a><a>three</a><a>four</a><a>Back to home</a>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    // Make the 5th <a> visible at the captured coords so the resolver
+    // sees it as a candidate.
+    const link = document.querySelectorAll('a')[4]!;
+    (link as HTMLElement).getBoundingClientRect = () => new DOMRect(50, 100, 200, 30);
+    // Ancestors visible too, so isVisible's offsetParent walk doesn't reject.
+    for (
+      let cur: Element | null = link;
+      cur && cur !== document.body;
+      cur = cur.parentElement
+    ) {
+      (cur as HTMLElement).getBoundingClientRect = () => new DOMRect(50, 100, 800, 400);
+    }
+
+    const target = {
+      url: 'http://localhost/admin/operation',
+      selector:
+        'div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(2) > span:nth-of-type(2) > a:nth-of-type(5)',
+      text: 'Capacity & Health',
+      role: 'a',
+      viewport: { w: 2560, h: 1318 },
+      coords: { x: 163, y: 411 },
+      viewContext: { nearestHeading: 'Fortinet' },
+    };
+    const result = resolveTarget(target, 'http://localhost/admin/operation');
+    expect(result.kind).toBe('lost-anchor');
+  });
+
+  it('still recovers as "moved" when the selector matches AND text is similar (legitimate copy edit)', () => {
+    resetElementFromPoint();
+    // Counter-test: the step-2 fallback exists for the case where a dev
+    // edits a button's copy but the selector still resolves to the same
+    // element. The textual-relation guard must let that through — only
+    // unrelated-text matches should fall through to lost-anchor.
+    //
+    // Setup: button text was originally "Start free trial — limited time"
+    // (captured). The dev shortened it to "Start free trial". matchesText
+    // (step 1) is a startsWith check against the FULL captured text, so
+    // it fails. Step 2 sees a single visible selector match; the textual
+    // relation holds (captured text includes live text), so accept.
+    document.body.innerHTML = `
+      <div>
+        <button id="cta">Start free trial</button>
+      </div>
+    `;
+    const btn = document.getElementById('cta')!;
+    (btn as HTMLElement).getBoundingClientRect = () => new DOMRect(50, 100, 200, 40);
+    (btn.parentElement as HTMLElement).getBoundingClientRect = () => new DOMRect(0, 0, 800, 400);
+
+    const target = {
+      url: URL_HERE,
+      selector: 'div > button#cta',
+      text: 'Start free trial — limited time', // captured before the copy edit
+      role: 'button',
+      viewport: { w: 1440, h: 900 },
+      coords: { x: 100, y: 120 },
+    };
+    const result = resolveTarget(target, URL_HERE);
+    expect(result.kind).toBe('moved');
+    if (result.kind === 'moved') expect(result.el).toBe(btn);
+  });
+
+  it("returns lost-anchor when target's viewContext.nearestHeading differs from any selector-matched element on a 404-style page", () => {
+    resetElementFromPoint();
+    // Real-world repro #2: comment captured on a sidebar link "Capacity &
+    // Health" at /admin/operation with viewContext.nearestHeading="Fortinet"
+    // (the app's brand banner). The route was renamed; /admin/operation now
+    // serves the Next.js built-in 404 page, which has its own h2 ("This
+    // page could not be found.") with an h1 "404" as the nearest heading.
+    // The captured selector ("h2") matches that h2. Before the fix:
+    //   - noteForeignView(selectorMatches) saw a visible h2 whose
+    //     nearestHeading="404" != "Fortinet" → viewContextMatches=false →
+    //     sawForeignViewCandidates=true → resolver returned 'wrong-view',
+    //     which the renderer treats as "for this route but hidden" and
+    //     skips orphaning — so the inbox showed the comment with no badge.
+    // After the fix:
+    //   - selectorMatches no longer fires the visible-not-matching signal,
+    //     so this case correctly falls through to lost-anchor.
+    document.body.innerHTML = `
+      <div>
+        <div>
+          <h1>404</h1>
+          <div>
+            <h2>This page could not be found.</h2>
+          </div>
+        </div>
+      </div>
+    `;
+    const h2 = document.querySelector('h2')!;
+    (h2 as HTMLElement).getBoundingClientRect = () => new DOMRect(100, 200, 300, 30);
+    for (
+      let cur: Element | null = h2;
+      cur && cur !== document.body;
+      cur = cur.parentElement
+    ) {
+      (cur as HTMLElement).getBoundingClientRect = () => new DOMRect(0, 0, 800, 400);
+    }
+
+    const target = {
+      url: 'http://localhost/admin/operation',
+      selector: 'h2',
+      text: 'Capacity & Health dashboard overview',
+      role: 'h2',
+      viewport: { w: 2560, h: 1318 },
+      coords: { x: 163, y: 411 },
+      viewContext: { nearestHeading: 'Fortinet' },
+    };
+    const result = resolveTarget(target, 'http://localhost/admin/operation');
+    expect(result.kind).toBe('lost-anchor');
+  });
+
+  it('returns lost-anchor when the route is now a 404-style page with no matching candidates', () => {
+    resetElementFromPoint();
+    // Regression guard: a comment captured on a real page (with viewContext
+    // + selector + text) was showing up in the inbox WITHOUT an "anchor
+    // lost" badge after the underlying page route was deleted and turned
+    // into a generic 404. The 404 page has no element matching the
+    // captured selector, no text overlap, no role overlap — so every step
+    // in the resolver cascade should miss and the result should be
+    // lost-anchor (NOT wrong-view, which would suppress the badge).
+    document.body.innerHTML = `
+      <div role="tablist">
+        <button id="tab-plans" role="tab" aria-selected="true">Plans</button>
+      </div>
+      <div role="tabpanel" id="panel-plans" aria-labelledby="tab-plans">
+        <article data-testid="plans-team">
+          <h2>Team</h2>
+          <button>Start free trial</button>
+        </article>
+      </div>
+    `;
+    makeVisible(document.getElementById('panel-plans')!, { x: 0, y: 100, w: 800, h: 400 });
+    const pinEl = document.querySelector('[data-testid="plans-team"]')!;
+    (pinEl as HTMLElement).getBoundingClientRect = () => new DOMRect(50, 150, 400, 200);
+    const target = captureTarget(pinEl, URL_HERE);
+    expect(target.role).toBe('article');
+    expect(target.viewContext?.panel?.id).toBe('panel-plans');
+
+    // Replace the page with a typical 404. No tabpanel, no article, no
+    // matching IDs — just a heading and a link. Both are visible, neither
+    // shares the captured 'article' role.
+    document.body.innerHTML = `
+      <main role="main">
+        <h1>404 — Page not found</h1>
+        <p>The page you were looking for doesn't exist.</p>
+        <a href="/" role="link">Back to home</a>
+      </main>
+    `;
+    makeVisible(document.querySelector('main')!, { x: 0, y: 100, w: 800, h: 400 });
+    for (const el of Array.from(document.querySelectorAll('main > *'))) {
+      (el as HTMLElement).getBoundingClientRect = () => new DOMRect(50, 150, 200, 40);
+    }
+
+    const result = resolveTarget(target, URL_HERE);
+    expect(result.kind).toBe('lost-anchor');
+  });
+
   it('returns lost-anchor (not wrong-view) when the anchor really is gone', () => {
     document.body.innerHTML = `
       <div role="tabpanel" id="panel-plans" aria-labelledby="tab-plans">
