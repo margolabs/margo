@@ -7,7 +7,8 @@
     "demo-vite-vue",
     "demo-vite-react",
     "demo-nextjs",
-    "demo-angular"
+    "demo-angular",
+    "website"
   ],
   "devDependencies": {
     "playwright": "^1.60.0"
