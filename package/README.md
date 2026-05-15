@@ -94,6 +94,8 @@ In your app's `index.html` (one line):
 <script type="module" src="/__margo/bootstrap.js"></script>
 ```
 
+In production builds the tag is still there; the prod server returns 404 (one harmless console warning, no UI impact). To suppress, gate the tag with your framework's prod/dev conditional — Angular's `fileReplacements` in `angular.json`, webpack/Vue-CLI's template `<% if %>` syntax, etc.
+
 Then run both servers with one command using [concurrently](https://www.npmjs.com/package/concurrently):
 
 ```json

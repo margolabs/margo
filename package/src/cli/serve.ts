@@ -126,10 +126,14 @@ export async function serve(opts: ServeOptions): Promise<void> {
     }
 
     const u = req.url ?? '';
-    if (u === '/__margo/overlay.js' || u === '/__margo/overlay.js.map') {
-      return serveOverlay(u, res);
+    // Some bundlers (e.g. Vite's import-analysis) rewrite dynamic imports
+    // to append a `?import` query string. Match on pathname so the sidecar
+    // serves the overlay regardless of any bundler-injected query.
+    const pathname = u.split('?', 1)[0];
+    if (pathname === '/__margo/overlay.js' || pathname === '/__margo/overlay.js.map') {
+      return serveOverlay(pathname, res);
     }
-    if (u === '/__margo/bootstrap.js') {
+    if (pathname === '/__margo/bootstrap.js') {
       res.writeHead(200, {
         'content-type': 'application/javascript; charset=utf-8',
         'cache-control': 'no-cache',

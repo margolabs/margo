@@ -66,11 +66,33 @@ devServer: {
 }
 ```
 
-Add one `<script>` tag to your app's `index.html` (or framework equivalent):
+Add this `<script>` tag to your app's `index.html` (or framework equivalent):
 
 ```html
 <script type="module" src="/__margo/bootstrap.js"></script>
 ```
+
+### Production safety
+
+In production builds, this tag is still in your HTML. The prod server returns 404 for `/__margo/bootstrap.js` (the sidecar isn't running). Net effect: **one harmless console warning per page load** — no UI break, no actual error, the bootstrap simply doesn't execute.
+
+If you want a fully clean production console, omit the tag from prod builds using your framework's mechanism:
+
+```json
+// Angular — angular.json, production configuration
+"fileReplacements": [
+  { "replace": "src/index.html", "with": "src/index.prod.html" }
+]
+```
+
+```html
+<!-- webpack-dev-server / Vue CLI — template syntax in public/index.html -->
+<% if (NODE_ENV !== 'production') { %>
+  <script type="module" src="/__margo/bootstrap.js"></script>
+<% } %>
+```
+
+The native Vite and Next.js plugins do this automatically (they only inject the script tag when `NODE_ENV !== 'production'`). The sidecar path requires the conditional include because the tag is in your source HTML.
 
 Run both processes side-by-side:
 

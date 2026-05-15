@@ -9,9 +9,11 @@
 </head>
 <body>
   <app-root></app-root>
-  <!-- margo: external bootstrap reaches the sidecar via the dev-server proxy
-       (see proxy.conf.json). The sidecar serves the overlay bundle, which
-       bootstrap.js dynamic-imports and starts. -->
+  <!-- margo overlay — loaded via the dev-server proxy (see proxy.conf.json).
+       In production builds this tag is still present; the prod server returns
+       404 for /__margo/bootstrap.js (one harmless console warning, no UI
+       impact). To suppress it, use Angular's fileReplacements in
+       angular.json to swap an index.prod.html that omits this line. -->
   <script type="module" src="/__margo/bootstrap.js"></script>
 </body>
 </html>
