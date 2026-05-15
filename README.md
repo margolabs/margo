@@ -12,6 +12,28 @@ A shared annotation layer that sits on top of the **live running app**, where hu
 
 Today, the ticket-to-code path is a human bottleneck: a PM writes a Linear ticket, an engineer interprets it, the engineer codes. margo collapses that — humans become pure directors, AI is the sole implementer. Non-engineers stop being stakeholders waiting on a queue and become real contributors.
 
+## Quick start
+
+In your app directory (where `package.json` lives, inside a git repo):
+
+```sh
+npm install -D margo-dev
+npx margo init                  # scaffolds .margo/, wires the plugin into vite.config / next.config
+npm run dev                     # margo overlay loads automatically
+```
+
+Open the app, click the **📌 Pin** button at bottom-right, click any element, type a comment. Then in a Claude Code session inside the repo:
+
+```sh
+claude          # then type /margo
+```
+
+…and AI works through the inbox.
+
+If you use Claude Code, the entire flow above is equivalent to typing **`claude "add margo to this project"`** from the start — Claude installs the package, runs `init`, and primes itself with the skill.
+
+For Angular, raw webpack, Vue CLI, Create React App, and other non-Vite/Next frameworks, see [Framework support](#framework-support) — same overlay, runs as a small sidecar process next to your dev server.
+
 ## How it works (sketch)
 
 1. A developer asks Claude Code: `add margo to this project`. Claude installs `margo-dev` as a dev dependency, wires it into the build config (Vite / Next.js plugin, or a sidecar + proxy for everything else), and creates `.margo/` in the repo with a config file.
