@@ -1,0 +1,897 @@
+---
+// Two-pane animated illustration of the margo workflow.
+//
+//   Left pane (Acme browser)   — One window, one cursor at a time. Chrome
+//                                identity swaps Alice → Bob at step 6 to
+//                                represent the perspective shifting to
+//                                Bob's machine (he pulls, sees Alice's pin
+//                                already there because comments are git-
+//                                synced files, then adds his own).
+//   Right pane (Claude Code)   — terminal reads both comments, ships one
+//                                fix, both pins flip green.
+//
+// 12 beats. Each beat is a distinct snapshot — cursor lands on a target,
+// or the target reacts (tray opens, hint shows, pin appears, comment
+// types). Keeping each interaction in its own step avoids the cursor
+// arriving simultaneously with the element it's about to interact with.
+//
+//   0  idle on Alice's machine. Her cursor drifts toward the main FAB.
+//   1  Alice cursor ON the main FAB. After cursor lands, click pulse fires
+//      and tray slides up.
+//   2  Alice cursor moves to the Pin sub-FAB; click → tray retracts.
+//   3  Alice cursor moves to the CTA. Hover-hint fades in once she's there.
+//   4  Alice clicks the CTA → her pin appears, composer slides in.
+//   5  Alice's comment types out, reads, Send. Composer fades. The chrome
+//      identity is about to flip to Bob.
+//   6  Bob's view: chrome shows Bob, Alice's pin is still on the card
+//      (synced over git). Bob's cursor appears at the FAB; click → tray.
+//   7  Bob cursor on Pin sub-FAB; click → tray retracts.
+//   8  Bob cursor on the SSO row. Hover-hint fades in.
+//   9  Bob clicks the SSO row → his pin appears, composer slides in.
+//  10  Bob's comment types out, reads, Send. Composer fades.
+//  11  Claude Code: /margo, lists both with author chips, edits Pricing.tsx,
+//      diff renders, commit. Both pins flip amber → green. The CTA flips
+//      blue → green and the SAML clarifier reveals.
+//
+// FAB and sub-FAB icons are inline SVGs (Lucide-style strokes), matching
+// the real overlay's visual register better than emoji.
+---
+
+<div class="hero-demo" data-step="0" aria-label="Animated illustration of the margo workflow">
+
+  <!-- ─────────── Acme browser (shared canvas) ─────────── -->
+  <div class="pane pane-acme">
+    <div class="chrome">
+      <div class="dots"><span></span><span></span><span></span></div>
+      <div class="url"><span class="lock" aria-hidden="true">🔒</span>localhost:5173</div>
+      <!-- Two actor slots, only one rendered at a time. Steps 0–5 show
+           Alice (her machine); steps 6+ show Bob (his machine, after he
+           pulled Alice's pin from git). Hard cut at step 6 — the cursor
+           is hidden in step 5's composer beat, so the chrome flip happens
+           in a quiet moment. -->
+      <div class="actor actor-slot-alice">
+        <span class="avatar avatar-alice" aria-hidden="true">A</span>
+        <span class="actor-label">Alice</span>
+      </div>
+      <div class="actor actor-slot-bob">
+        <span class="avatar avatar-bob" aria-hidden="true">B</span>
+        <span class="actor-label">Bob</span>
+      </div>
+    </div>
+    <div class="body browser-body">
+      <div class="acme">
+        <h3 class="acme-title">Pricing</h3>
+        <article class="tier tier-featured">
+          <span class="tier-badge">Most popular</span>
+          <h4 class="tier-name">Team</h4>
+          <div class="tier-price"><span class="price-amount">$12</span><span class="price-cadence">/seat · mo</span></div>
+          <ul class="tier-features">
+            <li><span class="check">✓</span> Unlimited seats</li>
+            <li class="feature-anchor">
+              <span class="check">✓</span> SSO<span class="saml-clarifier"> (SAML 2.0)</span> + audit log
+              <div class="hover-hint hover-hint-sso" aria-hidden="true"></div>
+              <div class="pin pin-sso" aria-hidden="true"></div>
+            </li>
+            <li><span class="check">✓</span> Priority support</li>
+            <li><span class="check">✓</span> Integrations API</li>
+          </ul>
+          <div class="cta-wrap">
+            <button class="cta">Start free trial</button>
+            <div class="hover-hint hover-hint-cta" aria-hidden="true"></div>
+            <div class="pin pin-cta" aria-hidden="true"></div>
+          </div>
+        </article>
+      </div>
+
+      <div class="fab-group" aria-hidden="true">
+        <!-- Sub-FABs match the real overlay exactly:
+             Pin / Gap are text-only ("+ pin", "+ gap"); Inbox and Hide pins
+             carry icon glyphs. SVG paths copied verbatim from the icon()
+             helper in package/src/overlay/inject.ts (ICON_PATHS table). -->
+        <button class="sub-fab sub-fab-hide">
+          <svg class="ico" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/>
+            <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/>
+            <path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/>
+            <line x1="2" y1="2" x2="22" y2="22"/>
+          </svg>
+          hide pins
+        </button>
+        <button class="sub-fab sub-fab-inbox">
+          <svg class="ico" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
+            <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/>
+          </svg>
+          inbox
+        </button>
+        <button class="sub-fab sub-fab-gap">+ gap</button>
+        <button class="sub-fab sub-fab-pin">+ pin</button>
+        <button class="fab">
+          <svg class="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 17v5"/>
+            <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>
+          </svg>
+          Pin
+          <span class="fab-chev" aria-hidden="true">▾</span>
+        </button>
+      </div>
+
+      <!-- Alice's cursor + name tag. Color via CSS var on the path. -->
+      <div class="cursor cursor-alice" aria-hidden="true">
+        <svg class="cursor-arrow" viewBox="0 0 16 16" width="16" height="16">
+          <path d="M2 2 L2 14 L5 11 L7.5 14.5 L9 13.5 L6.5 10 L10 10 Z" fill="var(--cursor-color)" stroke="#fff" stroke-width="1"/>
+        </svg>
+        <span class="cursor-label">Alice</span>
+      </div>
+
+      <!-- Bob's cursor + name tag -->
+      <div class="cursor cursor-bob" aria-hidden="true">
+        <svg class="cursor-arrow" viewBox="0 0 16 16" width="16" height="16">
+          <path d="M2 2 L2 14 L5 11 L7.5 14.5 L9 13.5 L6.5 10 L10 10 Z" fill="var(--cursor-color)" stroke="#fff" stroke-width="1"/>
+        </svg>
+        <span class="cursor-label">Bob</span>
+      </div>
+
+      <!-- Alice's composer -->
+      <div class="composer composer-alice" aria-hidden="true">
+        <div class="composer-head">
+          <span class="avatar avatar-alice">A</span>
+          <span class="composer-name">Alice</span>
+          <span class="composer-time">now</span>
+        </div>
+        <div class="composer-body">
+          <span class="typed typed-alice"></span><span class="caret"></span>
+        </div>
+        <div class="composer-foot">
+          <button class="composer-send">Post</button>
+        </div>
+      </div>
+
+      <!-- Bob's composer -->
+      <div class="composer composer-bob" aria-hidden="true">
+        <div class="composer-head">
+          <span class="avatar avatar-bob">B</span>
+          <span class="composer-name">Bob</span>
+          <span class="composer-time">now</span>
+        </div>
+        <div class="composer-body">
+          <span class="typed typed-bob"></span><span class="caret"></span>
+        </div>
+        <div class="composer-foot">
+          <button class="composer-send">Post</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─────────── Claude Code terminal ─────────── -->
+  <div class="pane pane-terminal">
+    <div class="chrome chrome-dark">
+      <div class="dots"><span></span><span></span><span></span></div>
+      <div class="url url-dark">~/acme — claude</div>
+      <div class="actor">
+        <span class="avatar avatar-ai" aria-hidden="true">✦</span>
+        <span class="actor-label actor-label-dark">Claude Code</span>
+      </div>
+    </div>
+    <div class="body terminal-body">
+      <div class="terminal">
+        <div class="line line-prompt"><span class="prompt">›</span><span class="cmd"></span><span class="caret caret-terminal" aria-hidden="true"></span></div>
+        <div class="line line-status"><span class="muted">2 open comments:</span></div>
+        <div class="line line-c1">
+          <span class="actor-dot actor-dot-alice">A</span>
+          <code>c-001</code> <span class="muted">alice</span> <span class="dash">—</span> <em>Make the CTA green</em>
+        </div>
+        <div class="line line-c2">
+          <span class="actor-dot actor-dot-bob">B</span>
+          <code>c-002</code> <span class="muted">bob</span> <span class="dash">—</span> <em>Highlight SAML 2.0</em>
+        </div>
+        <div class="line line-tool"><span class="muted">Edit </span><code>src/components/Pricing.tsx</code></div>
+        <div class="line line-diff">
+          <div class="diff-row diff-remove"><span class="diff-marker">-</span><code>className="cta cta-blue"</code></div>
+          <div class="diff-row diff-add"><span class="diff-marker">+</span><code>className="cta cta-green"</code></div>
+          <div class="diff-row diff-remove"><span class="diff-marker">-</span><code>&lt;li&gt;SSO + audit log&lt;/li&gt;</code></div>
+          <div class="diff-row diff-add"><span class="diff-marker">+</span><code>&lt;li&gt;SSO (SAML 2.0) + audit log&lt;/li&gt;</code></div>
+        </div>
+        <div class="line line-commit"><span class="muted">Commit </span><code>margo: 2 ai-replies (ready-for-review)</code></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const root = document.querySelector('.hero-demo') as HTMLElement | null;
+  if (root) {
+    const body = root.querySelector('.browser-body') as HTMLElement | null;
+    const aliceCursor = root.querySelector('.cursor-alice') as HTMLElement | null;
+    const bobCursor = root.querySelector('.cursor-bob') as HTMLElement | null;
+
+    /**
+     * Position a cursor against an element's bounding rect, with pixel
+     * offset. Uses getBoundingClientRect after the next animation frame so
+     * any in-transit transforms have settled — the sub-FAB targets are
+     * mid-transition when their step starts, so a same-tick rect read
+     * would land 8px off.
+     */
+    const cursorTo = (cursor: HTMLElement | null, targetSel: string, dx: number, dy: number): void => {
+      if (!body || !cursor) return;
+      const target = root.querySelector(targetSel) as HTMLElement | null;
+      if (!target) return;
+      window.requestAnimationFrame(() => {
+        const b = body.getBoundingClientRect();
+        const t = target.getBoundingClientRect();
+        cursor.style.top = `${t.top - b.top + dy}px`;
+        cursor.style.left = `${t.left - b.left + dx}px`;
+      });
+    };
+
+    /**
+     * Each step shows at most ONE cursor. Alice owns steps 0–3 (then her
+     * composer takes over 4–5). Bob owns steps 6–8 (composer 9–10). Step
+     * 11 is the AI's turn; no human cursor.
+     *
+     * Bob's cursor gets pre-positioned at the FAB during step 5 (while
+     * still hidden) so its step-6 fade-in lands cleanly at the FAB
+     * instead of revealing a long slide from the default (0,0) corner.
+     */
+    const positionFor = (step: number): void => {
+      // Alice's cursor — only positioned during her active beats
+      if (step === 0) cursorTo(aliceCursor, '.fab', -28, -12);             // idle, drifting
+      else if (step === 1) cursorTo(aliceCursor, '.fab', 18, 12);          // on main FAB
+      else if (step === 2) cursorTo(aliceCursor, '.sub-fab-pin', 18, 10);  // on Pin sub-FAB
+      else if (step === 3) cursorTo(aliceCursor, '.cta', 32, 14);          // on CTA (hover)
+      // step 4+: Alice cursor faded out — her pin/composer take over
+
+      // Bob's cursor — hidden through steps 0–4, pre-positioned in step 5,
+      // fades in at the FAB at step 6 and walks his own flow.
+      if (step === 5) cursorTo(bobCursor, '.fab', 18, 12);                 // pre-position while hidden
+      else if (step === 6) cursorTo(bobCursor, '.fab', 18, 12);            // visible at FAB
+      else if (step === 7) cursorTo(bobCursor, '.sub-fab-pin', 18, 10);
+      else if (step === 8) cursorTo(bobCursor, '.feature-anchor', 110, 12);
+      // step 9+: Bob cursor faded out
+    };
+
+    const requeue = (): void => positionFor(Number(root.dataset.step ?? '0'));
+    if (document.readyState === 'loading') {
+      window.addEventListener('DOMContentLoaded', requeue);
+    } else {
+      requeue();
+    }
+    window.addEventListener('resize', requeue);
+
+    // The "fix-landed" class fires the visual changes on the card (pins
+    // green, CTA green, SAML text revealed). Gated separately from step 11
+    // so we can wait for most of the terminal stagger (~1700ms) before
+    // showing the result on the human card.
+    let fixLandTimer: number | undefined;
+    const scheduleFixLanded = (): void => {
+      if (fixLandTimer !== undefined) window.clearTimeout(fixLandTimer);
+      fixLandTimer = window.setTimeout(() => root.classList.add('fix-landed'), 1900);
+    };
+    const clearFixLanded = (): void => {
+      if (fixLandTimer !== undefined) {
+        window.clearTimeout(fixLandTimer);
+        fixLandTimer = undefined;
+      }
+      root.classList.remove('fix-landed');
+    };
+
+    // The "handoff" class fires partway through step 5: Alice's composer
+    // fades, chrome swaps Alice → Bob. The remaining ~800ms of step 5 then
+    // dwells on "Bob's view, Alice's pin sitting on the page, no cursor
+    // yet" — gives the viewer a real beat to read the perspective change
+    // before Bob's cursor shows up at step 6.
+    let handoffTimer: number | undefined;
+    const scheduleHandoff = (): void => {
+      if (handoffTimer !== undefined) window.clearTimeout(handoffTimer);
+      handoffTimer = window.setTimeout(() => root.classList.add('handoff'), 2700);
+    };
+    const clearHandoff = (): void => {
+      if (handoffTimer !== undefined) {
+        window.clearTimeout(handoffTimer);
+        handoffTimer = undefined;
+      }
+      root.classList.remove('handoff');
+    };
+
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      // 12 steps. Read holds at step 5 + 10 give 1.2s after typing completes.
+      // FAB tray steps are short — cursor mostly translates within 700ms.
+      const stepCount = 12;
+      const holdMs = [
+        800,   // 0 idle
+        800,   // 1 Alice on main FAB (cursor lands, then click + tray slides up)
+        900,   // 2 Alice on Pin sub-FAB (click + tray retracts)
+        900,   // 3 Alice cursor on CTA (hint fades in)
+        700,   // 4 Alice clicks CTA → pin + composer appears
+        // Step 5 carries two beats: typing+read (~2.7s) THEN handoff dwell
+        // (~0.9s) where the composer is gone and the chrome has swapped
+        // to Bob. Triggered by the .handoff class set 2700ms in.
+        3600,  // 5 typing (1.4s) + read (1.3s) + handoff dwell (0.9s)
+        800,   // 6 Bob on main FAB (cursor lands, click + tray)
+        900,   // 7 Bob on Pin sub-FAB
+        900,   // 8 Bob cursor on SSO (hint)
+        700,   // 9 Bob clicks SSO → pin + composer
+        2700,  // 10 typing + read
+        // Step 11 holds long enough for the terminal stagger to finish
+        // (~1.7s), the fix-landed class to fire at +1.9s, and the resulting
+        // "fixed" state on the card to stay visible for ~3s so the viewer
+        // can register the pins/CTA flipping green before the loop restarts.
+        5000,  // 11 AI terminal stagger → fix lands → fixed state sustained
+      ];
+      let step = 0;
+      const advance = (): void => {
+        step = (step + 1) % stepCount;
+        root.dataset.step = String(step);
+        positionFor(step);
+        // Reset the "fix-landed" reveal whenever the loop restarts; arm it
+        // when the AI step begins (its terminal stagger takes ~1700ms before
+        // the commit line lands; the timer fires shortly after that).
+        if (step === 0) clearFixLanded();
+        if (step === 11) scheduleFixLanded();
+        // The handoff beat lives inside step 5 — arm the timer on entry,
+        // clear it on every other step so the class doesn't leak across
+        // the cycle.
+        if (step === 5) scheduleHandoff();
+        else clearHandoff();
+        window.setTimeout(advance, holdMs[step]);
+      };
+      window.setTimeout(advance, holdMs[0]);
+    } else {
+      root.dataset.step = '11';
+      root.classList.add('fix-landed');
+      positionFor(0);
+    }
+  }
+</script>
+
+<style>
+  .hero-demo {
+    --p-bg: #ffffff;
+    --p-fg: #0a0a0a;
+    --p-muted: #6b7280;
+    --p-border: #e5e7eb;
+    --p-blue: #3b82f6;
+    --p-green: #10b981;
+    --p-green-dark: #059669;
+    --t-bg: #18181b;
+    --t-fg: #e4e4e7;
+    --t-muted: #a1a1aa;
+    --t-prompt: #34d399;
+    --t-add: #4ade80;
+    --t-remove: #f87171;
+    --amber: hsl(38 92% 50%);
+    --alice: #f97316;
+    --bob: #3b82f6;
+
+    /* Browser pane gets ~58% so two cursors + FAB tray + pricing card all
+       breathe. Terminal at ~42% has plenty of width for the diff lines. */
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 14px;
+    max-width: 1200px;
+    margin: 0 auto;
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+  @media (max-width: 820px) {
+    .hero-demo { grid-template-columns: 1fr; gap: 16px; }
+  }
+
+  .pane {
+    border: 1px solid var(--p-border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--p-bg);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.06);
+    display: flex; flex-direction: column;
+  }
+  .pane-terminal { background: var(--t-bg); }
+
+  /* — chrome bar — */
+  .chrome {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--p-border);
+    background: rgb(0 0 0 / 0.02);
+    font-size: 11px; color: var(--p-muted);
+  }
+  .chrome-dark {
+    background: rgb(255 255 255 / 0.04);
+    border-bottom-color: rgb(255 255 255 / 0.08);
+    color: var(--t-muted);
+  }
+  .dots { display: inline-flex; gap: 3px; }
+  .dots span {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: rgb(0 0 0 / 0.18);
+  }
+  .chrome-dark .dots span { background: rgb(255 255 255 / 0.18); }
+  .url { flex: 1; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .url .lock { font-size: 8px; margin-right: 3px; opacity: 0.6; }
+  .url-dark { color: var(--t-muted); }
+  .actor { display: inline-flex; align-items: center; gap: 5px; }
+  .actor-label { font-size: 10px; white-space: nowrap; }
+  .actor-label-dark { color: var(--t-muted); }
+  /* Actor slots: only one visible at a time. Alice at steps 0–4 + early
+     step 5; the .handoff class (set ~2.7s into step 5) flips chrome to
+     Bob mid-step, so the rest of step 5 dwells on "Bob's view with
+     Alice's pin already there" — the breathing room between the two
+     authors' turns. Steps 6–11 keep Bob's identity. */
+  .actor-slot-bob { display: none; }
+  .hero-demo.handoff .actor-slot-alice,
+  [data-step="6"] .actor-slot-alice,
+  [data-step="7"] .actor-slot-alice,
+  [data-step="8"] .actor-slot-alice,
+  [data-step="9"] .actor-slot-alice,
+  [data-step="10"] .actor-slot-alice,
+  [data-step="11"] .actor-slot-alice { display: none; }
+  .hero-demo.handoff .actor-slot-bob,
+  [data-step="6"] .actor-slot-bob,
+  [data-step="7"] .actor-slot-bob,
+  [data-step="8"] .actor-slot-bob,
+  [data-step="9"] .actor-slot-bob,
+  [data-step="10"] .actor-slot-bob,
+  [data-step="11"] .actor-slot-bob { display: inline-flex; }
+
+  /* — avatars — */
+  .avatar {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border-radius: 50%;
+    font-size: 9px; font-weight: 600; color: #fff;
+    flex-shrink: 0;
+  }
+  .avatar-alice { background: var(--alice); }
+  .avatar-bob   { background: var(--bob); }
+  .avatar-ai    { background: var(--p-fg); color: #fff; }
+
+  /* — browser body: Acme page — */
+  .browser-body {
+    position: relative;
+    padding: 18px 18px 22px;
+    min-height: 440px;
+    background:
+      radial-gradient(circle at top right, rgb(59 130 246 / 0.03), transparent 50%),
+      radial-gradient(circle at bottom left, rgb(16 185 129 / 0.03), transparent 50%);
+  }
+  .acme { display: flex; flex-direction: column; gap: 14px; max-width: 320px; margin: 0 auto; }
+  .acme-title {
+    margin: 0; font-size: 15px; font-weight: 600; color: var(--p-fg);
+    text-align: center; letter-spacing: -0.01em;
+  }
+
+  .tier {
+    position: relative;
+    border: 1px solid var(--p-border); border-radius: 12px;
+    padding: 16px 18px; background: var(--p-bg);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.03), 0 4px 12px rgb(0 0 0 / 0.04);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .tier-featured {
+    border-color: rgb(10 10 10 / 0.15);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.06), 0 6px 18px rgb(0 0 0 / 0.05);
+  }
+  .tier-badge {
+    position: absolute; top: -9px; right: 12px;
+    background: var(--p-fg); color: white;
+    font-size: 8px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 9999px;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.15);
+  }
+  .tier-name {
+    margin: 0; font-size: 14px; font-weight: 600; color: var(--p-fg);
+    letter-spacing: -0.01em;
+  }
+  .tier-price { display: flex; align-items: baseline; gap: 4px; }
+  .price-amount {
+    font-size: 22px; font-weight: 700; color: var(--p-fg);
+    letter-spacing: -0.02em;
+  }
+  .price-cadence { font-size: 10px; color: var(--p-muted); }
+
+  .tier-features {
+    list-style: none; padding: 0; margin: 0;
+    display: flex; flex-direction: column; gap: 5px;
+  }
+  .tier-features li {
+    font-size: 11px; color: #374151;
+    display: flex; align-items: center; gap: 6px;
+    position: relative;
+  }
+  .check {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: rgb(16 185 129 / 0.12); color: var(--p-green-dark);
+    font-size: 8px; font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  /* AI's fix to Bob's comment lands at step 11: the "(SAML 2.0)" clarifier
+     reveals inline between "SSO" and "+ audit log". Simple display swap so
+     the surrounding text stays at exactly the same x-position before the
+     change — no inline-block / min-width / pseudo-element offset. */
+  .saml-clarifier {
+    display: none;
+    color: var(--p-green-dark);
+    font-weight: 500;
+  }
+  .hero-demo.fix-landed .saml-clarifier { display: inline; }
+
+  .cta-wrap { position: relative; align-self: stretch; margin-top: 2px; }
+  .cta {
+    width: 100%;
+    background: var(--p-blue); color: white;
+    border: 0; padding: 8px 14px;
+    border-radius: 8px; font-size: 12px; font-weight: 500;
+    cursor: default;
+    box-shadow: 0 1px 2px rgb(59 130 246 / 0.2);
+    transition: background-color 700ms cubic-bezier(0.4, 0, 0.2, 1),
+                box-shadow 700ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  /* AI's fix lands a moment AFTER the terminal commit line drops — gated by
+     the `.fix-landed` class on the root, applied by a JS timeout (~1.9s into
+     step 11). Keeps the card's state in sync with the terminal: viewer sees
+     Claude commit, then sees the change land. */
+  .hero-demo.fix-landed .cta {
+    background: var(--p-green);
+    box-shadow: 0 1px 2px rgb(16 185 129 / 0.25);
+  }
+
+  /* — hover-hints — delay the fade-in so the cursor lands BEFORE the
+       outline appears. Cursor transition is 700ms; we wait 600ms to give
+       it most of the way there. */
+  .hover-hint {
+    position: absolute;
+    border: 1.5px dashed var(--amber);
+    background: hsl(38 92% 50% / 0.08);
+    border-radius: 6px;
+    opacity: 0;
+    transition: opacity 220ms ease-out;
+    pointer-events: none;
+  }
+  .hover-hint-cta { inset: -4px; border-radius: 10px; }
+  .hover-hint-sso { inset: -3px -6px; border-radius: 6px; }
+  /* Alice's CTA hint: visible at steps 3 + 4 (delayed at step 3 so the
+       cursor arrives first). Hidden again once composer takes over (step 5). */
+  [data-step="3"] .hover-hint-cta,
+  [data-step="4"] .hover-hint-cta {
+    opacity: 1;
+    transition-delay: 600ms;
+  }
+  [data-step="4"] .hover-hint-cta {
+    transition-delay: 0ms; /* already on — keep instant fade-out next step */
+  }
+  /* Bob's SSO hint: visible at steps 8 + 9 */
+  [data-step="8"] .hover-hint-sso,
+  [data-step="9"] .hover-hint-sso {
+    opacity: 1;
+    transition-delay: 600ms;
+  }
+  [data-step="9"] .hover-hint-sso {
+    transition-delay: 0ms;
+  }
+
+  /* — pin dots — */
+  .pin {
+    position: absolute;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: var(--amber);
+    border: 2px solid #fff;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.2), 0 2px 6px rgb(0 0 0 / 0.12);
+    opacity: 0;
+    transition:
+      opacity 240ms ease-out,
+      transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      background-color 600ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .pin-cta { top: -8px; right: -8px; transform: scale(0.4); }
+  .pin-sso { top: 50%; right: -8px; left: auto; transform: translateY(-50%) scale(0.4); }
+  /* Alice's pin: appears at step 4 (after click), persists through end of cycle */
+  [data-step="4"] .pin-cta,
+  [data-step="5"] .pin-cta,
+  [data-step="6"] .pin-cta,
+  [data-step="7"] .pin-cta,
+  [data-step="8"] .pin-cta,
+  [data-step="9"] .pin-cta,
+  [data-step="10"] .pin-cta,
+  [data-step="11"] .pin-cta { opacity: 1; transform: scale(1); }
+  /* Bob's pin: appears at step 9 */
+  [data-step="9"] .pin-sso,
+  [data-step="10"] .pin-sso,
+  [data-step="11"] .pin-sso { opacity: 1; transform: translateY(-50%) scale(1); }
+  /* Both flip green once `.fix-landed` is applied (delayed from step 11) */
+  .hero-demo.fix-landed .pin-cta,
+  .hero-demo.fix-landed .pin-sso { background: hsl(160 84% 39%); }
+
+  /* — FAB group — */
+  .fab-group { position: absolute; bottom: 12px; right: 12px; }
+  .fab {
+    position: relative;
+    display: inline-flex; align-items: center; gap: 5px;
+    background: var(--p-fg); color: white; border: 0;
+    padding: 7px 12px; border-radius: 9999px;
+    font: inherit; font-size: 11px; font-weight: 500;
+    box-shadow: 0 4px 14px rgb(0 0 0 / 0.18);
+    cursor: default;
+    transition: transform 120ms ease;
+  }
+  .ico { width: 12px; height: 12px; flex-shrink: 0; }
+  .ico-chev { width: 7px; height: 7px; opacity: 0.7; }
+  /* Click pulse on the (single shared) FAB at step 1 (Alice) and step 6 (Bob).
+     Held back 600ms so the press lands just as the cursor arrives (cursor
+     transit is 700ms) — instant pulse looked like the FAB pressed itself
+     before the cursor reached it. */
+  [data-step="1"] .fab,
+  [data-step="6"] .fab {
+    transform: scale(0.94);
+    transition-delay: 600ms;
+  }
+
+  .sub-fab {
+    position: absolute;
+    right: 0;
+    display: inline-flex; align-items: center; gap: 5px;
+    background: var(--p-bg); color: var(--p-fg);
+    border: 1px solid var(--p-border);
+    padding: 5px 10px; border-radius: 9999px;
+    font: inherit; font-size: 10px; font-weight: 500;
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.08);
+    cursor: default;
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+    transition: opacity 200ms ease, transform 200ms ease;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  /* Pin sub-FAB stands out — dark fill, same as the real .margo-launcher */
+  .sub-fab-pin {
+    background: var(--p-fg); color: white;
+    border-color: var(--p-fg);
+  }
+  .sub-fab-pin   { bottom: 40px; }
+  .sub-fab-gap   { bottom: 74px; }
+  .sub-fab-inbox { bottom: 108px; }
+  .sub-fab-hide  { bottom: 142px; }
+  /* Tray visible at steps 1+2 (Alice opening + clicking Pin) and 6+7 (Bob).
+     At step 2 / step 7, the Pin sub-FAB itself is "just clicked" — tray
+     starts retracting on the next step. */
+  [data-step="1"] .sub-fab,
+  [data-step="2"] .sub-fab,
+  [data-step="6"] .sub-fab,
+  [data-step="7"] .sub-fab {
+    opacity: 1; transform: translateY(0) scale(1);
+  }
+  /* Tray fade-in waits for the cursor to land on the main FAB before
+     starting — cursor transit is 700ms, so the tray is held invisible for
+     ~600ms and the click visually "causes" the expansion. The 50ms stagger
+     between sub-FABs is preserved on top of the base delay.
+
+     Exit (step 2→3 / step 7→8) doesn't match any per-step rule here, so
+     the base `.sub-fab` transition (200ms, no delay) handles the snappy
+     retract — exactly what we want when the user clicks Pin. */
+  [data-step="1"] .sub-fab-pin,
+  [data-step="6"] .sub-fab-pin   { transition-delay: 600ms; }
+  [data-step="1"] .sub-fab-gap,
+  [data-step="6"] .sub-fab-gap   { transition-delay: 650ms; }
+  [data-step="1"] .sub-fab-inbox,
+  [data-step="6"] .sub-fab-inbox { transition-delay: 700ms; }
+  [data-step="1"] .sub-fab-hide,
+  [data-step="6"] .sub-fab-hide  { transition-delay: 750ms; }
+  /* Pin sub-FAB click pulse at step 2 (Alice) / step 7 (Bob) — same delay
+     so the press lands just as the cursor arrives on the sub-FAB. */
+  [data-step="2"] .sub-fab-pin,
+  [data-step="7"] .sub-fab-pin {
+    transform: translateY(0) scale(0.94);
+    transition-delay: 600ms;
+  }
+
+  /* — cursors (multiplayer, Figma-style) — */
+  .cursor {
+    position: absolute;
+    top: 0; left: 0;
+    display: inline-flex;
+    align-items: flex-start;
+    transition: top 700ms cubic-bezier(0.4, 0, 0.2, 1),
+                left 700ms cubic-bezier(0.4, 0, 0.2, 1),
+                opacity 220ms;
+    opacity: 1;
+    pointer-events: none;
+    z-index: 5;
+    --cursor-color: var(--p-fg);
+  }
+  .cursor-alice { --cursor-color: var(--alice); z-index: 6; }
+  .cursor-bob   { --cursor-color: var(--bob); }
+  .cursor-arrow { display: block; }
+  .cursor-label {
+    margin-left: 2px;
+    margin-top: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    color: white;
+    line-height: 1.35;
+    white-space: nowrap;
+    background: var(--cursor-color);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.15);
+  }
+  /* Alice's cursor visible 0–3 (drift, FAB, Pin sub-FAB, CTA-hover);
+     hidden from step 4 once she clicks (pin + composer take focus). */
+  [data-step="4"] .cursor-alice,
+  [data-step="5"] .cursor-alice,
+  [data-step="6"] .cursor-alice,
+  [data-step="7"] .cursor-alice,
+  [data-step="8"] .cursor-alice,
+  [data-step="9"] .cursor-alice,
+  [data-step="10"] .cursor-alice,
+  [data-step="11"] .cursor-alice { opacity: 0; }
+  /* Bob's cursor: hidden by default, visible only during his beats (6–8).
+     He never co-exists with Alice's cursor on screen — only one cursor in
+     one window at a time. The step-5 JS pre-position teleports him to the
+     FAB while hidden so the step-6 fade-in lands at the right spot. */
+  .cursor-bob { opacity: 0; }
+  [data-step="6"] .cursor-bob,
+  [data-step="7"] .cursor-bob,
+  [data-step="8"] .cursor-bob { opacity: 1; }
+
+  /* — composers — */
+  .composer {
+    position: absolute;
+    top: 210px;
+    left: 50%; transform: translateX(-50%) translateY(8px) scale(0.97);
+    width: calc(100% - 28px);
+    max-width: 260px;
+    background: var(--p-bg);
+    border: 1px solid var(--p-border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.16);
+    padding: 10px 12px;
+    opacity: 0;
+    transition: opacity 220ms ease-out, transform 220ms ease-out;
+    pointer-events: none;
+    z-index: 4;
+  }
+  /* Alice's composer visible step 4 (appears) + step 5 (typing + read). The
+     .handoff override (set ~2.7s into step 5) fades it back out so the
+     dwell at end of step 5 is a clean "Bob's view with Alice's pin and no
+     UI clutter." Higher specificity (three classes vs attr+class) wins
+     over the step-5 visible rule. */
+  [data-step="4"] .composer-alice,
+  [data-step="5"] .composer-alice {
+    opacity: 1; transform: translateX(-50%) translateY(0) scale(1);
+  }
+  .hero-demo.handoff .composer-alice {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-4px) scale(0.97);
+  }
+  /* Bob's composer visible step 9 + 10 */
+  [data-step="9"] .composer-bob,
+  [data-step="10"] .composer-bob {
+    opacity: 1; transform: translateX(-50%) translateY(0) scale(1);
+  }
+  .composer-head { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+  .composer-name { color: var(--p-fg); font-weight: 500; }
+  .composer-time { color: var(--p-muted); margin-left: auto; font-size: 10px; }
+  .composer-body {
+    margin: 8px 0; font-size: 11px; color: var(--p-fg);
+    min-height: 16px;
+    line-height: 1.5;
+    /* Force single line so the typewriter animation reveals one character
+       sweep instead of two-line clip-path weirdness. Texts are tuned short
+       enough to fit at 11px within the composer's content width. */
+    white-space: nowrap;
+  }
+  .typed { display: inline; }
+  .typed::before { content: ''; }
+  /* Alice's text types at step 5. Kept short enough to render on a single
+     line at 11px in the composer — clip-path typewriter looks broken on
+     multi-line text because each line reveals horizontally in parallel
+     rather than reading character-by-character. */
+  [data-step="5"] .typed-alice::before {
+    content: 'Make the CTA green, hover darker.';
+    animation: typeChars 1.4s steps(34, end) forwards;
+  }
+  /* Bob's text — same constraint */
+  [data-step="10"] .typed-bob::before {
+    content: 'Highlight that SSO supports SAML 2.0.';
+    animation: typeChars 1.4s steps(38, end) forwards;
+  }
+  @keyframes typeChars {
+    from { clip-path: inset(0 100% 0 0); }
+    to { clip-path: inset(0 0 0 0); }
+  }
+  .caret {
+    display: inline-block; width: 1px; height: 12px; vertical-align: middle;
+    background: var(--p-fg); margin-left: 1px;
+    animation: blink 1s steps(2) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .composer-foot { display: flex; justify-content: flex-end; }
+  .composer-send {
+    background: var(--p-fg); color: white;
+    border: 0; padding: 4px 10px; border-radius: 6px;
+    font-size: 10px; cursor: default;
+  }
+
+  /* — right pane body: terminal — */
+  .terminal-body {
+    padding: 18px 18px;
+    color: var(--t-fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    min-height: 440px;
+  }
+  .terminal .line {
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity 240ms ease-out, transform 240ms ease-out;
+  }
+  /* Prompt line stays visible across all 12 steps with a blinking caret —
+     gives the terminal a "live, waiting for input" feel during steps 0–10
+     instead of looking like a broken empty pane. The blank prompt frames
+     the AI's eventual /margo typing as a real REPL invocation. */
+  .terminal .line-prompt { opacity: 1; transform: translateY(0); }
+  .caret-terminal {
+    display: inline-block; width: 1px; height: 11px; vertical-align: middle;
+    background: var(--t-fg); margin-left: 2px;
+    animation: blink 1s steps(2) infinite;
+  }
+  /* Caret hides once /margo types out (step 11) — the typing animation owns
+     the prompt's trailing edge from there on. */
+  [data-step="11"] .caret-terminal { display: none; }
+  .terminal .line + .line { margin-top: 5px; }
+  .prompt { color: var(--t-prompt); margin-right: 6px; }
+  .cmd::before { content: ''; }
+  /* Terminal stages at step 11 only — that whole beat is AI processing */
+  [data-step="11"] .cmd::before { content: '/margo'; animation: typeChars 0.55s steps(8, end) forwards; }
+
+  .terminal .muted { color: var(--t-muted); }
+  .terminal code {
+    color: var(--t-fg);
+    background: rgb(255 255 255 / 0.06);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 10px;
+  }
+  .terminal em { font-style: normal; color: var(--t-fg); }
+  .terminal .dash { color: var(--t-muted); margin: 0 4px; }
+
+  .actor-dot {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 12px; height: 12px; border-radius: 50%;
+    font-size: 7px; font-weight: 700; color: white;
+    margin-right: 5px; flex-shrink: 0;
+    vertical-align: middle;
+  }
+  .actor-dot-alice { background: var(--alice); }
+  .actor-dot-bob   { background: var(--bob); }
+
+  [data-step="11"] .line-status { opacity: 1; transform: translateY(0); transition-delay: 350ms; }
+  [data-step="11"] .line-c1 { opacity: 1; transform: translateY(0); transition-delay: 550ms; }
+  [data-step="11"] .line-c2 { opacity: 1; transform: translateY(0); transition-delay: 750ms; }
+  [data-step="11"] .line-tool { opacity: 1; transform: translateY(0); transition-delay: 1100ms; }
+  [data-step="11"] .line-diff { opacity: 1; transform: translateY(0); transition-delay: 1400ms; }
+  [data-step="11"] .line-commit { opacity: 1; transform: translateY(0); transition-delay: 1700ms; }
+
+  .diff-row { display: flex; gap: 4px; font-size: 10px; }
+  .diff-marker { width: 8px; display: inline-block; }
+  .diff-remove { color: var(--t-remove); }
+  .diff-remove .diff-marker { color: var(--t-remove); }
+  .diff-add { color: var(--t-add); }
+  .diff-add .diff-marker { color: var(--t-add); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hero-demo *, .hero-demo *::before { transition: none !important; animation: none !important; }
+    .cursor { opacity: 0 !important; }
+    .composer { opacity: 0 !important; }
+    .pin-cta, .pin-sso {
+      opacity: 1 !important;
+      background: hsl(160 84% 39%) !important;
+    }
+    .pin-cta { transform: scale(1) !important; }
+    .pin-sso { transform: translateY(-50%) scale(1) !important; }
+    .terminal .line { opacity: 1 !important; transform: none !important; }
+    .cta { background: var(--p-green) !important; }
+  }
+</style>

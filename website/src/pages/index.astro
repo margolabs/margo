@@ -1,5 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import HeroDemo from '../components/HeroDemo.astro';
 ---
 
 <Layout>
@@ -32,10 +33,7 @@ npm run dev</code></pre>
       </div>
     </div>
 
-    <div class="demo-placeholder" aria-label="Demo placeholder">
-      <span>Demo GIF coming soon</span>
-      <small>30-second flow: pin → comment → AI replies in-thread + makes the change</small>
-    </div>
+    <HeroDemo />
   </section>
 
   <section class="three-up">
@@ -173,19 +171,6 @@ npm run dev</code></pre>
     }
     .btn-primary:hover { background: var(--fg); border-color: var(--fg); }
 
-    .demo-placeholder {
-      max-width: 800px; margin: 0 auto;
-      aspect-ratio: 16 / 9;
-      background: var(--muted-bg);
-      border: 2px dashed var(--border);
-      border-radius: var(--radius);
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      color: var(--muted);
-      gap: 6px;
-      padding: 20px;
-    }
-    .demo-placeholder span { font-size: 16px; font-weight: 500; }
-    .demo-placeholder small { font-size: 13px; }
 
     .three-up {
       max-width: 1024px; margin: 80px auto; padding: 0 32px;
