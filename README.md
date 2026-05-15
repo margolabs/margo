@@ -22,17 +22,66 @@ npx margo init                  # scaffolds .margo/, wires the plugin into vite.
 npm run dev                     # margo overlay loads automatically
 ```
 
-Open the app, click the **📌 Pin** button at bottom-right, click any element, type a comment. Then in a Claude Code session inside the repo:
+Open the app, click the **📌 Pin** button at bottom-right, click any element, type a comment.
+
+### Claude Code integration (optional)
+
+If your team uses Claude Code, install the `/margo` skill so AI can triage and process the inbox via a slash command:
+
+```sh
+npx margo install-skill                 # commits .claude/skills/margo/ into this repo (default)
+npx margo install-skill --user          # installs at ~/.claude/skills/ instead (not committed)
+```
+
+Then in a Claude Code session inside the repo:
 
 ```sh
 claude          # then type /margo
 ```
 
-…and AI works through the inbox.
+…and AI works through the inbox: replies in-thread, bumps status to `ready-for-review` or `blocked`, and updates anchors when it moves a pinned element.
 
-If you use Claude Code, the entire flow above is equivalent to typing **`claude "add margo to this project"`** from the start — Claude installs the package, runs `init`, and primes itself with the skill.
+If you use Claude Code from the start, the entire flow above is equivalent to typing **`claude "add margo to this project"`** — Claude installs the package, runs `init`, runs `install-skill`, and primes itself with the workflow.
 
-For Angular, raw webpack, Vue CLI, Create React App, and other non-Vite/Next frameworks, see [Framework support](#framework-support) — same overlay, runs as a small sidecar process next to your dev server.
+### Other frameworks (sidecar)
+
+For Angular, raw webpack-dev-server, Vue CLI, Create React App, SvelteKit (non-Vite), Remix-classic — anything whose dev server can proxy a URL prefix — margo runs as a sidecar:
+
+```sh
+npm install -D margo-dev concurrently
+npx margo init       # still works — scaffolds .margo/, but skips the Vite/Next wiring
+```
+
+Add a proxy rule in your framework's dev-server config. Examples:
+
+```json
+// Angular: proxy.conf.json, referenced from angular.json (serve.options.proxyConfig)
+{ "/__margo": { "target": "http://localhost:3001", "changeOrigin": true } }
+```
+
+```js
+// webpack-dev-server / Vue CLI: webpack.config.js or vue.config.js
+devServer: {
+  proxy: { '/__margo': { target: 'http://localhost:3001', changeOrigin: true } }
+}
+```
+
+Add one `<script>` tag to your app's `index.html` (or framework equivalent):
+
+```html
+<script type="module" src="/__margo/bootstrap.js"></script>
+```
+
+Run both processes side-by-side:
+
+```json
+// package.json
+"scripts": {
+  "dev": "concurrently \"ng serve\" \"margo serve --port 3001\""
+}
+```
+
+Now `npm run dev` boots both. The overlay loads at your app's URL just like the native-plugin path; the sidecar is the only difference. A working end-to-end example lives in [`demo-angular/`](./demo-angular).
 
 ## How it works (sketch)
 
