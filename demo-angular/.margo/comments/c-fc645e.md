@@ -5,7 +5,7 @@ author: sxhuan@gmail.com
 authorName: Stanley Song
 branch: main
 created: '2026-05-15T04:40:50.121Z'
-status: open
+status: resolved
 target:
   url: /
   selector: section#pricing > div:nth-of-type(1) > article:nth-of-type(1)
@@ -22,5 +22,6 @@ target:
   commit: a572c7d
   dirty: true
 ---
+
 
 yyyy
