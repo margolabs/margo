@@ -3,8 +3,11 @@
   "private": true,
   "workspaces": [
     "package",
-    "demo-app",
-    "demo-nextjs"
+    "demo-vite-js",
+    "demo-vite-vue",
+    "demo-vite-react",
+    "demo-nextjs",
+    "demo-angular"
   ],
   "devDependencies": {
     "playwright": "^1.60.0"

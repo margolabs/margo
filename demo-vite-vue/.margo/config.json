@@ -1,9 +1,9 @@
 {
   "$schema": "https://margo.dev/schema/config.v0.json",
   "workspace": {
-    "name": "margo-demo-vite-js",
+    "name": "margo-demo-vite-vue",
     "appUrl": {
-      "dev": "http://localhost:5173",
+      "dev": "http://localhost:5174",
       "preview": null
     }
   },

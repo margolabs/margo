@@ -1,5 +1,5 @@
 {
-  "name": "margo-demo-app",
+  "name": "margo-demo-vite-js",
   "private": true,
   "type": "module",
   "scripts": {

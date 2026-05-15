@@ -1,0 +1,13 @@
+{
+  "/__margo": {
+    "target": "http://localhost:3001",
+    "secure": false,
+    "changeOrigin": true
+  },
+  "/__margo/events": {
+    "target": "http://localhost:3001",
+    "secure": false,
+    "changeOrigin": true,
+    "ws": false
+  }
+}

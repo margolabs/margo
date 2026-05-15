@@ -68,6 +68,40 @@ export const dynamic = 'force-dynamic';
 
 The route lives at `app/margo-runtime/` (not `app/__margo/`) because Next.js treats `_`-prefixed folders as private. The `withMargo` wrapper adds a rewrite so the public URL stays `/__margo/*`.
 
+## Other frameworks (sidecar)
+
+Angular, raw webpack-dev-server, Vue CLI, Create React App, SvelteKit-non-Vite, Remix-classic — any framework whose dev server can proxy a URL prefix — work via a sidecar. Run `margo serve` next to the framework's dev server and forward `/__margo/*` to it:
+
+```sh
+# terminal 1
+ng serve                                # or vue-cli-service serve, etc.
+
+# terminal 2
+npx margo serve --port 3001
+```
+
+In your framework's proxy config (Angular's `proxy.conf.json`, webpack's `devServer.proxy`, etc.):
+
+```json
+{
+  "/__margo": { "target": "http://localhost:3001", "changeOrigin": true }
+}
+```
+
+In your app's `index.html` (one line):
+
+```html
+<script type="module" src="/__margo/bootstrap.js"></script>
+```
+
+Then run both servers with one command using [concurrently](https://www.npmjs.com/package/concurrently):
+
+```json
+{ "scripts": { "dev": "concurrently \"ng serve\" \"margo serve --port 3001\"" } }
+```
+
+See [`demo-angular/`](https://gitlab.com/metaleap/margo/-/tree/main/demo-angular) for a working setup.
+
 ## How to comment
 
 ```sh

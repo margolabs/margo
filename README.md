@@ -2,7 +2,7 @@
 
 *Feedback in the margins. AI does the work.*
 
-> v0 spec is complete. A working scaffold of `margo-dev` lives in [package/](./package/). Build status is tracked in [IMPLEMENTATION.md](./IMPLEMENTATION.md).
+> v0 is shipped. `margo-dev` is published on npm and exercised end-to-end by the demos under this repo (Vite-JS, Vite-Vue, Vite-React, Next.js, Angular). Build status is tracked in [IMPLEMENTATION.md](./IMPLEMENTATION.md).
 
 ## The pitch
 
@@ -14,7 +14,7 @@ Today, the ticket-to-code path is a human bottleneck: a PM writes a Linear ticke
 
 ## How it works (sketch)
 
-1. A developer asks Claude Code: `add margo to this project`. Claude installs `margo-dev` as a dev dependency, wires it into the build config (Vite / Next.js plugin), and creates `.margo/` in the repo with a config file.
+1. A developer asks Claude Code: `add margo to this project`. Claude installs `margo-dev` as a dev dependency, wires it into the build config (Vite / Next.js plugin, or a sidecar + proxy for everything else), and creates `.margo/` in the repo with a config file.
 2. Every team member who wants to comment clones the repo and runs `npm run dev` themselves. The dev server boots with the margo overlay automatically active.
 3. A commenter clicks an element in the running UI, types a comment, hits enter. The overlay POSTs to a tiny local endpoint (`/__margo/comment`) exposed by the dev plugin.
 4. The plugin writes the comment as a file under `.margo/comments/<id>.md`, then runs local `git` to auto-commit (`margo: comment by jane on /pricing`) and auto-push to the repo's existing remote.
@@ -52,6 +52,29 @@ CTA should be green, not blue. Add a hover animation.
 Agreed on green. For the hover, can we use the standard token rather than a new one?
 ```
 
+## Framework support
+
+Two integration modes — the same overlay, comment files, and AI workflow regardless. Pick by what your dev server exposes:
+
+| Mode | Frameworks | Setup | Cost |
+|---|---|---|---|
+| **Native plugin** | Vite (vanilla, Vue, React, Svelte, Astro, Analog…), Next.js (App Router) | one line in `vite.config.*` or `next.config.*` | zero — overlay loads from the same dev server |
+| **Sidecar + proxy** | Angular, webpack-dev-server, Vue CLI, Create React App, SvelteKit (non-Vite), Remix-classic, anything that proxies HTTP | run `margo serve` next to your dev server; add a `proxyConfig` entry forwarding `/__margo/*`; add `<script type="module" src="/__margo/bootstrap.js">` to `index.html` | one extra process (typically wired via `concurrently`) |
+
+The sidecar isn't a fallback for "second-class" frameworks — it's the universal path. Native plugins are nicer UX for the two ecosystems where the integration effort has been spent.
+
+This repo ships demos exercising both modes end-to-end:
+
+| Demo | Port | Adapter |
+|---|---|---|
+| [`demo-vite-js/`](./demo-vite-js)     | 5173       | vite plugin |
+| [`demo-vite-vue/`](./demo-vite-vue)   | 5174       | vite plugin |
+| [`demo-vite-react/`](./demo-vite-react) | 5175     | vite plugin |
+| [`demo-nextjs/`](./demo-nextjs)       | 3000       | next plugin |
+| [`demo-angular/`](./demo-angular)     | 4200 + 3001 | sidecar + proxy |
+
+End-to-end verification: `node scripts/verify-demo.mjs <dir> <url>` boots the demo, opens it in headless Chromium, and asserts the overlay mounted + `/__margo/me` round-trips.
+
 ## Core principles
 
 - **Humans never code.** They only annotate.
@@ -63,7 +86,7 @@ Agreed on green. For the hover, can we use the standard token rather than a new 
 ## Decided
 
 - **First user: small product team.** Implies role hints (PM / designer / dev) for AI inbox triage. Real-time multiplayer is *not* required for v0 — git sync is the propagation mechanism.
-- **Attach mechanism: dev-time package** (Vite / Next.js plugin). Installed as a dev dependency by Claude Code itself (`npm install -D margo-dev` + plugin wired into the build config). Overlay activates automatically when the dev server launches. Production builds do not include it.
+- **Attach mechanism: dev-time package.** Installed as a dev dependency by Claude Code itself (`npm install -D margo-dev`). Two integration modes (see **Framework support** above): a native plugin for Vite and Next.js, or a `margo serve` sidecar + proxy for anything else (Angular, raw webpack, CRA, etc.). Overlay activates automatically when the dev server launches. Production builds do not include it.
   - Distribution piggybacks on Claude Code: `claude "add margo to this project"` is the entire onboarding. The AI tool the team already uses *is* the install flow.
   - SDK rejected as too heavy on dev setup. Browser extension rejected because per-commenter install is unnecessary friction when the same package can serve everyone via the dev server.
 - **Reach for non-dev teammates: same package activates on staging / preview deploys** (Vercel previews, Netlify deploys, etc.) when a margo env var is set. Covers the "designer reviewing a preview URL" case without building a tunnel for v0.
@@ -72,7 +95,7 @@ Agreed on green. For the hover, can we use the standard token rather than a new 
 - **Write path: local-only, auto-commit-and-push.** Every commenter runs `npm run dev` against their local clone. The plugin POST-receives the comment, writes the file under `.margo/comments/`, then runs local `git` CLI to add / commit (with a `margo:` prefix on the message) / push to whatever remote the repo points at. Naturally host-agnostic. Preview deploys are read-only viewers in v0.
 - **Author identity: local `git config user.name / user.email`.** No separate login or auth system. Role hint (PM / designer / dev) comes from the workspace config in `.margo/config.json`.
 - **Trigger model: implicit-by-default.** Every new comment has `type: task` in its frontmatter, meaning AI treats it as an instruction. Two opt-outs: `type: discussion` (humans only — AI ignores) and `type: question` (AI answers in-thread but doesn't modify code). `@ai` mentions are allowed but cosmetic — they bump priority, not semantics.
-- **AI discoverability: project-level Claude Code skill.** The `margo-dev` package drops a skill at `.claude/skills/margo.md` on install, giving the dev a `/margo` command that lists and works through the open inbox. AI consumes comments via normal repo-file reads — no MCP server, no magic context injection.
+- **AI discoverability: project-level Claude Code skill.** The `margo-dev` package drops a skill at `.claude/skills/margo/SKILL.md` (via `margo install-skill`), giving the dev a `/margo` command that lists and works through the open inbox. AI consumes comments via normal repo-file reads — no MCP server, no magic context injection.
 - **AI reply protocol.** When AI processes a `type: task` comment, it appends a reply (`**ai-reply** — claude-opus-4-7 — <ts>`) to the same file and updates `status` to one of: `ready-for-review` (confident fix landed), `blocked` (with reason), or leaves `open` (clarification asked). Humans mark `resolved` after review.
 - **Pin anchoring: hybrid, captured-at-comment-time.** The plugin captures the following when a comment is pinned: CSS selector (best-effort), full text content of the element, ARIA role + label, and viewport-relative coords. At view time, the overlay resolves the pin in priority order: text + role match → selector → coords (with a "may have moved" indicator) → orphaned (still listed in `/margo` inbox, not rendered as a pin). When AI modifies code that affects a pinned element, AI is responsible for updating the comment's anchor fields in the same edit. (Screenshot-based recovery deferred to v0.1.)
 - **Conflict handling.** One file per comment (UUID filename) eliminates 99% of conflict cases. Plugin auto-pulls before pushing and retries on remote-update rejection. Status changes use last-writer-wins, with the more-advanced status winning ties (`resolved` > `ready-for-review` > `in-progress` > `open`). Replies are append-only with timestamps, so concurrent replies merge cleanly. Real conflicts (rare) surface in the overlay UI with a "review and choose" prompt.
@@ -101,8 +124,7 @@ After the v0 spec was assembled, a critical pass surfaced these refinements (all
 
 ## Items intentionally deferred
 
-- Next.js plugin (Vite first; Next.js in v0.1).
-- Webpack / Rspack / generic middleware adapters.
+- Native webpack / Rspack plugin (webpack-dev-server middleware). Webpack-based frameworks work today via the `margo serve` sidecar + proxy; a first-class plugin is a UX nicety, not a correctness requirement.
 - Mobile / React Native commenting surface.
 - OAuth-based write path for preview deploys (v1).
 - Self-hostable mediator service (v1).

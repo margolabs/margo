@@ -14,9 +14,11 @@
 import * as os from 'node:os';
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import * as url from 'node:url';
 import { promisify } from 'node:util';
+import { serve } from '../cli/serve.js';
 
 const execFileP = promisify(execFile);
 
@@ -34,11 +36,12 @@ const ROOT_CLAUDE_BLOCK = `${MARGO_BLOCK_START}
 This project uses margo for live-app feedback. See \`.margo/CLAUDE.md\` for how AI should engage with the comment inbox. The \`/margo\` skill triages and processes the open inbox.
 ${MARGO_BLOCK_END}`;
 
-const USAGE = 'usage: margo <init|install-skill|update|uninstall> [--user|--project]';
+const USAGE = 'usage: margo <init|install-skill|update|uninstall|serve> [--user|--project] [--port N] [--cwd DIR]';
 
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? 'init';
-  const flags = parseFlags(process.argv.slice(3));
+  const rest = process.argv.slice(3);
+  const flags = parseFlags(rest);
   const cwd = process.cwd();
   switch (cmd) {
     case 'init':
@@ -53,6 +56,9 @@ async function main(): Promise<void> {
     case 'uninstall':
       await uninstall(cwd);
       break;
+    case 'serve':
+      await serve({ port: flags.port, cwd: flags.cwd ?? cwd });
+      break;
     default:
       console.error(`unknown command: ${cmd}`);
       console.error(USAGE);
@@ -60,14 +66,46 @@ async function main(): Promise<void> {
   }
 }
 
-function parseFlags(args: string[]): { scope: 'project' | 'user' } {
+function parseFlags(args: string[]): {
+  scope: 'project' | 'user';
+  port: number;
+  cwd?: string;
+} {
   const user = args.includes('--user');
   const project = args.includes('--project');
   if (user && project) {
     console.error('[margo] cannot combine --user and --project; pick one.');
     process.exit(1);
   }
-  return { scope: user ? 'user' : 'project' };
+  return {
+    scope: user ? 'user' : 'project',
+    port: readValueFlag(args, '--port', 3001),
+    cwd: readValueFlag(args, '--cwd', undefined),
+  };
+}
+
+// Tiny `--flag value` reader. Accepts `--name value` and `--name=value`.
+// Number-typed callers pass a numeric default and we coerce; string callers
+// (cwd) pass undefined to opt out of coercion.
+function readValueFlag<D extends string | number | undefined>(
+  args: string[],
+  name: string,
+  fallback: D,
+): D {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === name && i + 1 < args.length) return coerce(args[i + 1], fallback);
+    if (a.startsWith(`${name}=`)) return coerce(a.slice(name.length + 1), fallback);
+  }
+  return fallback;
+
+  function coerce(raw: string, fb: D): D {
+    if (typeof fb === 'number') {
+      const n = Number(raw);
+      return (Number.isFinite(n) ? n : fb) as D;
+    }
+    return raw as D;
+  }
 }
 
 /**
@@ -558,8 +596,21 @@ function escapeRe(s: string): string {
 // entry). Without the guard, importing helpers like `resolveGitRoot` from
 // the test suite would re-execute `main()` and scaffold `.margo/` into
 // whatever directory the test runner happens to be in.
-const invokedDirectly = process.argv[1]
-  && import.meta.url === url.pathToFileURL(process.argv[1]).href;
+//
+// argv[1] is the symlink path when invoked via `node_modules/.bin/margo`;
+// import.meta.url is the resolved real path. Compare realpaths so the
+// symlink shape doesn't make the check silently false (which would have
+// the process exit immediately with no output).
+const invokedDirectly = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    const realArg = fsSync.realpathSync(process.argv[1]);
+    const realSelf = fsSync.realpathSync(url.fileURLToPath(import.meta.url));
+    return realArg === realSelf;
+  } catch {
+    return false;
+  }
+})();
 if (invokedDirectly) {
   main().catch((err) => {
     console.error('[margo]', err);

@@ -1,0 +1,49 @@
+<header>
+  <h1>Acme Pricing · Angular Demo</h1>
+  <nav>
+    <a href="#features">Features</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#contact">Contact</a>
+  </nav>
+</header>
+<main>
+  <section id="features" class="card">
+    <h2>Why teams pick Acme</h2>
+    <p>
+      Acme cuts the boring parts of running a small team — billing, contracts, payroll —
+      into one quiet workflow. More time on the work that actually pays.
+    </p>
+  </section>
+
+  <section id="pricing" class="card">
+    <h2>Pricing</h2>
+    <p>Simple, predictable, and refundable in the first 30 days.</p>
+    <div class="tiers">
+      <article
+        *ngFor="let tier of tiers()"
+        class="tier"
+        [ngClass]="{ 'tier-highlight': tier.primary }"
+      >
+        <h3>{{ tier.name }}</h3>
+        <p class="price">
+          {{ tier.price }}<span *ngIf="tier.cadence">{{ tier.cadence }}</span>
+        </p>
+        <ul>
+          <li *ngFor="let feature of tier.features">{{ feature }}</li>
+        </ul>
+        <button
+          class="cta"
+          [ngClass]="{ 'cta-secondary': !tier.primary }"
+          [attr.data-testid]="tier.primary ? 'cta-primary' : 'cta-' + tier.name.toLowerCase()"
+        >
+          {{ tier.cta }}
+        </button>
+      </article>
+    </div>
+  </section>
+
+  <section id="contact" class="card">
+    <h2>Get in touch</h2>
+    <p>Reach us at <a href="mailto:hello@acme.com">hello&#64;acme.com</a>.</p>
+  </section>
+</main>

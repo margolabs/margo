@@ -10,7 +10,7 @@ margo is a feedback layer where designers, PMs, and devs leave comments on the l
 ## How to read the inbox
 
 1. Read `.margo/comments/*.md` (one file per comment).
-2. Filter: `status` ∈ {`open`, `in-progress`} AND `type: task`.
+2. Filter: `status` ∈ {`open`, `in-progress`} AND `type: task`. Skip `resolved`, `wontfix`, `ready-for-review`, and `blocked` — those are terminal or already-acted-on states. `wontfix` is the "Dismiss" verdict and is reversible only by humans clicking Reopen; do not re-process it.
 3. Sort by `created` ascending (oldest first), but bump anything with `@ai` in the body to the top.
 4. Skip `type: discussion` (humans only — never modify code in response to these). For `type: question`, answer in-thread but do not modify code.
 
@@ -36,7 +36,7 @@ For each `type: task` comment:
      - `blocked` — you can't proceed (include the reason in the reply)
      - leave `open` — you asked for clarification
 4. **Update the anchor if you moved the element.** If your code change modified the element a comment is pinned to (renamed a class, changed text, restructured the DOM), update the `target` fields (`selector`, `text`, `viewport`) so the pin still resolves on next view. Do this in the same edit.
-5. **Never mark `resolved` yourself.** Only humans set `resolved`. Your terminal states are `ready-for-review` or `blocked`.
+5. **Never mark `resolved` or `wontfix` yourself.** Both are human-only verdicts (`resolved` = "done, approved"; `wontfix` = "Dismiss — we considered this and decided against it"). Your terminal states are `ready-for-review` or `blocked`.
 
 ## How to commit
 
@@ -59,6 +59,7 @@ Group code changes and the corresponding comment update in the same commit when 
 ## Don't
 
 - Don't process `type: discussion` comments — humans only.
-- Don't mark `resolved`. That's the human's call.
+- Don't process `status: resolved` or `status: wontfix` comments. You may *read* them for historical context (e.g. to avoid re-proposing something the team declined), but never act on them.
+- Don't mark `resolved` or `wontfix` yourself. Both are human-only verdicts.
 - Don't bulk-process more than ~5 comments without surfacing a summary; the human running you should see what you're doing.
 - Don't push to a branch other than what the dev is currently on, unless the dev tells you otherwise.

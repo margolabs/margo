@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>margo demo · Angular</title>
+  <base href="/">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+</head>
+<body>
+  <app-root></app-root>
+  <!-- margo: external bootstrap reaches the sidecar via the dev-server proxy
+       (see proxy.conf.json). The sidecar serves the overlay bundle, which
+       bootstrap.js dynamic-imports and starts. -->
+  <script type="module" src="/__margo/bootstrap.js"></script>
+</body>
+</html>
