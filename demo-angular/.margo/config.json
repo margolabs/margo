@@ -1,5 +1,5 @@
 {
-  "$schema": "https://margo.dev/schema/config.v0.json",
+  "$schema": "https://margo-dev.com/schema/config.v0.json",
   "workspace": {
     "name": "margo-demo-angular",
     "appUrl": {
