@@ -1,16 +1,16 @@
 {
   "name": "margo-dev",
-  "version": "0.0.18",
+  "version": "0.0.19",
   "description": "Live-app feedback layer for AI-coding teams. Comments live as files in your repo; AI works through them.",
   "author": "Stanley Song <sxhuan@gmail.com>",
-  "homepage": "https://gitlab.com/metaleap/margo#readme",
+  "homepage": "https://github.com/margolabs/margo#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://gitlab.com/metaleap/margo.git",
+    "url": "git+https://github.com/margolabs/margo.git",
     "directory": "package"
   },
   "bugs": {
-    "url": "https://gitlab.com/metaleap/margo/-/issues"
+    "url": "https://github.com/margolabs/margo/issues"
   },
   "publishConfig": {
     "access": "public"

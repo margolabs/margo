@@ -100,7 +100,7 @@ Then run both servers with one command using [concurrently](https://www.npmjs.co
 { "scripts": { "dev": "concurrently \"ng serve\" \"margo serve --port 3001\"" } }
 ```
 
-See [`demo-angular/`](https://gitlab.com/metaleap/margo/-/tree/main/demo-angular) for a working setup.
+See [`demo-angular/`](https://github.com/margolabs/margo/tree/main/demo-angular) for a working setup.
 
 ## How to comment
 
