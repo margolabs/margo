@@ -195,6 +195,19 @@ function renderRow(req: CapturedRequest): HTMLElement {
     row.appendChild(duration)
   }
 
+  // Trigger context: shows the user which UI element fired this request.
+  // Auto-captured at fetch dispatch via the network tap; renders as a
+  // small subtitle below the main row so the picker reads like "POST
+  // /api/subscribe — fired by clicking Subscribe".
+  if (req.trigger && (req.trigger.text || req.trigger.selector)) {
+    const trig = document.createElement('span')
+    trig.className = 'margo-request-trigger'
+    const label = req.trigger.text || req.trigger.selector
+    trig.textContent = '← ' + label
+    trig.title = `Triggered by ${req.trigger.selector}`
+    row.appendChild(trig)
+  }
+
   return row
 }
 
@@ -238,6 +251,8 @@ async function composeFor(req: CapturedRequest, opts: RequestLauncherOpts): Prom
       statusText: req.statusText,
       duration: req.duration,
       timestamp: req.timestamp,
+      traceId: req.traceId,
+      trigger: req.trigger,
     },
   }
 
@@ -450,6 +465,15 @@ body:has(.margo-inbox) .margo-request-panel {
   font-size: 10px;
   color: var(--margo-muted-fg);
   flex: 0 0 auto;
+}
+.margo-request-trigger {
+  flex: 1 0 100%;
+  font-size: 11px;
+  color: var(--margo-muted-fg);
+  padding-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .margo-request-empty {
   margin: 0;

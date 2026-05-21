@@ -18,7 +18,7 @@ margo is a feedback layer where designers, PMs, and devs leave comments on the l
 
 For each `type: task` comment:
 
-1. **Read the body and the target.** If `target.kind` is `'request'`, follow the **Request pins** flow below; otherwise the existing element-pin instructions apply. The `target` block tells you which page (`url`) and which element (`selector`, `text`, `role`, `coords`). If the selector doesn't resolve in the current code, fall back to text + role to locate the element. The `branch` field tells you which branch the comment was authored on — usually the same one you're on. (An element pin MAY also carry `target.relatedRequests` — recent network calls margo captured around the click. See **Related requests on element pins** below.)
+1. **Read the body and the target.** If `target.kind` is `'request'`, follow the **Request pins** flow below; otherwise the existing element-pin instructions apply. The `target` block tells you which page (`url`) and which element (`selector`, `text`, `role`, `coords`). If the selector doesn't resolve in the current code, fall back to text + role to locate the element. The `branch` field tells you which branch the comment was authored on — usually the same one you're on.
 2. **Decide if you can act.**
    - If the request is concrete and you have enough context: make the code change.
    - If the request is ambiguous or contradicts another comment / spec: ask in-thread, do not change code yet.
@@ -66,21 +66,18 @@ How this changes the workflow:
 5. **Don't update the anchor.** Unlike element pins, request anchors don't get rewritten by code changes — the endpoint URL is stable across refactors of the handler or the caller. Skip step 4 of the element-pin flow for request pins; `target.request` stays as-is.
 6. **Reply etiquette is unchanged**: append an `ai-reply` block with what you did or what's blocking you, and set `status` to `ready-for-review` or `blocked`. Never set `resolved` or `wontfix`.
 
-## Related requests on element pins
+## Trigger info on request pins
 
-When the user pins a DOM element (not a request), margo also attaches up to 5 recent fetch/XHR calls that fired in the ~3 seconds after their last click/submit. Stored as `target.relatedRequests: RequestAnchor[]` — same shape as the request-pin `target.request` block.
+A request pin's `target.request` block may include two extra fields automatically captured at fetch dispatch:
 
-Treat this as causal evidence. If the comment says "this button is broken" and `relatedRequests` includes a `POST /api/subscribe → 500`, the failed call is almost certainly what "broken" means. Open the handler.
+- `target.request.traceId` — a per-interaction id (`x-margo-trace`) sent as a header on same-origin calls. Lets you correlate the call with anything else fired by the same UI action, and grep for it in app-level access logs.
+- `target.request.trigger` — the UI element the user clicked (or submitted, or pressed Enter on) that fired this request. Fields: `selector`, `text`, `role`, optional `coords` and `viewport`. Descriptive only — don't try to re-resolve it.
 
-It's time-window correlation, not trace correlation — sometimes captures unrelated parallel calls (analytics, prefetch, autosave). If a related request looks unrelated to the comment ("/track/page-view" on a "make this button bigger" comment), ignore it.
+The trigger field replaces the prior "manually pin the button to attach the request" workflow. The user pins the *request* — margo records what UI action caused it. So a request pin's body might just say "this is wrong" and you can read `target.request.trigger.text === "Subscribe"` to know it's the Subscribe button.
 
-Decision tree:
+Use it as direction, not gospel. If the trigger says "Subscribe" and the request is `POST /api/subscribe → 500`, the comment is almost certainly about the Subscribe flow failing. If the trigger is empty (page-load fetch, programmatic call), fall back to the comment body alone.
 
-- Comment text gives clear UI intent + `relatedRequests` empty → treat as a pure UI fix.
-- Comment text vague + `relatedRequests` has a failed call → start from the failing endpoint, not the DOM.
-- Comment text vague + `relatedRequests` has only 2xx calls → ask in-thread what's wrong.
-
-**Don't touch `target.relatedRequests` when you fix the code.** It's a historical record of what happened at pin time, not something to refresh. The element-pin anchor-update rule still applies: when your fix moves the element, update `target.selector` / `text` / `viewport` — but leave `target.relatedRequests` alone.
+**Don't update `target.request.trigger` when you fix the code** — it's a historical snapshot of what fired the call, not a re-resolvable anchor.
 
 ## How to commit
 

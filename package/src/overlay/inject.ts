@@ -25,9 +25,10 @@ import {
 } from "./inbox-view.js";
 import {
   installNetworkTap,
-  recordInteraction,
-  getRequestsSinceInteraction,
+  rotateTraceId,
+  recordTrigger,
 } from "./network.js";
+import type { TriggerInfo } from "../shared/types.js";
 import { installRequestLauncher, REQUEST_PINS_CSS } from "./request-pins.js";
 import type { Comment, CommentType, GitState } from "../shared/types.js";
 
@@ -51,26 +52,35 @@ export function start(opts: StartOptions): void {
   // (HMR, double-imports). See package/src/overlay/network.ts.
   installNetworkTap();
 
-  // Track when the user last interacted with the page (any click/submit/
-  // Enter not inside the margo overlay). We use this to attribute network
-  // activity to "the click that caused it": when the user later pins an
-  // element, the captured target carries the recent requests that fired
-  // in the causal window. Heuristic (time-window, not trace-based) but
-  // accurate enough most of the time. Skipping events targeting [data-margo]
-  // is essential — clicking the FAB or the inbox must not poison the
-  // window for the next page interaction.
-  const markInteraction = (ev: Event): void => {
+  // Rotate the network-tap's trace id AND snapshot the triggering element
+  // on every user interaction that's outside the margo overlay and outside
+  // pin/gap arming. Every fetch/XHR fired after this point until the next
+  // interaction inherits both — same-origin requests get `x-margo-trace`
+  // injected, and the captured record carries the trigger info so a later
+  // request pin reads "fired by clicking <Subscribe>" automatically. The
+  // pin-mode classes (`margo-targeting` / `margo-gap-targeting`) are the
+  // signal that the user is *picking* an element, not interacting with the
+  // app — those clicks must not start a new causal slice.
+  const onUserInteraction = (ev: Event): void => {
+    if (document.body.classList.contains("margo-targeting")) return;
+    if (document.body.classList.contains("margo-gap-targeting")) return;
     const t = ev.target as Element | null;
     if (t && t.closest && t.closest("[data-margo]")) return;
-    recordInteraction();
+    rotateTraceId();
+    // For form submits the event target is the <form>; the submitter
+    // button is what the user actually clicked. Prefer that for trigger
+    // description, fall back to the target otherwise.
+    const submitter = (ev as SubmitEvent).submitter ?? null;
+    const triggerEl = submitter ?? t;
+    recordTrigger(triggerEl ? describeTriggerElement(triggerEl, ev) : null);
   };
-  document.addEventListener("click", markInteraction, true);
-  document.addEventListener("submit", markInteraction, true);
+  document.addEventListener("click", onUserInteraction, true);
+  document.addEventListener("submit", onUserInteraction, true);
   document.addEventListener(
     "keydown",
     (ev) => {
       if ((ev as KeyboardEvent).key !== "Enter") return;
-      markInteraction(ev);
+      onUserInteraction(ev);
     },
     true,
   );
@@ -1527,24 +1537,11 @@ function enablePinComposer(
         captured.coords = { x: e.clientX, y: e.clientY };
         captured.viewport = { w: window.innerWidth, h: window.innerHeight };
       }
-      // Auto-attach recent fetch/XHR activity that fired in the causal
-      // window after the user's last non-overlay interaction. Heuristic —
-      // could include the occasional unrelated parallel call — but gives
-      // AI the "what API did this button just hit?" context for free.
-      // Empty array when no interaction is recorded yet or no requests
-      // landed in the window; that field stays omitted from the file.
-      const related = getRequestsSinceInteraction();
-      if (related.length > 0) {
-        captured.relatedRequests = related;
-      }
-      const composerMessage = hasSelection
-        ? `On selected text: "${truncate(sel!.toString().trim().replace(/\s+/g, " "), 80)}"`
-        : related.length > 0
-          ? `${related.length} recent ${related.length === 1 ? "request" : "requests"} will be attached: ${related.map((r) => `${r.method} ${requestPathname(r.endpoint)} (${r.status || "ERR"})`).join(", ")}`
-          : undefined;
       const body = await uiPrompt({
         title: "New comment",
-        message: composerMessage,
+        message: hasSelection
+          ? `On selected text: "${truncate(sel!.toString().trim().replace(/\s+/g, " "), 80)}"`
+          : undefined,
         placeholder:
           "What's up with this? Prefix with ? for question, // for discussion.",
         multiline: true,
@@ -1651,6 +1648,38 @@ function describeElement(el: Element): string {
   const id = (el as HTMLElement).id ? `#${(el as HTMLElement).id}` : "";
   const cls = el.classList.length > 0 ? `.${el.classList[0]}` : "";
   return `${tag}${id}${cls}`;
+}
+
+// Build a TriggerInfo describing the element the user just interacted with.
+// Descriptive only — this isn't re-resolved on read, it's a snapshot for AI
+// to read "fired by clicking the Subscribe button" from the persisted file.
+function describeTriggerElement(el: Element, ev: Event): TriggerInfo {
+  const tag = el.tagName.toLowerCase();
+  const testid = (el as HTMLElement).dataset?.testid;
+  const id = (el as HTMLElement).id;
+  // Prefer the most stable identifier we can find: data-testid > id > a
+  // role-aware fallback. Selector is short and descriptive, not a CSS
+  // path we need to resolve later.
+  let selector: string;
+  if (testid) selector = `[data-testid="${testid}"]`;
+  else if (id) selector = `#${id}`;
+  else {
+    const cls = el.classList.length > 0 ? `.${el.classList[0]}` : "";
+    selector = `${tag}${cls}`;
+  }
+  const text = (el.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 80);
+  const role =
+    (el.getAttribute("role") ??
+      (tag === "button" || tag === "a" || tag === "input" ? tag : tag)) || tag;
+  const me = ev as MouseEvent;
+  const hasCoords = typeof me.clientX === "number" && typeof me.clientY === "number";
+  return {
+    selector,
+    text,
+    role,
+    coords: hasCoords ? { x: me.clientX, y: me.clientY } : undefined,
+    viewport: { w: window.innerWidth, h: window.innerHeight },
+  };
 }
 
 function ancestorChain(el: Element, max = 5): Element[] {

@@ -42,6 +42,21 @@ export interface GapAnchor {
 export type TargetKind = 'element' | 'request';
 
 /**
+ * Snapshot of the UI element whose interaction triggered a network call.
+ * Recorded at fetch/XHR dispatch from the most recent non-margo click,
+ * submit, or Enter keypress. Descriptive only — not re-resolved on read.
+ * Lets AI answer "which button caused this request" without the user
+ * having to manually pin the button.
+ */
+export interface TriggerInfo {
+  selector: string;          // short CSS-ish identifier; descriptive, not re-resolved
+  text: string;              // trimmed visible text of the triggering element
+  role: string;              // explicit ARIA role or fallback to tagName
+  coords?: { x: number; y: number };
+  viewport?: { w: number; h: number };
+}
+
+/**
  * Snapshot of a network call captured by the overlay's fetch/XHR
  * interceptor at pin time. Headers and body are intentionally omitted
  * in v1 — privacy concerns + comment-file size — and will be added in a
@@ -54,6 +69,20 @@ export interface RequestAnchor {
   statusText?: string;       // e.g. 'Not Found'. Often empty for HTTP/2.
   duration?: number;         // ms, from fetch dispatch to response settle
   timestamp: string;         // ISO when the request settled
+  // Client-generated session/trace id sent as `x-margo-trace` on same-origin
+  // calls. Lets the overlay group requests by the UI interaction that
+  // triggered them (one fresh id per non-margo click/submit/Enter). Same-
+  // origin requests carry the header to the server too, so future server
+  // plugins can log handler activity by trace and AI can cross-reference.
+  // Omitted on cross-origin requests where we skip the header to avoid
+  // CORS preflights.
+  traceId?: string;
+  // The UI element the user interacted with immediately before this call
+  // fired. Captured at request dispatch, not at pin time — the causal
+  // link is established by the event, not by the user manually pinning
+  // the button afterward. Omitted if the call fired with no prior user
+  // interaction (page-load fetch, timer, programmatic).
+  trigger?: TriggerInfo;
 }
 
 export interface Target {
@@ -67,20 +96,10 @@ export interface Target {
   coords: { x: number; y: number };
   textAnchor?: TextAnchor;
   gapAnchor?: GapAnchor;
-  /** Populated when `kind === 'request'`. The network call's metadata. */
+  /** Populated when `kind === 'request'`. The network call's metadata,
+   *  including the UI trigger info under `request.trigger` when the call
+   *  was fired by a user interaction. */
   request?: RequestAnchor;
-  /**
-   * For element pins, up to 5 recent fetch/XHR calls that fired in the
-   * causal window after the user's last interaction with the page (~3s).
-   * Heuristic time-window correlation — not trace-based — so occasional
-   * false positives are possible (analytics, prefetch, autosave racing
-   * with the click). AI should treat the list as evidence, not gospel.
-   *
-   * Snapshot at pin time. Don't refresh this field when fixing the code;
-   * the user pinned the symptom *with* this context, and rewriting it
-   * loses the causal hint.
-   */
-  relatedRequests?: RequestAnchor[];
   // Short SHA of HEAD when the pin was authored. Lets viewers detect
   // "this pin was made against a different commit than what I'm rendering."
   commit?: string;
