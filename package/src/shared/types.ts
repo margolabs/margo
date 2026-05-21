@@ -69,6 +69,18 @@ export interface Target {
   gapAnchor?: GapAnchor;
   /** Populated when `kind === 'request'`. The network call's metadata. */
   request?: RequestAnchor;
+  /**
+   * For element pins, up to 5 recent fetch/XHR calls that fired in the
+   * causal window after the user's last interaction with the page (~3s).
+   * Heuristic time-window correlation — not trace-based — so occasional
+   * false positives are possible (analytics, prefetch, autosave racing
+   * with the click). AI should treat the list as evidence, not gospel.
+   *
+   * Snapshot at pin time. Don't refresh this field when fixing the code;
+   * the user pinned the symptom *with* this context, and rewriting it
+   * loses the causal hint.
+   */
+  relatedRequests?: RequestAnchor[];
   // Short SHA of HEAD when the pin was authored. Lets viewers detect
   // "this pin was made against a different commit than what I'm rendering."
   commit?: string;

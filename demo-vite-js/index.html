@@ -19,11 +19,78 @@
       button.cta:hover { background: #2563eb; }
       nav { display: flex; gap: 20px; }
       nav a { color: #3b82f6; text-decoration: none; }
+
+      /* Health badge */
+      .health {
+        display: inline-flex; align-items: center; gap: 6px;
+        margin-left: 12px; font-size: 13px; color: #6b7280; vertical-align: middle;
+      }
+      .health .dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: #d1d5db; display: inline-block;
+      }
+      .health.ok .dot { background: #10b981; }
+      .health.down .dot { background: #ef4444; }
+
+      /* Tier grid */
+      .tiers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px; }
+      @media (max-width: 720px) { .tiers { grid-template-columns: 1fr; } }
+      .tier {
+        padding: 20px; border: 1px solid #e5e7eb; border-radius: 12px;
+        display: flex; flex-direction: column; gap: 12px; background: white;
+      }
+      .tier.primary { border-color: #3b82f6; box-shadow: 0 0 0 1px #3b82f6 inset; }
+      .tier h3 { margin: 0; font-size: 18px; }
+      .tier .price { font-size: 24px; font-weight: 600; }
+      .tier .price .cadence { font-size: 13px; font-weight: 400; color: #6b7280; margin-left: 4px; }
+      .tier ul { margin: 0; padding-left: 18px; color: #374151; font-size: 14px; }
+      .tier ul li { margin-bottom: 4px; }
+      .tier button {
+        margin-top: auto; padding: 8px 14px; border-radius: 8px;
+        border: 1px solid #d1d5db; background: white; cursor: pointer; font-size: 14px;
+      }
+      .tier.primary button {
+        background: #3b82f6; color: white; border-color: #3b82f6;
+      }
+      .tier.primary button:hover { background: #2563eb; }
+
+      /* Skeletons */
+      .tier.skeleton { background: #f9fafb; border-color: #e5e7eb; }
+      .tier.skeleton .ghost {
+        background: linear-gradient(90deg, #e5e7eb 0%, #f3f4f6 50%, #e5e7eb 100%);
+        background-size: 200% 100%;
+        animation: shimmer 1.2s infinite linear;
+        border-radius: 4px;
+      }
+      .tier.skeleton .ghost.line { height: 12px; margin-bottom: 8px; }
+      .tier.skeleton .ghost.title { height: 18px; width: 50%; }
+      .tier.skeleton .ghost.price { height: 24px; width: 40%; }
+      .tier.skeleton .ghost.btn { height: 32px; width: 100%; margin-top: auto; }
+      @keyframes shimmer {
+        0% { background-position: 200% 0; }
+        100% { background-position: -200% 0; }
+      }
+
+      /* Subscribe form */
+      #subscribe form { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+      #subscribe input[type="email"] {
+        flex: 1; min-width: 220px; padding: 10px 12px;
+        border: 1px solid #d1d5db; border-radius: 8px; font-size: 15px;
+      }
+      #subscribe .result { margin-top: 12px; min-height: 1.4em; font-size: 14px; }
+      #subscribe .result.success { color: #047857; }
+      #subscribe .result.warn { color: #b45309; }
+      #subscribe .result.error { color: #b91c1c; }
     </style>
   </head>
   <body>
     <header>
-      <h1>Acme Pricing</h1>
+      <h1>
+        Acme Pricing
+        <span id="health" class="health" data-testid="health-badge" aria-live="polite">
+          <span class="dot"></span><span class="label">API: …</span>
+        </span>
+      </h1>
       <nav>
         <a href="#features">Features</a>
         <a href="#contact">Contact</a>
@@ -38,9 +105,27 @@
       <section id="pricing" class="card">
         <h2>Pricing</h2>
         <p>Simple, predictable, and refundable in the first 30 days.</p>
-        <p style="margin-top: 24px;">
-          <button class="cta" data-testid="cta-primary">Start Trial</button>
-        </p>
+        <div id="tiers" class="tiers" data-testid="tiers" aria-busy="true">
+          <!-- skeletons injected on load, replaced by real tiers -->
+        </div>
+      </section>
+
+      <section id="subscribe" class="card">
+        <h2>Subscribe for updates</h2>
+        <p>Drop your email and we'll let you know when new tiers ship.</p>
+        <form id="subscribe-form" data-testid="subscribe-form" novalidate>
+          <input
+            id="subscribe-email"
+            type="email"
+            name="email"
+            placeholder="you@example.com"
+            autocomplete="email"
+            data-testid="subscribe-email"
+            required
+          />
+          <button type="submit" class="cta" data-testid="subscribe-submit">Subscribe</button>
+        </form>
+        <p id="subscribe-result" class="result" data-testid="subscribe-result" aria-live="polite"></p>
       </section>
 
       <section id="contact" class="card">
@@ -48,5 +133,144 @@
         <p>Reach us at <a href="mailto:hello@acme.com">hello@acme.com</a>.</p>
       </section>
     </main>
+
+    <script>
+      // ---------- Health badge ----------
+      function setHealth(state, label) {
+        const el = document.getElementById('health');
+        if (!el) return;
+        el.classList.remove('ok', 'down');
+        el.classList.add(state);
+        el.querySelector('.label').textContent = label;
+      }
+
+      async function loadHealth() {
+        try {
+          const res = await fetch('/api/health');
+          if (res.ok) setHealth('ok', 'API: ok');
+          else setHealth('down', 'API: down');
+        } catch {
+          setHealth('down', 'API: down');
+        }
+      }
+
+      // ---------- Tiers ----------
+      function renderSkeletons() {
+        const root = document.getElementById('tiers');
+        if (!root) return;
+        root.setAttribute('aria-busy', 'true');
+        root.innerHTML = '';
+        for (let i = 0; i < 3; i++) {
+          const card = document.createElement('div');
+          card.className = 'tier skeleton';
+          card.innerHTML = `
+            <div class="ghost title"></div>
+            <div class="ghost price"></div>
+            <div class="ghost line"></div>
+            <div class="ghost line"></div>
+            <div class="ghost line"></div>
+            <div class="ghost btn"></div>
+          `;
+          root.appendChild(card);
+        }
+      }
+
+      function renderTiers(tiers) {
+        const root = document.getElementById('tiers');
+        if (!root) return;
+        root.setAttribute('aria-busy', 'false');
+        root.innerHTML = '';
+        for (const t of tiers) {
+          const card = document.createElement('article');
+          card.className = 'tier' + (t.primary ? ' primary' : '');
+          const features = (t.features || [])
+            .map((f) => `<li>${escapeHtml(String(f))}</li>`)
+            .join('');
+          card.innerHTML = `
+            <h3>${escapeHtml(t.name || '')}</h3>
+            <div class="price">${escapeHtml(t.price || '')}<span class="cadence">${escapeHtml(t.cadence || '')}</span></div>
+            <ul>${features}</ul>
+            <button type="button" data-testid="tier-cta-${escapeHtml((t.name || '').toLowerCase())}">${escapeHtml(t.cta || 'Choose')}</button>
+          `;
+          root.appendChild(card);
+        }
+      }
+
+      function renderTiersError(msg) {
+        const root = document.getElementById('tiers');
+        if (!root) return;
+        root.setAttribute('aria-busy', 'false');
+        root.innerHTML = `<p style="color:#b91c1c;">Couldn't load tiers: ${escapeHtml(msg)}</p>`;
+      }
+
+      async function loadTiers() {
+        renderSkeletons();
+        try {
+          const res = await fetch('/api/tiers');
+          if (!res.ok) {
+            renderTiersError('HTTP ' + res.status);
+            return;
+          }
+          const data = await res.json();
+          renderTiers(Array.isArray(data.tiers) ? data.tiers : []);
+        } catch (e) {
+          renderTiersError('network error');
+        }
+      }
+
+      // ---------- Subscribe form ----------
+      function setResult(kind, text) {
+        const el = document.getElementById('subscribe-result');
+        if (!el) return;
+        el.classList.remove('success', 'warn', 'error');
+        if (kind) el.classList.add(kind);
+        el.textContent = text;
+      }
+
+      async function handleSubscribe(ev) {
+        ev.preventDefault();
+        setResult(null, '');
+        const input = document.getElementById('subscribe-email');
+        const email = input ? input.value : '';
+        try {
+          const res = await fetch('/api/subscribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email }),
+          });
+          let data = {};
+          try { data = await res.json(); } catch {}
+          if (res.status === 201 && res.ok) {
+            setResult('success', `Subscribed (id: ${data.id || 'unknown'})`);
+          } else if (res.status === 400) {
+            setResult('warn', String(data.error || 'invalid request'));
+          } else if (res.status === 500) {
+            setResult('error', String(data.error || 'server error'));
+          } else {
+            setResult('error', `unexpected status ${res.status}`);
+          }
+        } catch {
+          setResult('error', 'network error');
+        }
+      }
+
+      // ---------- Utilities ----------
+      function escapeHtml(s) {
+        return String(s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      // ---------- Wire up ----------
+      document.addEventListener('DOMContentLoaded', () => {
+        loadHealth();
+        loadTiers();
+        const form = document.getElementById('subscribe-form');
+        if (form) form.addEventListener('submit', handleSubscribe);
+      });
+    </script>
   </body>
 </html>

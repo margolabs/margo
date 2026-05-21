@@ -23,7 +23,11 @@ import {
   OPEN_STATUSES,
   type InboxFilters as InboxFilterState,
 } from "./inbox-view.js";
-import { installNetworkTap } from "./network.js";
+import {
+  installNetworkTap,
+  recordInteraction,
+  getRequestsSinceInteraction,
+} from "./network.js";
 import { installRequestLauncher, REQUEST_PINS_CSS } from "./request-pins.js";
 import type { Comment, CommentType, GitState } from "../shared/types.js";
 
@@ -46,6 +50,30 @@ export function start(opts: StartOptions): void {
   // of recent fetch/XHR calls to pick from. Idempotent across reinstalls
   // (HMR, double-imports). See package/src/overlay/network.ts.
   installNetworkTap();
+
+  // Track when the user last interacted with the page (any click/submit/
+  // Enter not inside the margo overlay). We use this to attribute network
+  // activity to "the click that caused it": when the user later pins an
+  // element, the captured target carries the recent requests that fired
+  // in the causal window. Heuristic (time-window, not trace-based) but
+  // accurate enough most of the time. Skipping events targeting [data-margo]
+  // is essential — clicking the FAB or the inbox must not poison the
+  // window for the next page interaction.
+  const markInteraction = (ev: Event): void => {
+    const t = ev.target as Element | null;
+    if (t && t.closest && t.closest("[data-margo]")) return;
+    recordInteraction();
+  };
+  document.addEventListener("click", markInteraction, true);
+  document.addEventListener("submit", markInteraction, true);
+  document.addEventListener(
+    "keydown",
+    (ev) => {
+      if ((ev as KeyboardEvent).key !== "Enter") return;
+      markInteraction(ev);
+    },
+    true,
+  );
 
   const sync = new SyncClient();
   const store = new Map<string, Comment>();
@@ -1499,11 +1527,24 @@ function enablePinComposer(
         captured.coords = { x: e.clientX, y: e.clientY };
         captured.viewport = { w: window.innerWidth, h: window.innerHeight };
       }
+      // Auto-attach recent fetch/XHR activity that fired in the causal
+      // window after the user's last non-overlay interaction. Heuristic —
+      // could include the occasional unrelated parallel call — but gives
+      // AI the "what API did this button just hit?" context for free.
+      // Empty array when no interaction is recorded yet or no requests
+      // landed in the window; that field stays omitted from the file.
+      const related = getRequestsSinceInteraction();
+      if (related.length > 0) {
+        captured.relatedRequests = related;
+      }
+      const composerMessage = hasSelection
+        ? `On selected text: "${truncate(sel!.toString().trim().replace(/\s+/g, " "), 80)}"`
+        : related.length > 0
+          ? `${related.length} recent ${related.length === 1 ? "request" : "requests"} will be attached: ${related.map((r) => `${r.method} ${requestPathname(r.endpoint)} (${r.status || "ERR"})`).join(", ")}`
+          : undefined;
       const body = await uiPrompt({
         title: "New comment",
-        message: hasSelection
-          ? `On selected text: "${truncate(sel!.toString().trim().replace(/\s+/g, " "), 80)}"`
-          : undefined,
+        message: composerMessage,
         placeholder:
           "What's up with this? Prefix with ? for question, // for discussion.",
         multiline: true,

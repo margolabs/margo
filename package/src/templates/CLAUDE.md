@@ -22,6 +22,7 @@ This repo uses **margo** — a live-app feedback layer where teammates pin comme
 - Never set `status: resolved`. Only humans do that. Your terminal states are `ready-for-review` and `blocked`.
 - When you change code that affects a pinned element, update the comment's `target` fields in the same edit so the pin still resolves.
 - `target.kind: 'request'` → comment is pinned to a captured network call, not a DOM element. The full workflow is in the `/margo` skill; in short, find the route handler for `target.request.endpoint` and act from there. Don't try to update the anchor — endpoints are stable.
+- `target.relatedRequests` (on element pins) → up to 5 recent network calls margo captured around the user's click. Treat as causal evidence: a failed call here is probably what the comment is about. Time-window correlation, not trace-based — occasional false positives. Don't update this field when fixing the code; it's a snapshot at pin time.
 - Commit message convention: `margo: <description>` for any commit that touches `.margo/`.
 
 For the full processing protocol see `.claude/skills/margo/SKILL.md`.

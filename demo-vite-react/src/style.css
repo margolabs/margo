@@ -4,6 +4,8 @@ body { margin: 0; }
 
 header { padding: 24px 32px; border-bottom: 1px solid #e5e7eb; }
 header h1 { margin: 0 0 10px; font-size: 22px; }
+.header-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.header-row h1 { flex: 1; min-width: 0; }
 nav { display: flex; gap: 20px; }
 nav a { color: #3b82f6; text-decoration: none; }
 
@@ -24,5 +26,63 @@ button.cta {
   border-radius: 8px; font-size: 14px; cursor: pointer; font: inherit; font-weight: 500;
 }
 button.cta:hover { background: #2563eb; }
+button.cta:disabled { background: #93c5fd; cursor: not-allowed; }
 button.cta-secondary { background: white; color: #111; border: 1px solid #e5e7eb; }
 button.cta-secondary:hover { background: #f9fafb; }
+
+/* — API health badge in the header — */
+.api-status {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #6b7280;
+  padding: 4px 10px; border: 1px solid #e5e7eb; border-radius: 9999px;
+  background: white;
+}
+.api-dot { width: 8px; height: 8px; border-radius: 50%; background: #d1d5db; }
+.api-status-ok { color: #047857; border-color: #a7f3d0; background: #ecfdf5; }
+.api-status-ok .api-dot { background: #10b981; }
+.api-status-down { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+.api-status-down .api-dot { background: #ef4444; }
+
+/* — Loading skeletons for /api/tiers — */
+.tier-skeleton { display: flex; flex-direction: column; gap: 8px; }
+.skel {
+  display: block; background: linear-gradient(90deg, #f3f4f6 0%, #e5e7eb 50%, #f3f4f6 100%);
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.4s ease-in-out infinite;
+  border-radius: 4px;
+}
+.skel-h { width: 40%; height: 14px; }
+.skel-price { width: 55%; height: 22px; margin: 4px 0 8px; }
+.skel-line { width: 90%; height: 12px; }
+.skel-line + .skel-line { width: 80%; }
+.skel-line + .skel-line + .skel-line { width: 60%; }
+.skel-btn { width: 100%; height: 34px; margin-top: 6px; border-radius: 8px; }
+@keyframes skel-shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+
+/* — Subscribe form — */
+.subscribe-form { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.subscribe-form input[type="email"] {
+  flex: 1; min-width: 200px;
+  padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 8px;
+  font: inherit; font-size: 14px;
+}
+.subscribe-form input[type="email"]:focus {
+  outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgb(59 130 246 / 0.15);
+}
+.subscribe-form input[type="email"]:disabled { background: #f9fafb; color: #9ca3af; }
+
+.subscribe-result {
+  margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; font-size: 13px;
+  display: inline-block; font-family: ui-sans-serif, system-ui, sans-serif;
+}
+.subscribe-result code { font-size: 12px; padding: 1px 6px; background: rgb(0 0 0 / 0.05); border-radius: 4px; }
+.subscribe-result-ok { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+.subscribe-result-error.subscribe-result-4xx {
+  background: #fffbeb; color: #b45309; border: 1px solid #fde68a;
+}
+.subscribe-result-error.subscribe-result-5xx {
+  background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca;
+}

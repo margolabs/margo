@@ -111,6 +111,77 @@ export function subscribeCapture(listener: Listener): () => void {
   }
 }
 
+// ─── Interaction-to-request correlation ─────────────────────────────────
+//
+// When the user pins a DOM element, margo wants to surface the network
+// activity their click likely caused — closing the loop between UI symptom
+// and backend behavior. We don't have a true trace ID injected through the
+// server, so the correlation is heuristic: requests whose `timestamp` falls
+// within a short window after the user's last interaction with the page.
+//
+// The window is wide enough to catch round-trips that take a couple of
+// seconds (slow APIs, retries) but tight enough that idle background calls
+// (analytics polls, prefetch) don't get attached to every pin.
+
+/** Milliseconds since epoch of the last non-overlay interaction. Updated
+ *  by recordInteraction(); read by getRequestsSinceInteraction(). */
+let lastInteractionAt: number | null = null
+
+/** Default causal window: 3 seconds after the click/submit/keypress. */
+const INTERACTION_WINDOW_MS = 3000
+
+/** Default cap on attached requests. Five is roughly the noise/signal
+ *  threshold — past that, AI gets too much chaff for the same pin. */
+const MAX_RELATED_REQUESTS = 5
+
+/**
+ * Mark "the user just did something." Call this from any user-input
+ * listener (click, submit, Enter keypress) that ISN'T part of the margo
+ * overlay itself. Margo's own DOM interactions must not poison the window.
+ */
+export function recordInteraction(at: number = Date.now()): void {
+  lastInteractionAt = at
+}
+
+/**
+ * Return the settled requests that fired within the causal window of the
+ * most recent user interaction. Newest-first, capped at `maxCount`.
+ * Returns an empty array when no interaction has been recorded yet (e.g.
+ * the user pinned something via keyboard before clicking anything) or
+ * when no requests landed in the window.
+ *
+ * Only the RequestAnchor-shaped subset is returned (no internal id, no
+ * pending phase) — the consumer attaches this directly to a Comment's
+ * `target.relatedRequests` array.
+ */
+export function getRequestsSinceInteraction(
+  windowMs: number = INTERACTION_WINDOW_MS,
+  maxCount: number = MAX_RELATED_REQUESTS,
+): RequestAnchor[] {
+  if (lastInteractionAt === null) return []
+  const cutoff = lastInteractionAt
+  const ceiling = cutoff + windowMs + 500 // small grace for response settle
+  const out: RequestAnchor[] = []
+  for (const r of buf) {
+    if (r.phase !== 'settled') continue
+    const t = Date.parse(r.timestamp)
+    if (Number.isNaN(t)) continue
+    if (t < cutoff || t > ceiling) continue
+    // CapturedRequest extends RequestAnchor — strip the local-only fields
+    // (id, phase, error) before exposing to comment storage.
+    out.push({
+      method: r.method,
+      endpoint: r.endpoint,
+      status: r.status,
+      statusText: r.statusText,
+      duration: r.duration,
+      timestamp: r.timestamp,
+    })
+    if (out.length >= maxCount) break
+  }
+  return out
+}
+
 function installFetchTap(): void {
   const original = window.fetch.bind(window)
   const wrapped: TappedFetch = function (

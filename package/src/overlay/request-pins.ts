@@ -51,23 +51,12 @@ export function installRequestLauncher(opts: RequestLauncherOpts): void {
   // user never touches this FAB.
   let panel: HTMLElement | null = null
   let unsubscribeCapture: (() => void) | null = null
-  let onDocClick: ((e: MouseEvent) => void) | null = null
-  let onKeydown: ((e: KeyboardEvent) => void) | null = null
-
   const isOpen = (): boolean => panel !== null && panel.isConnected
 
   const closePanel = (): void => {
     if (unsubscribeCapture) {
       unsubscribeCapture()
       unsubscribeCapture = null
-    }
-    if (onDocClick) {
-      document.removeEventListener('mousedown', onDocClick, true)
-      onDocClick = null
-    }
-    if (onKeydown) {
-      document.removeEventListener('keydown', onKeydown, true)
-      onKeydown = null
     }
     if (panel && panel.isConnected) panel.remove()
     panel = null
@@ -84,31 +73,17 @@ export function installRequestLauncher(opts: RequestLauncherOpts): void {
     opts.root.appendChild(panel)
     renderRows(panel)
 
-    // Re-render on every capture event while open. Cheap: at most 50 rows,
-    // and the panel is short-lived (open → pick → close).
+    // Re-render on every capture event while open. Cheap: at most 50 rows.
     unsubscribeCapture = subscribeCapture(() => {
       if (panel) renderRows(panel)
     })
 
-    // Outside-click closes. Use mousedown + capture so we beat any handler
-    // inside the panel that stops propagation, and so a drag-select inside
-    // the panel doesn't close it on the trailing mouseup.
-    onDocClick = (e: MouseEvent) => {
-      const target = e.target as Node | null
-      if (!target || !panel) return
-      if (panel.contains(target)) return
-      if (button.contains(target)) return  // the toggle itself handles open/close
-      closePanel()
-    }
-    document.addEventListener('mousedown', onDocClick, true)
-
-    onKeydown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation()
-        closePanel()
-      }
-    }
-    document.addEventListener('keydown', onKeydown, true)
+    // Panel persistence: matches the inbox panel's behavior. The panel
+    // stays open until the user explicitly dismisses it (× button or
+    // toggling the "+ request" sub-FAB again). Outside-click is NOT a
+    // close signal — you can pin elements / interact with the page
+    // while the panel is up. Escape is also a no-op here: the inbox
+    // panel ignores Escape too, so the request panel matches.
   }
 
   button.addEventListener('click', (e) => {
@@ -328,20 +303,44 @@ export const REQUEST_PINS_CSS = `
 }
 
 .margo-request-panel {
+  /* Mirrors the inbox panel's dimensions so the user can monitor recent
+     network traffic side-by-side with the inbox. Defaults to the same
+     right-edge position as the inbox; the :has() rule below shifts it
+     leftward when the inbox is ALSO open so they don't collide. */
   position: fixed;
-  bottom: 96px;
-  right: 64px;
-  width: 320px;
-  max-height: 50vh;
+  top: 16px;
+  right: 16px;
+  bottom: 16px;
+  width: min(380px, calc(100vw - 32px));
   display: flex;
   flex-direction: column;
   background: hsl(0 0% 100%);
   color: var(--margo-fg);
   border: 1px solid var(--margo-border);
   border-radius: 12px;
-  box-shadow: 0 10px 30px hsl(0 0% 0% / 0.12);
+  box-shadow: 0 12px 40px hsl(0 0% 0% / 0.18);
   overflow: hidden;
-  z-index: 2147483646;
+  z-index: 1000001;
+  transition: right 220ms cubic-bezier(0.4, 0, 0.2, 1);
+  animation: margo-request-panel-in 0.16s ease-out;
+}
+@keyframes margo-request-panel-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: none; }
+}
+/* When the inbox panel is also mounted, push the request panel to its
+   left so both are visible. 380px (inbox width) + 16px (inbox right
+   offset) + 12px (gap between the two) = 408px total offset. */
+body:has(.margo-inbox) .margo-request-panel {
+  right: 408px;
+}
+/* On narrow viewports, gracefully fall back to stacking: drop the
+   request panel back to right: 16 (it'll cover the inbox temporarily
+   but the user just closes one to see the other). */
+@media (max-width: 880px) {
+  body:has(.margo-inbox) .margo-request-panel {
+    right: 16px;
+  }
 }
 .margo-request-panel-head {
   display: flex;
