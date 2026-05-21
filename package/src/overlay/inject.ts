@@ -23,6 +23,8 @@ import {
   OPEN_STATUSES,
   type InboxFilters as InboxFilterState,
 } from "./inbox-view.js";
+import { installNetworkTap } from "./network.js";
+import { installRequestLauncher, REQUEST_PINS_CSS } from "./request-pins.js";
 import type { Comment, CommentType, GitState } from "../shared/types.js";
 
 interface StartOptions {
@@ -40,6 +42,10 @@ export function start(opts: StartOptions): void {
   root.dataset.margo = "";
   root.dataset.mode = opts.mode;
   document.body.appendChild(root);
+  // Begin watching network activity so the "+ request" sub-FAB has a buffer
+  // of recent fetch/XHR calls to pick from. Idempotent across reinstalls
+  // (HMR, double-imports). See package/src/overlay/network.ts.
+  installNetworkTap();
 
   const sync = new SyncClient();
   const store = new Map<string, Comment>();
@@ -426,6 +432,18 @@ export function start(opts: StartOptions): void {
 
   if (opts.mode === "dev") {
     enablePinComposer(root, sync, renderPins);
+    // Network-pin path — companion to enablePinComposer but for fetch/XHR
+    // captures. Lives in its own module to keep this file under control;
+    // host wires it up by passing the same helpers it gives the DOM path.
+    installRequestLauncher({
+      root,
+      currentRoute,
+      uiPrompt,
+      createComment: (req) => sync.createComment(req),
+      onCreated: () => {
+        void refetchAndRender(store, renderPins);
+      },
+    });
   }
 }
 
@@ -496,6 +514,9 @@ function renderAllPins(
     const isResolved =
       c.frontmatter.status === "resolved" || c.frontmatter.status === "wontfix";
     if (isResolved && !showResolved) continue;
+    // Request pins have no DOM anchor — they live in the inbox only.
+    // Skip element-resolution + on-page pin rendering for them.
+    if (c.frontmatter.target.kind === "request") continue;
     const result = resolveTarget(c.frontmatter.target, url);
     if (result.kind === "wrong-route") continue;
     // wrong-view: comment is for THIS route but a different view state
@@ -899,12 +920,21 @@ function renderInboxItem(
   item.dataset.status = c.frontmatter.status;
   if (isOrphan) item.dataset.orphan = "";
   const url = c.frontmatter.target.url || "/";
+  // For network-pin comments, replace the on-page URL display with a compact
+  // "METHOD /path (status)" chip. Helps triage when the inbox mixes element
+  // pins (location-on-the-page) with request pins (network calls).
+  const reqAnchor = c.frontmatter.target.kind === "request"
+    ? c.frontmatter.target.request
+    : undefined;
+  const urlDisplay = reqAnchor
+    ? `${reqAnchor.method} ${requestPathname(reqAnchor.endpoint)} (${reqAnchor.status || "ERR"})`
+    : url;
   const preview = (c.body.split(/\n---\n/)[0] || "")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 100);
   const author = c.frontmatter.authorName || c.frontmatter.author;
-  const orphanBadge = isOrphan
+  const orphanBadge = isOrphan && !reqAnchor
     ? `<span class="margo-inbox-item-orphan" title="Anchor not found on this view">${icon("warn", 10)}<span>anchor lost</span></span>`
     : "";
   const avatarColor = colorForEmail(c.frontmatter.author);
@@ -917,7 +947,7 @@ function renderInboxItem(
       <span class="margo-inbox-item-head">
         <code class="margo-inbox-item-id">${escapeHtml(c.frontmatter.id)}</code>
         ${orphanBadge}
-        <span class="margo-inbox-item-url">${escapeHtml(url)}</span>
+        <span class="margo-inbox-item-url" data-kind="${reqAnchor ? "request" : "element"}">${escapeHtml(urlDisplay)}</span>
         <span class="margo-inbox-item-status" data-status="${escapeHtml(c.frontmatter.status)}">${escapeHtml(c.frontmatter.status)}</span>
       </span>
       <span class="margo-inbox-item-body">${escapeHtml(preview) || "<em>(empty)</em>"}</span>
@@ -935,6 +965,19 @@ function renderInboxItem(
     );
   }
   return item;
+}
+
+/**
+ * Render an endpoint URL down to its pathname for inbox-row display.
+ * Defensive: a bad-stringify path returns the raw input rather than
+ * blowing up the renderer.
+ */
+function requestPathname(endpoint: string): string {
+  try {
+    return new URL(endpoint, "http://_").pathname;
+  } catch {
+    return endpoint;
+  }
 }
 
 function navigateToComment(targetUrl: string, commentId: string): void {
@@ -3723,6 +3766,11 @@ function injectStyles(): void {
       border-color: hsl(0 72% 51%);
     }
     .margo-modal-confirm.margo-modal-destructive:hover { background: hsl(0 72% 44%); }
+    ${REQUEST_PINS_CSS}
   `;
   document.head.appendChild(style);
 }
+
+// Network-request interception lives in ./network.ts (fetch + XHR taps,
+// ring buffer, subscriber API). The "+ request" sub-FAB and its picker
+// panel live in ./request-pins.ts. Both are wired up in start() above.

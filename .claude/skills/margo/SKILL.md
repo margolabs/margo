@@ -9,7 +9,7 @@ margo is a feedback layer where designers, PMs, and devs leave comments on the l
 
 ## How to read the inbox
 
-1. Read `.margo/comments/*.md` (one file per comment).
+1. Read `.margo/comments/*.md` (one file per comment). Comments are anchored to a DOM element by default, but some are anchored to a captured network request instead — see **Request pins** below.
 2. Filter: `status` ∈ {`open`, `in-progress`} AND `type: task`. Skip `resolved`, `wontfix`, `ready-for-review`, and `blocked` — those are terminal or already-acted-on states. `wontfix` is the "Dismiss" verdict and is reversible only by humans clicking Reopen; do not re-process it.
 3. Sort by `created` ascending (oldest first), but bump anything with `@ai` in the body to the top.
 4. Skip `type: discussion` (humans only — never modify code in response to these). For `type: question`, answer in-thread but do not modify code.
@@ -18,7 +18,7 @@ margo is a feedback layer where designers, PMs, and devs leave comments on the l
 
 For each `type: task` comment:
 
-1. **Read the body and the target.** The `target` block tells you which page (`url`) and which element (`selector`, `text`, `role`, `coords`). If the selector doesn't resolve in the current code, fall back to text + role to locate the element. The `branch` field tells you which branch the comment was authored on — usually the same one you're on.
+1. **Read the body and the target.** If `target.kind` is `'request'`, follow the **Request pins** flow below; otherwise the existing element-pin instructions apply. The `target` block tells you which page (`url`) and which element (`selector`, `text`, `role`, `coords`). If the selector doesn't resolve in the current code, fall back to text + role to locate the element. The `branch` field tells you which branch the comment was authored on — usually the same one you're on.
 2. **Decide if you can act.**
    - If the request is concrete and you have enough context: make the code change.
    - If the request is ambiguous or contradicts another comment / spec: ask in-thread, do not change code yet.
@@ -37,6 +37,34 @@ For each `type: task` comment:
      - leave `open` — you asked for clarification
 4. **Update the anchor if you moved the element.** If your code change modified the element a comment is pinned to (renamed a class, changed text, restructured the DOM), update the `target` fields (`selector`, `text`, `viewport`) so the pin still resolves on next view. Do this in the same edit.
 5. **Never mark `resolved` or `wontfix` yourself.** Both are human-only verdicts (`resolved` = "done, approved"; `wontfix` = "Dismiss — we considered this and decided against it"). Your terminal states are `ready-for-review` or `blocked`.
+
+## Request pins
+
+When `target.kind` is `'request'`, the comment is anchored to a captured network call — not a DOM element. The `target.request` block has the shape:
+
+```yaml
+target:
+  url: https://app.example.com/signup   # the page the user was on
+  kind: request
+  request:
+    method: POST                        # GET, POST, PATCH, DELETE, …
+    endpoint: https://api.example.com/api/subscribe
+    status: 500                         # 0 for network errors
+    statusText: Internal Server Error   # may be empty under HTTP/2
+    duration: 142                       # ms; optional
+    timestamp: '2026-05-21T03:14:00Z'   # ISO, when the request settled
+```
+
+(When `target.kind` is `'element'` or absent, treat it as the default element-pin variant — every existing element-pin instruction above still applies.)
+
+How this changes the workflow:
+
+1. **Detect at the top.** Branch on `target.kind === 'request'` before you start looking for an element. The element-pin steps assume a DOM target exists; for request pins it doesn't, and `target.selector` / `target.text` / `target.coords` are not meaningful even if present.
+2. **The brief is the request.** Method + endpoint + status + the comment body are all you get. **Bodies are not captured** (privacy + comment-file size). If you need the request or response body to reason about the bug, reproduce the call yourself (curl / a test) or scan recent dev-server logs — don't ask the human for it as a first move.
+3. **Server-side bug** (the handler is wrong): grep the server for the path segment of `target.request.endpoint` (e.g. `/api/subscribe`) — look for `app.<verb>('/api/subscribe')`, `router.<verb>(...)`, Next.js Route Handlers under the matching `app/api/.../route.ts`, NestJS controllers, etc. Find the handler, reason about why it produced that status, fix it. Status discipline is identical to element pins: `ready-for-review` after a confident code change, `blocked` if you can't reason about it.
+4. **Client-side mistake** (the caller is wrong — e.g. "we shouldn't be hitting this endpoint from the SSO flow at all"): grep the *client* for the endpoint URL or its path segment, find the call site, and either fix the call or remove it. Same status discipline.
+5. **Don't update the anchor.** Unlike element pins, request anchors don't get rewritten by code changes — the endpoint URL is stable across refactors of the handler or the caller. Skip step 4 of the element-pin flow for request pins; `target.request` stays as-is.
+6. **Reply etiquette is unchanged**: append an `ai-reply` block with what you did or what's blocking you, and set `status` to `ready-for-review` or `blocked`. Never set `resolved` or `wontfix`.
 
 ## How to commit
 

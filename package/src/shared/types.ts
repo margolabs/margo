@@ -25,8 +25,41 @@ export interface GapAnchor {
   axis: 'vertical' | 'horizontal'; // vertical = stacked (gap is bottom-of-A → top-of-B)
 }
 
+/**
+ * Discriminator for what kind of "thing" a pin is anchored to.
+ *
+ * `element` (default, omitted in existing comments) — the original margo
+ * pin: anchored to a DOM element via selector + text + role + coords.
+ *
+ * `request` — anchored to a captured network call (fetch/XHR) seen by
+ * the overlay's interceptor. No DOM target; the pin lives in the inbox
+ * only. AI uses the `request` field to find the matching route handler.
+ *
+ * Comments authored before this field existed implicitly have `kind:
+ * 'element'`. Keep the field optional at the schema level so a missing
+ * value means element, preserving backward compatibility.
+ */
+export type TargetKind = 'element' | 'request';
+
+/**
+ * Snapshot of a network call captured by the overlay's fetch/XHR
+ * interceptor at pin time. Headers and body are intentionally omitted
+ * in v1 — privacy concerns + comment-file size — and will be added in a
+ * follow-up if AI processing demands them.
+ */
+export interface RequestAnchor {
+  method: string;            // GET, POST, PATCH, DELETE, …
+  endpoint: string;          // fully-qualified URL of the captured call
+  status: number;            // HTTP status returned. 0 for network errors.
+  statusText?: string;       // e.g. 'Not Found'. Often empty for HTTP/2.
+  duration?: number;         // ms, from fetch dispatch to response settle
+  timestamp: string;         // ISO when the request settled
+}
+
 export interface Target {
   url: string;
+  /** What the pin is anchored to. Omitted/missing => 'element'. */
+  kind?: TargetKind;
   selector: string;
   text: string;
   role?: string;
@@ -34,6 +67,8 @@ export interface Target {
   coords: { x: number; y: number };
   textAnchor?: TextAnchor;
   gapAnchor?: GapAnchor;
+  /** Populated when `kind === 'request'`. The network call's metadata. */
+  request?: RequestAnchor;
   // Short SHA of HEAD when the pin was authored. Lets viewers detect
   // "this pin was made against a different commit than what I'm rendering."
   commit?: string;
