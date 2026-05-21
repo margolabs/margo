@@ -16,9 +16,11 @@ const URL = process.env.OG_URL ?? 'https://www.margo-dev.com';
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({
   // Standard Open Graph / Twitter card size. Both Facebook and Twitter
-  // crop or pad at this ratio (1.91:1).
+  // crop or pad at this ratio (1.91:1). deviceScaleFactor stays at 1 so
+  // the output PNG is exactly 1200×630 — OG validators flag any deviation
+  // from those exact dimensions (cropping/padding is platform-dependent).
   viewport: { width: 1200, height: 630 },
-  deviceScaleFactor: 2, // higher DPI so the screenshot looks crisp on retina
+  deviceScaleFactor: 1,
 });
 
 await page.goto(URL, { waitUntil: 'networkidle' });

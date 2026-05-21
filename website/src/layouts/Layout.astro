@@ -5,7 +5,10 @@ interface Props {
 }
 
 const {
-  title = 'margo — pin comments on your live app, AI implements them',
+  // Title kept under 60 chars so OG validators don't flag it. Platforms
+  // (Facebook, Twitter, LinkedIn, Slack) truncate longer titles in their
+  // unfurl previews — shorter is the safer optimization.
+  title = 'margo — pin live-app comments, AI implements them',
   description = 'Live-app feedback layer for AI-coding teams. Comments live as files in your repo; AI works through them.',
 } = Astro.props;
 
