@@ -16,6 +16,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { loadMargoConfig } from '../config/load.js'
 import { RemoteTransport } from '../storage/remote-transport.js'
+import { ConflictError } from '../storage/transport.js'
 
 export interface WatchOptions {
   cwd: string
@@ -123,8 +124,30 @@ export async function watch(opts: WatchOptions): Promise<void> {
       // echo it back via SSE and we don't want that echo to come back
       // around as another push.
       expectedHashes.set(file, hash)
-      await transport.write(id, raw, 'pushed via margo watch')
-      console.log(`[margo watch] → host updated ${id}`)
+      const etag = transport.getKnownEtag(id)
+      try {
+        await transport.write(id, raw, 'pushed via margo watch', etag ? { ifMatch: etag } : undefined)
+        console.log(`[margo watch] → host updated ${id}`)
+      } catch (err) {
+        if (err instanceof ConflictError) {
+          // Someone updated the host between our last read and this
+          // write. Refetch their version into the cache so the local
+          // file converges on the host's truth — preserving consistency
+          // over local edit preservation. The lost edit is annoying but
+          // the alternative (forcing overwrite) defeats the purpose of
+          // having ETags at all.
+          const fresh = await transport.read(id)
+          if (fresh) {
+            await writeCacheFile(id, fresh.raw)
+            console.warn(`[margo watch] CONFLICT on ${id}: host had a newer version, replaced local file. Your edit is lost.`)
+          } else {
+            console.warn(`[margo watch] CONFLICT on ${id}: comment was deleted on host; removing local file.`)
+            await fs.unlink(file).catch(() => undefined)
+          }
+        } else {
+          throw err
+        }
+      }
     } catch (err) {
       console.warn(`[margo watch] push failed for ${file}: ${(err as Error).message}`)
     }

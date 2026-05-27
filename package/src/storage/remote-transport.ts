@@ -14,12 +14,13 @@
 
 import { parseComment } from '../shared/frontmatter.js'
 import type { Comment } from '../shared/types.js'
-import type {
-  ChangeEvent,
-  Identity,
-  RemoteChanges,
-  RemoteChangesListener,
-  Transport,
+import {
+  ConflictError,
+  type ChangeEvent,
+  type Identity,
+  type RemoteChanges,
+  type RemoteChangesListener,
+  type Transport,
 } from './transport.js'
 
 export interface RemoteTransportOptions {
@@ -37,11 +38,22 @@ export class RemoteTransport implements Transport {
   private readonly token: string
   private readonly changeListeners = new Set<(ev: ChangeEvent) => void>()
   private sseAbort: AbortController | null = null
+  /** Latest ETag we've seen per comment id (from GET or PUT responses).
+   *  Used to populate If-Match on subsequent writes for optimistic
+   *  concurrency control. Cleared on SSE 'deleted'; refreshed on each
+   *  read/write round-trip. */
+  private readonly etags = new Map<string, string>()
 
   constructor(opts: RemoteTransportOptions) {
     // Strip trailing slash so URL composition stays clean (`${base}/api/...`).
     this.base = opts.serverUrl.replace(/\/+$/, '') + `/api/projects/${encodeURIComponent(opts.project)}`
     this.token = opts.token
+  }
+
+  /** Most recent ETag for a comment id, if any has been observed. Callers
+   *  pass this back as `opts.ifMatch` on the next write for that id. */
+  getKnownEtag(id: string): string | undefined {
+    return this.etags.get(id)
   }
 
   // ─── Comment CRUD ───────────────────────────────────────────────────────
@@ -58,6 +70,7 @@ export class RemoteTransport implements Transport {
     if (res.status === 404) return null
     if (!res.ok) throw await asError(res, 'read')
     const raw = await res.text()
+    this.captureEtag(id, res)
     try {
       return parseComment(raw, '')
     } catch {
@@ -65,16 +78,37 @@ export class RemoteTransport implements Transport {
     }
   }
 
-  async write(id: string, raw: string, _commitMessage: string): Promise<void> {
+  async write(id: string, raw: string, _commitMessage: string, opts?: { ifMatch?: string }): Promise<void> {
+    const headers: Record<string, string> = { 'content-type': 'text/markdown; charset=utf-8' }
+    if (opts?.ifMatch) headers['if-match'] = quoteEtag(opts.ifMatch)
     const res = await this.fetch(`${this.base}/comments/${encodeURIComponent(id)}`, {
       method: 'PUT',
-      headers: { 'content-type': 'text/markdown; charset=utf-8' },
+      headers,
       body: raw,
     })
+    if (res.status === 412) {
+      // Server has a different version than we expected. Surface the
+      // current ETag if the response body included one (the host sends
+      // `{ error, current }` on conflicts) so the caller can refetch.
+      let currentEtag: string | null = null
+      try {
+        const body = (await res.json()) as { current?: string }
+        if (typeof body.current === 'string') currentEtag = body.current
+      } catch { /* response may be plain text — fall through with null */ }
+      this.etags.delete(id) // ours is stale; force a refetch
+      throw new ConflictError(currentEtag, id)
+    }
     // commitMessage is shaped by the host (it knows the actor's identity).
     // The argument is part of the Transport contract so the local transport
     // can use it; the remote transport intentionally ignores it.
     if (!res.ok) throw await asError(res, 'write')
+    this.captureEtag(id, res)
+  }
+
+  private captureEtag(id: string, res: Response): void {
+    const raw = res.headers.get('etag')
+    if (!raw) return
+    this.etags.set(id, unquoteEtag(raw))
   }
 
   async remove(id: string, _commitMessage: string): Promise<void> {
@@ -218,6 +252,11 @@ export class RemoteTransport implements Transport {
             try {
               const ev = JSON.parse(payload) as unknown
               if (isChangeEvent(ev)) {
+                // Invalidate stale ETags before fanning out — a deleted
+                // comment can't be written-with-If-Match, and an updated
+                // one has a new ETag we'll only learn from the next read.
+                if (ev.type === 'deleted') this.etags.delete(ev.id)
+                else if (ev.type === 'updated') this.etags.delete(ev.id)
                 for (const fn of this.changeListeners) fn(ev)
               }
             } catch {
@@ -234,6 +273,18 @@ export class RemoteTransport implements Transport {
       backoffMs = Math.min(backoffMs * 2, 10_000)
     }
   }
+}
+
+/** ETag values are quoted per RFC 7232. We store the bare hash internally
+ *  for simpler comparisons, and re-quote on the wire. */
+function quoteEtag(v: string): string {
+  return v.startsWith('"') ? v : `"${v}"`
+}
+
+function unquoteEtag(v: string): string {
+  const trimmed = v.trim()
+  if (trimmed.startsWith('W/')) return trimmed.slice(2).replace(/^"|"$/g, '')
+  return trimmed.replace(/^"|"$/g, '')
 }
 
 function isChangeEvent(v: unknown): v is ChangeEvent {

@@ -15,6 +15,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { loadMargoConfig } from '../config/load.js'
 import { RemoteTransport } from '../storage/remote-transport.js'
+import { ConflictError } from '../storage/transport.js'
 
 interface SyncContext {
   cwd: string
@@ -116,19 +117,34 @@ export async function push(opts: { cwd: string; id?: string }): Promise<void> {
     }
   }
   let pushed = 0
+  let conflicted = 0
   let failed = 0
   for (const f of files) {
     const id = f.replace(/\.md$/, '')
     const file = path.join(ctx.commentsDir, f)
     try {
       const raw = await fs.readFile(file, 'utf8')
-      await ctx.transport.write(id, raw, `pushed via margo push`)
+      // Read first to capture the host's current ETag. The next write
+      // uses it as If-Match so a parallel update between this read and
+      // our write surfaces as 412 instead of silently clobbering.
+      await ctx.transport.read(id).catch(() => null)
+      const etag = ctx.transport.getKnownEtag(id)
+      await ctx.transport.write(id, raw, `pushed via margo push`, etag ? { ifMatch: etag } : undefined)
       pushed++
     } catch (err) {
-      failed++
-      console.warn(`[margo push] ${id}: ${(err as Error).message}`)
+      if (err instanceof ConflictError) {
+        conflicted++
+        console.warn(`[margo push] CONFLICT on ${err.id}: host has a newer version, leaving local file untouched.`)
+        console.warn(`             run \`margo pull\` (or merge by hand) and \`margo push --id ${err.id}\` again.`)
+      } else {
+        failed++
+        console.warn(`[margo push] ${id}: ${(err as Error).message}`)
+      }
     }
   }
-  console.log(`[margo push] uploaded ${pushed} comment(s)${failed > 0 ? `, ${failed} failed` : ''}.`)
+  const summary = [`uploaded ${pushed}`]
+  if (conflicted) summary.push(`${conflicted} conflict(s)`)
+  if (failed) summary.push(`${failed} failed`)
+  console.log(`[margo push] ${summary.join(', ')}.`)
   await ctx.transport.close()
 }

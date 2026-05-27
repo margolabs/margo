@@ -16,6 +16,7 @@
 // /__margo/git-state even in server mode, because it describes the
 // user's code, not the comment store.
 
+import * as crypto from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { authenticate, authorize, AuthError, type AuthConfig, type AuthIdentity } from './auth.js'
 import { ProjectStore } from './store.js'
@@ -113,7 +114,10 @@ async function handleRead(
     sendJson(res, 404, { error: 'not found' })
     return
   }
-  res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' }).end(found.raw)
+  res.writeHead(200, {
+    'content-type': 'text/markdown; charset=utf-8',
+    etag: `"${etagOf(found.raw)}"`,
+  }).end(found.raw)
 }
 
 async function handleWrite(
@@ -129,14 +133,46 @@ async function handleWrite(
     sendJson(res, 400, { error: 'empty body' })
     return
   }
-  const existed = !!(await ctx.store.read(project, id))
+  // Optimistic concurrency: if the caller passed If-Match, the stored
+  // content's current ETag must match. Returning the current ETag in
+  // the 412 body lets the caller refetch without a second round-trip.
+  const ifMatch = readIfMatch(req)
+  const existing = await ctx.store.read(project, id)
+  if (ifMatch !== null && existing) {
+    const currentEtag = etagOf(existing.raw)
+    if (ifMatch !== currentEtag) {
+      res.writeHead(412, {
+        'content-type': 'application/json',
+        etag: `"${currentEtag}"`,
+      }).end(JSON.stringify({ error: 'etag mismatch', current: currentEtag }))
+      return
+    }
+  }
+  const existed = !!existing
   await ctx.store.write(project, id, raw, {
     commitMessage: existed ? `update on ${id}` : `comment ${id} by ${identity.email}`,
     authorEmail: identity.email,
     authorName: identity.name,
   })
   ctx.broadcast(project, { type: existed ? 'updated' : 'created', id })
-  sendJson(res, existed ? 200 : 201, { ok: true })
+  res.writeHead(existed ? 200 : 201, {
+    'content-type': 'application/json',
+    etag: `"${etagOf(raw)}"`,
+  }).end(JSON.stringify({ ok: true }))
+}
+
+function etagOf(raw: string): string {
+  return crypto.createHash('sha256').update(raw).digest('hex')
+}
+
+function readIfMatch(req: IncomingMessage): string | null {
+  const h = req.headers['if-match']
+  if (!h) return null
+  const raw = Array.isArray(h) ? h[0] : h
+  const trimmed = raw.trim()
+  if (trimmed === '*') return '*'
+  // RFC 7232 says values are quoted; tolerate unquoted from sloppy clients.
+  return trimmed.replace(/^"|"$/g, '')
 }
 
 async function handleDelete(

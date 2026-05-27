@@ -17,6 +17,16 @@
 
 import type { Comment } from '../shared/types.js'
 
+/** Thrown by `write` when the caller passed `opts.ifMatch` and the stored
+ *  content's current ETag doesn't match. Carries the server's current
+ *  ETag so callers can refetch and decide whether to merge or surface
+ *  the conflict to the user. */
+export class ConflictError extends Error {
+  constructor(public readonly currentEtag: string | null, public readonly id: string) {
+    super(`conflict on ${id}: stored content has a different ETag than expected`)
+  }
+}
+
 /** Identity of the current user — the author recorded on new comments and
  *  replies. Source depends on transport (git config locally, auth token
  *  remotely). */
@@ -60,8 +70,15 @@ export interface Transport {
 
   /** Persist a comment's raw .md content (frontmatter + body). Implementations
    *  trigger history-recording side effects asynchronously (local: enqueue
-   *  git commit; remote: server commits internally on receive). */
-  write(id: string, raw: string, commitMessage: string): Promise<void>
+   *  git commit; remote: server commits internally on receive).
+   *
+   *  When `opts.ifMatch` is supplied, the implementation MUST refuse the
+   *  write if the stored content has a different ETag than the one the
+   *  caller is holding. Throws ConflictError on mismatch — callers
+   *  handle by refetching and merging. Implementations without real
+   *  optimistic-concurrency support (LocalTransport) MAY ignore the hint
+   *  silently. */
+  write(id: string, raw: string, commitMessage: string, opts?: { ifMatch?: string }): Promise<void>
 
   /** Remove a comment. Same async-history semantics as `write`. */
   remove(id: string, commitMessage: string): Promise<void>
