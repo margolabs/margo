@@ -1,23 +1,28 @@
 // Margo host — standalone server that stores comments for many projects.
 // One process serves many teams; each project gets its own subdirectory
-// + its own git history under `<dataRoot>/<project>/`. Clients reach the
-// host via HTTP from inside their dev plugin (RemoteTransport, planned)
-// or directly with curl for ops.
+// + its own git history under `<dataRoot>/<project>/`. Authentication is
+// per-user (phase 4): a JSON file `<dataRoot>/users.json` holds the
+// user roster and hashed bearer tokens.
 //
-// Phase 2 scope: single-user, one shared bearer token, no SQLite. The URL
-// shape (`/api/projects/:project/...`) is forward-compatible — adding
-// per-user identities + project rosters later means swapping the auth
-// layer, not the routes.
+// Backward compatibility (phase 2 → 4): if MARGO_HOST_TOKEN is set and
+// no users.json exists yet, we auto-bootstrap a single-user setup using
+// MARGO_HOST_USER_EMAIL/_NAME (or sensible defaults). Existing
+// operators upgrade with zero migration steps; the env var keeps
+// working as long as the bootstrapped user has it as a token.
 
 import * as http from 'node:http'
 import { dispatch, type RoutesContext, type SseSubscriber } from './routes.js'
 import { ProjectStore } from './store.js'
-import type { AuthConfig } from './auth.js'
+import { UserStore } from './user-store.js'
 
 export interface StartHostOptions {
   port: number
   dataRoot: string
-  auth: AuthConfig
+  /** UserStore backing token resolution. Caller is responsible for
+   *  having loaded it; startHost runs the auto-bootstrap path before
+   *  binding the socket if the store is empty and MARGO_HOST_TOKEN is
+   *  set. */
+  users: UserStore
 }
 
 export interface HostHandle {
@@ -29,9 +34,23 @@ export async function startHost(opts: StartHostOptions): Promise<HostHandle> {
   const store = new ProjectStore({ dataRoot: opts.dataRoot })
   const sseClients = new Map<string, Set<SseSubscriber>>()
 
+  // Auto-bootstrap from env: if the user database is empty and
+  // MARGO_HOST_TOKEN is set, create a single user + register the token.
+  // This keeps phase-2-era setups working without anyone re-running
+  // `margo host create-user` after an upgrade.
+  await maybeBootstrapFromEnv(opts.users)
+
+  const userCount = await opts.users.userCount()
+  if (userCount === 0) {
+    throw new Error(
+      '[margo-host] no users configured. Run `margo host create-user --email <e> --name <n>` to bootstrap, ' +
+        'or set MARGO_HOST_TOKEN + MARGO_HOST_USER_EMAIL + MARGO_HOST_USER_NAME for the legacy single-user mode.',
+    )
+  }
+
   const ctx: RoutesContext = {
     store,
-    auth: opts.auth,
+    auth: { users: opts.users },
     sseClients,
     broadcast(project, payload) {
       const data = `data: ${JSON.stringify(payload)}\n\n`
@@ -42,10 +61,6 @@ export async function startHost(opts: StartHostOptions): Promise<HostHandle> {
   }
 
   const server = http.createServer(async (req, res) => {
-    // CORS — clients (overlay, RemoteTransport) may sit on a different
-    // origin than the host (different port, different domain). Reflect
-    // the request's origin rather than wildcarding so credentials work
-    // for cookie-based auth schemes we might add later.
     res.setHeader('access-control-allow-origin', req.headers.origin ?? '*')
     res.setHeader('access-control-allow-methods', 'GET, POST, PUT, DELETE, OPTIONS')
     res.setHeader('access-control-allow-headers', 'content-type, authorization')
@@ -55,8 +70,6 @@ export async function startHost(opts: StartHostOptions): Promise<HostHandle> {
       res.writeHead(204).end()
       return
     }
-    // Health probe — unauthenticated so monitoring can hit it without a
-    // token. Returns 200 even when no projects exist.
     if (req.url === '/healthz' && req.method === 'GET') {
       res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}')
       return
@@ -74,7 +87,7 @@ export async function startHost(opts: StartHostOptions): Promise<HostHandle> {
 
   console.log(`[margo-host] listening on http://localhost:${opts.port}`)
   console.log(`[margo-host] data root: ${opts.dataRoot}`)
-  console.log(`[margo-host] identity:  ${opts.auth.identity.name} <${opts.auth.identity.email}>`)
+  console.log(`[margo-host] ${userCount} user(s) registered`)
 
   return {
     port: opts.port,
@@ -82,4 +95,20 @@ export async function startHost(opts: StartHostOptions): Promise<HostHandle> {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     },
   }
+}
+
+async function maybeBootstrapFromEnv(users: UserStore): Promise<void> {
+  await users.load()
+  if ((await users.userCount()) > 0) return
+  const envToken = process.env.MARGO_HOST_TOKEN
+  if (!envToken) return
+  const email = process.env.MARGO_HOST_USER_EMAIL ?? 'host-admin@localhost'
+  const name = process.env.MARGO_HOST_USER_NAME ?? 'margo host admin'
+  const user = await users.createUser(email, name)
+  // The env-supplied token isn't randomly-generated by us, so we route
+  // it through a dedicated path that hashes whatever the operator
+  // chose and stores it. This is the only place we accept a
+  // pre-existing plain token — everywhere else the host mints one.
+  await users.adoptToken(user.id, envToken, 'bootstrap-from-env')
+  console.log(`[margo-host] bootstrapped from MARGO_HOST_TOKEN as ${user.email} (id ${user.id})`)
 }

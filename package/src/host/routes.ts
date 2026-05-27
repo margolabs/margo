@@ -49,7 +49,7 @@ export async function dispatch(
   const [, project, rest] = m
 
   try {
-    const identity = authenticate(req, ctx.auth)
+    const identity = await authenticate(req, ctx.auth)
 
     if (rest === 'comments' && req.method === 'GET') {
       return await handleList(ctx, project, res)

@@ -20,6 +20,7 @@ import * as url from 'node:url';
 import { promisify } from 'node:util';
 import { serve } from '../cli/serve.js';
 import { startHost } from '../host/index.js';
+import { UserStore } from '../host/user-store.js';
 
 const execFileP = promisify(execFile);
 
@@ -37,7 +38,22 @@ const ROOT_CLAUDE_BLOCK = `${MARGO_BLOCK_START}
 This project uses margo for live-app feedback. See \`.margo/CLAUDE.md\` for how AI should engage with the comment inbox. The \`/margo\` skill triages and processes the open inbox.
 ${MARGO_BLOCK_END}`;
 
-const USAGE = 'usage: margo <init|install-skill|update|uninstall|serve|host> [--user|--project] [--port N] [--cwd DIR] [--data-dir DIR]';
+const USAGE = `usage: margo <command> [flags]
+
+Commands:
+  init              scaffold .margo/ in the current project
+  install-skill     install the /margo skill into Claude Code
+  update            update the .margo/ scaffold to the latest templates
+  uninstall         remove the .margo/ scaffold
+  serve             run the sidecar (proxy-mountable dev-time backend)
+  host              run the team host (server-mode storage backend)
+  host:create-user  --email E --name N [--data-dir DIR]
+  host:create-token --user-id ID --label L [--data-dir DIR]
+  host:list-users   [--data-dir DIR]
+  host:list-tokens  [--data-dir DIR]
+  host:revoke-token --token-id ID [--data-dir DIR]
+
+Common flags: --port N, --cwd DIR, --data-dir DIR, --user|--project`;
 
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? 'init';
@@ -63,6 +79,21 @@ async function main(): Promise<void> {
     case 'host':
       await runHost({ port: flags.port, dataDir: flags.dataDir ?? path.join(cwd, 'margo-data') });
       break;
+    case 'host:create-user':
+      await runCreateUser({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data'), email: flags.email, name: flags.name });
+      break;
+    case 'host:create-token':
+      await runCreateToken({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data'), userId: flags.userId, label: flags.label });
+      break;
+    case 'host:list-users':
+      await runListUsers({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data') });
+      break;
+    case 'host:list-tokens':
+      await runListTokens({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data') });
+      break;
+    case 'host:revoke-token':
+      await runRevokeToken({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data'), tokenId: flags.tokenId });
+      break;
     default:
       console.error(`unknown command: ${cmd}`);
       console.error(USAGE);
@@ -71,20 +102,9 @@ async function main(): Promise<void> {
 }
 
 async function runHost(opts: { port: number; dataDir: string }): Promise<void> {
-  // Token + identity come from env. Hard-fail on a missing token so an
-  // operator can't accidentally boot an unauthenticated server.
-  const token = process.env.MARGO_HOST_TOKEN;
-  if (!token) {
-    console.error('[margo host] MARGO_HOST_TOKEN env var is required');
-    process.exit(1);
-  }
-  const email = process.env.MARGO_HOST_USER_EMAIL ?? 'host-admin@localhost';
-  const name = process.env.MARGO_HOST_USER_NAME ?? 'margo host admin';
-  const handle = await startHost({
-    port: opts.port,
-    dataRoot: opts.dataDir,
-    auth: { token, identity: { email, name } },
-  });
+  const users = new UserStore(opts.dataDir);
+  await users.load();
+  const handle = await startHost({ port: opts.port, dataRoot: opts.dataDir, users });
   const shutdown = (): void => {
     void handle.close().then(() => process.exit(0));
   };
@@ -92,11 +112,82 @@ async function runHost(opts: { port: number; dataDir: string }): Promise<void> {
   process.once('SIGTERM', shutdown);
 }
 
+async function runCreateUser(opts: { dataDir: string; email?: string; name?: string }): Promise<void> {
+  if (!opts.email || !opts.name) {
+    console.error('usage: margo host:create-user --email <e> --name <n> [--data-dir DIR]');
+    process.exit(1);
+  }
+  const users = new UserStore(opts.dataDir);
+  const user = await users.createUser(opts.email, opts.name);
+  // Auto-issue a token on user creation — the operator almost always
+  // wants a token to hand to the new teammate, and a second command for
+  // that is friction.
+  const { record, plainToken } = await users.createToken(user.id, 'initial');
+  console.log(`created user ${user.id} (${user.email})`);
+  console.log(`token   ${record.id}  label=${record.label}`);
+  console.log('');
+  console.log('  TOKEN (shown once — store securely, the host only keeps a hash):');
+  console.log(`  ${plainToken}`);
+}
+
+async function runCreateToken(opts: { dataDir: string; userId?: string; label?: string }): Promise<void> {
+  if (!opts.userId || !opts.label) {
+    console.error('usage: margo host:create-token --user-id <id> --label <l> [--data-dir DIR]');
+    process.exit(1);
+  }
+  const users = new UserStore(opts.dataDir);
+  const { record, plainToken } = await users.createToken(opts.userId, opts.label);
+  console.log(`token ${record.id}  user=${record.userId}  label=${record.label}`);
+  console.log('');
+  console.log('  TOKEN (shown once — store securely):');
+  console.log(`  ${plainToken}`);
+}
+
+async function runListUsers(opts: { dataDir: string }): Promise<void> {
+  const users = new UserStore(opts.dataDir);
+  const list = await users.listUsers();
+  if (list.length === 0) {
+    console.log('(no users)');
+    return;
+  }
+  for (const u of list) {
+    console.log(`${u.id}  ${u.email}  ${u.name}  created=${u.createdAt}`);
+  }
+}
+
+async function runListTokens(opts: { dataDir: string }): Promise<void> {
+  const users = new UserStore(opts.dataDir);
+  const list = await users.listTokens();
+  if (list.length === 0) {
+    console.log('(no active tokens)');
+    return;
+  }
+  for (const t of list) {
+    const last = t.lastUsedAt ?? 'never';
+    console.log(`${t.id}  user=${t.userId}  label=${t.label}  prefix=${t.plainPrefix}…  last-used=${last}`);
+  }
+}
+
+async function runRevokeToken(opts: { dataDir: string; tokenId?: string }): Promise<void> {
+  if (!opts.tokenId) {
+    console.error('usage: margo host:revoke-token --token-id <id> [--data-dir DIR]');
+    process.exit(1);
+  }
+  const users = new UserStore(opts.dataDir);
+  await users.revokeToken(opts.tokenId);
+  console.log(`revoked token ${opts.tokenId}`);
+}
+
 function parseFlags(args: string[]): {
   scope: 'project' | 'user';
   port: number;
   cwd?: string;
   dataDir?: string;
+  email?: string;
+  name?: string;
+  userId?: string;
+  label?: string;
+  tokenId?: string;
 } {
   const user = args.includes('--user');
   const project = args.includes('--project');
@@ -109,6 +200,11 @@ function parseFlags(args: string[]): {
     port: readValueFlag(args, '--port', 3001),
     cwd: readValueFlag(args, '--cwd', undefined),
     dataDir: readValueFlag(args, '--data-dir', undefined),
+    email: readValueFlag(args, '--email', undefined),
+    name: readValueFlag(args, '--name', undefined),
+    userId: readValueFlag(args, '--user-id', undefined),
+    label: readValueFlag(args, '--label', undefined),
+    tokenId: readValueFlag(args, '--token-id', undefined),
   };
 }
 
