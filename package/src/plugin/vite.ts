@@ -13,8 +13,8 @@ import type { ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
 import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } from '../server/endpoints.js';
 import type { SseClient } from '../server/handlers.js';
-import { CommentWatcher } from '../server/watcher.js';
-import { RemotePoller } from '../server/remote-poller.js';
+import { LocalTransport } from '../storage/local-transport.js';
+import type { Transport } from '../storage/transport.js';
 import type { MargoConfig } from '../shared/types.js';
 
 const PLUGIN_DIR = path.dirname(url.fileURLToPath(import.meta.url));
@@ -47,22 +47,26 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
   let commentsDir = '';
   let config: MargoConfig = DEFAULTS;
   const sseClients = new Set<SseClient>();
-  let watcher: CommentWatcher | undefined;
-  let poller: RemotePoller | undefined;
+  let transport: Transport | undefined;
 
-  const ctx = (): EndpointContext => ({
-    rootDir: viteRoot,
-    commentsDir,
-    config,
-    sseClients,
-    // Replay the most recent remote-changes payload so a tab that loaded
-    // after the poller's initial tick still sees the banner.
-    onSseClientConnect: (client) => {
-      const last = poller?.getLastPayload();
-      if (last) client.write(`data: ${JSON.stringify(last)}\n\n`);
-    },
-    onAfterSync: () => poller?.reset(),
-  });
+  const ctx = (): EndpointContext => {
+    if (!transport) throw new Error('[margo] transport not initialized');
+    return {
+      rootDir: viteRoot,
+      transport,
+      config,
+      sseClients,
+      // Replay the most recent remote-changes payload so a tab that loaded
+      // after the poller's initial tick still sees the banner.
+      onSseClientConnect: (client) => {
+        const last = transport?.getLastRemoteChanges();
+        if (last) {
+          client.write(`data: ${JSON.stringify({ type: 'remote-changes', ...last })}\n\n`);
+        }
+      },
+      onAfterSync: () => transport?.resetRemoteChanges(),
+    };
+  };
 
   return {
     name: 'margo',
@@ -85,6 +89,16 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
 
     configureServer(server) {
       if (opts.disabled) return;
+      // Construct the local-mode transport. Future: read margo.config.ts to
+      // pick LocalTransport vs RemoteTransport per workspace.
+      transport = new LocalTransport({ rootDir: viteRoot, commentsDir, config });
+      // Bridge transport events into the SSE stream so connected overlays
+      // re-render on file changes / upstream divergence.
+      transport.subscribe((e) => broadcastSse(ctx(), e));
+      transport.subscribeRemoteChanges((payload) => {
+        if (payload) broadcastSse(ctx(), { type: 'remote-changes', ...payload });
+      });
+
       server.middlewares.use(async (req, res, next) => {
         const u = req.url ?? '';
         if (u === '/__margo/overlay.js' || u === '/__margo/overlay.js.map') {
@@ -94,20 +108,9 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
         await handleEndpoint(ctx(), req, res);
       });
 
-      // SSE broadcast on local file changes, without waiting for git.
-      watcher = new CommentWatcher(commentsDir);
-      watcher.on('event', (e) => broadcastSse(ctx(), e));
-      watcher.start();
-
-      // Background fetch-and-notify: detect new teammate comments on upstream
-      // without pulling. Surfaces a banner the user clicks to /__margo/sync.
-      poller = new RemotePoller(viteRoot, config.git.remotePollIntervalMs);
-      poller.on('event', (e) => broadcastSse(ctx(), e));
-      poller.start();
-
       server.httpServer?.once('close', () => {
-        watcher?.stop();
-        poller?.stop();
+        void transport?.close();
+        transport = undefined;
       });
     },
 

@@ -4,24 +4,21 @@
 // because the streaming APIs (Node ServerResponse vs. Web ReadableStream) are
 // fundamentally different — but `broadcastSse` here writes through a
 // transport-supplied `SseClient` so handlers can fire events without caring.
+//
+// Storage (read/write comment files, identity, sync) is delegated to a
+// `Transport` (see ../storage/transport.ts). The current local-fs+git
+// behavior lives in LocalTransport; a future RemoteTransport will swap in
+// for server mode without touching this file.
 
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import { parseComment, serializeComment, appendReply } from '../shared/frontmatter.js';
+import { serializeComment, appendReply } from '../shared/frontmatter.js';
 import { newCommentId } from '../shared/id.js';
 import {
-  backgroundPull,
-  commitAndPush,
   getAheadBehind,
-  getAuthor,
   getCurrentBranch,
   getCurrentCommit,
-  getDeclaredRole,
   getDirtyState,
-  removeAndCommit,
-  setAuthor,
-  type GitOptions,
 } from './git.js';
+import type { Transport } from '../storage/transport.js';
 import type {
   Comment,
   CreateCommentRequest,
@@ -36,8 +33,12 @@ export interface SseClient {
 }
 
 export interface HandlerContext {
-  rootDir: string;       // git repo root
-  commentsDir: string;   // .margo/comments
+  /** Repo root — used for git-state diagnostics (commit/branch/dirty), which
+   *  always describes the user's code repo regardless of where comments are
+   *  stored. */
+  rootDir: string;
+  /** Storage backend — LocalTransport (current default) or RemoteTransport. */
+  transport: Transport;
   config: MargoConfig;
   sseClients: Set<SseClient>;
   // Called after a new SSE client is registered, so plugins can replay any
@@ -57,48 +58,15 @@ export class HandlerError extends Error {
   }
 }
 
-// Background git queue. Comment writes return to the client as soon as the
-// .md file is on disk; the git add/commit/pull/push runs after, serialized
-// through this promise chain. Two reasons for the chain:
-//
-//   1. UX: the user's POST returns in <50ms instead of waiting 2-3s for the
-//      git push to round-trip.
-//   2. Dev-server stability: `git pull --rebase --autostash` temporarily
-//      moves any unstaged changes via stash. Turbopack's file watcher sees
-//      those mtime changes and restarts the dev server — killing any
-//      in-flight HTTP request. With async git, the response has already
-//      flushed before the stash dance starts, so a restart never strands
-//      a client mid-request.
-//
-// Cost: errors during commit/push are visible in the dev-server console,
-// not surfaced to the client. Acceptable trade-off — the .md file is on
-// disk, so subsequent reads work; the user can `git status` to see the
-// uncommitted file if they care, and the next margo write retries the
-// queue from the top.
-let gitQueue: Promise<unknown> = Promise.resolve();
-
-function enqueueGitOp(label: string, op: () => Promise<unknown>): void {
-  gitQueue = gitQueue
-    .catch(() => undefined) // a prior failure mustn't poison subsequent ops
-    .then(() => op().catch((err) => {
-      console.error(`[margo] background git op failed (${label}):`, (err as Error).message);
-    }));
-}
-
 export async function listComments(ctx: HandlerContext): Promise<{ comments: Comment[] }> {
-  return { comments: await readAllComments(ctx.commentsDir) };
+  return { comments: await ctx.transport.list() };
 }
 
 export async function getMe(ctx: HandlerContext): Promise<{ email: string; name: string } | null> {
-  // Return null on missing config so the overlay can prompt for setup instead
-  // of treating the request as a 5xx and surfacing a cryptic "author api
-  // failed" error on the next pin attempt.
-  try {
-    const author = await getAuthor(ctx.rootDir);
-    return { email: author.email, name: author.name };
-  } catch {
-    return null;
-  }
+  // Return null on missing identity so the overlay can prompt for setup
+  // instead of treating the request as a 5xx and surfacing a cryptic
+  // "author api failed" error on the next pin attempt.
+  return await ctx.transport.getIdentity();
 }
 
 export async function setMe(
@@ -111,11 +79,15 @@ export async function setMe(
   // Permissive email regex — git itself doesn't validate, but a leading sanity
   // check catches typos before we shell out to `git config`.
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HandlerError(400, 'invalid email');
-  await setAuthor(name, email, ctx.rootDir);
+  await ctx.transport.setIdentity({ name, email });
   return { name, email };
 }
 
 export async function getGitState(ctx: HandlerContext): Promise<GitState> {
+  // Git state describes the user's working repo (used for pin diagnostics:
+  // "you're on a different commit / dirty tree than when the pin was made").
+  // It always reads from ctx.rootDir, NOT from the transport — even in server
+  // mode, the user's code repo is what we want to describe.
   const [commit, branch, dirtyState, aheadBehind] = await Promise.all([
     getCurrentCommit(ctx.rootDir),
     getCurrentBranch(ctx.rootDir).catch(() => 'unknown'),
@@ -137,8 +109,12 @@ export async function createComment(
   body: CreateCommentRequest,
 ): Promise<{ id: string }> {
   const id = newCommentId();
-  const author = await getAuthor(ctx.rootDir);
-  const role = await resolveRole(author.email, ctx.config, ctx.rootDir);
+  const identity = await ctx.transport.getIdentity();
+  if (!identity) throw new HandlerError(412, 'identity not configured');
+  const role = await resolveRole(identity.email, ctx);
+  // Git state captured into the pin still describes the user's working repo —
+  // independent of comment storage. Commit/branch/dirty go onto target so the
+  // pin can be diagnosed later ("pin made against commit X, dirty tree").
   const [branch, commit, dirtyState] = await Promise.all([
     getCurrentBranch(ctx.rootDir),
     getCurrentCommit(ctx.rootDir),
@@ -153,23 +129,19 @@ export async function createComment(
   const fm = {
     id,
     type: body.type ?? 'task',
-    author: author.email,
-    ...(author.name ? { authorName: author.name } : {}),
+    author: identity.email,
+    ...(identity.name ? { authorName: identity.name } : {}),
     ...(role ? { role } : {}),
     branch,
     created,
     status: 'open' as const,
     target,
   };
-  const file = path.join(ctx.commentsDir, `${id}.md`);
-  await fs.mkdir(ctx.commentsDir, { recursive: true });
-  await fs.writeFile(file, serializeComment(fm, body.body), 'utf8');
+  await ctx.transport.write(id, serializeComment(fm, body.body), `comment by ${identity.email} on ${body.target.url}`);
   // SSE fires immediately so the local overlay (and any other tabs on this
-  // dev server) re-render with the new pin without waiting on git.
+  // dev server) re-render with the new pin without waiting on the transport's
+  // own change notification round-trip.
   broadcastSse(ctx, { type: 'created', id });
-  enqueueGitOp(`comment ${id}`, () =>
-    commitAndPush([file], `comment by ${author.email} on ${body.target.url}`, gitOpts(ctx)),
-  );
   return { id };
 }
 
@@ -177,33 +149,30 @@ export async function updateComment(
   ctx: HandlerContext,
   body: UpdateCommentRequest,
 ): Promise<{ ok: true }> {
-  const file = path.join(ctx.commentsDir, `${body.id}.md`);
-  const raw = await fs.readFile(file, 'utf8');
-  const comment = parseComment(raw, file);
+  const comment = await ctx.transport.read(body.id);
+  if (!comment) throw new HandlerError(404, 'not found');
+  const identity = await ctx.transport.getIdentity();
+  if (!identity) throw new HandlerError(412, 'identity not configured');
   let newBody = comment.body;
   if (body.patch.reply) {
-    const author = await getAuthor(ctx.rootDir);
     newBody = appendReply(newBody, {
-      author: author.email,
-      role: await resolveRole(author.email, ctx.config, ctx.rootDir),
+      author: identity.email,
+      role: await resolveRole(identity.email, ctx),
       timestamp: new Date().toISOString(),
       body: body.patch.reply.body,
     });
   }
   const { reply: _reply, decisionSummary, ...fmPatch } = body.patch;
   const fm = { ...comment.frontmatter, ...fmPatch };
-  await fs.writeFile(file, serializeComment(fm, newBody), 'utf8');
+  await ctx.transport.write(body.id, serializeComment(fm, newBody), `update on ${body.id}`);
 
-  const filesToCommit = [file];
   if (body.patch.status === 'resolved' && decisionSummary && decisionSummary.trim()) {
-    const decisionsFile = await appendDecision(ctx, body.id, decisionSummary.trim());
-    filesToCommit.push(decisionsFile);
+    const date = new Date().toISOString().slice(0, 10);
+    const entry = `- **${date}** · \`${body.id}\` · ${identity.email} · ${decisionSummary.trim().replace(/\n/g, ' ').trim()}`;
+    await ctx.transport.appendDecision(entry, `decision for ${body.id}`);
   }
 
   broadcastSse(ctx, { type: 'updated', id: body.id });
-  enqueueGitOp(`update ${body.id}`, () =>
-    commitAndPush(filesToCommit, `update on ${body.id}`, gitOpts(ctx)),
-  );
   return { ok: true };
 }
 
@@ -214,29 +183,21 @@ export async function deleteComment(
   if (!id || !/^[a-zA-Z0-9._-]+$/.test(id)) {
     throw new HandlerError(400, 'bad id');
   }
-  const file = path.join(ctx.commentsDir, `${id}.md`);
-  let comment;
-  try {
-    const raw = await fs.readFile(file, 'utf8');
-    comment = parseComment(raw, file);
-  } catch {
-    throw new HandlerError(404, 'not found');
-  }
+  const existing = await ctx.transport.read(id);
+  if (!existing) throw new HandlerError(404, 'not found');
   // Comments are a shared resource — anyone on the team can resolve,
   // reopen, reply, or delete any comment. The author is captured for
   // attribution + audit (commit message records who did the delete) but
   // does NOT gate the action. Git history preserves the file regardless.
-  const actor = await getAuthor(ctx.rootDir);
-  await fs.unlink(file).catch(() => { /* already gone is fine */ });
+  const actor = await ctx.transport.getIdentity();
+  const actorEmail = actor?.email ?? 'unknown';
+  await ctx.transport.remove(id, `delete ${id} by ${actorEmail}`);
   broadcastSse(ctx, { type: 'deleted', id });
-  enqueueGitOp(`delete ${id}`, () =>
-    removeAndCommit([file], `delete ${id} by ${actor.email}`, gitOpts(ctx)),
-  );
   return { ok: true };
 }
 
 export async function syncFromRemote(ctx: HandlerContext): Promise<{ ok: true }> {
-  await backgroundPull(ctx.rootDir);
+  await ctx.transport.sync();
   ctx.onAfterSync?.();
   return { ok: true };
 }
@@ -246,86 +207,20 @@ export function broadcastSse(ctx: HandlerContext, payload: unknown): void {
   for (const client of ctx.sseClients) client.write(data);
 }
 
-async function appendDecision(
-  ctx: HandlerContext,
-  commentId: string,
-  summary: string,
-): Promise<string> {
-  // .margo/decisions.md lives next to the comments dir.
-  const file = path.join(path.dirname(ctx.commentsDir), 'decisions.md');
-  const author = await getAuthor(ctx.rootDir);
-  const date = new Date().toISOString().slice(0, 10);
-  const entry = `- **${date}** · \`${commentId}\` · ${author.email} · ${summary.replace(/\n/g, ' ').trim()}`;
-
-  let content: string;
-  try {
-    content = await fs.readFile(file, 'utf8');
-  } catch {
-    content = [
-      '# Decisions log',
-      '',
-      'Resolved comments distilled to one-line decisions. Newest first.',
-      'Each entry references the source comment in `.margo/comments/<id>.md`.',
-      '',
-    ].join('\n');
-  }
-  // Insert before the first existing list item (newest-first ordering).
-  const lines = content.split('\n');
-  let insertAt = lines.length;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].startsWith('- ')) { insertAt = i; break; }
-  }
-  lines.splice(insertAt, 0, entry);
-  let next = lines.join('\n');
-  if (!next.endsWith('\n')) next += '\n';
-
-  await fs.writeFile(file, next, 'utf8');
-  return file;
-}
-
-async function readAllComments(dir: string): Promise<Comment[]> {
-  let files: string[];
-  try {
-    files = (await fs.readdir(dir)).filter((f) => f.endsWith('.md'));
-  } catch {
-    return [];
-  }
-  const comments: Comment[] = [];
-  for (const f of files) {
-    const full = path.join(dir, f);
-    const raw = await fs.readFile(full, 'utf8');
-    try {
-      comments.push(parseComment(raw, full));
-    } catch {
-      // Malformed file — skip rather than crash. The overlay surfaces a banner.
-    }
-  }
-  return comments;
-}
-
 type ValidRole = 'pm' | 'designer' | 'dev';
 const VALID_ROLES: ValidRole[] = ['pm', 'designer', 'dev'];
 
 async function resolveRole(
   email: string,
-  config: MargoConfig,
-  cwd: string,
+  ctx: HandlerContext,
 ): Promise<ValidRole | undefined> {
-  const fromRoster = config.roster.find((r) => r.email === email)?.role;
+  const fromRoster = ctx.config.roster.find((r) => r.email === email)?.role;
   if (fromRoster && VALID_ROLES.includes(fromRoster as ValidRole)) {
     return fromRoster as ValidRole;
   }
-  const declared = await getDeclaredRole(cwd);
-  if (declared) return declared;
+  const declared = await ctx.transport.getDeclaredRole(email);
+  if (declared && VALID_ROLES.includes(declared as ValidRole)) {
+    return declared as ValidRole;
+  }
   return undefined;
-}
-
-function gitOpts(ctx: HandlerContext): GitOptions {
-  return {
-    cwd: ctx.rootDir,
-    commitPrefix: ctx.config.git.commitPrefix,
-    autoCommit: ctx.config.git.autoCommit,
-    autoPush: ctx.config.git.autoPush,
-    pullBeforePush: ctx.config.git.pullBeforePush,
-  };
 }

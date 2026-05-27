@@ -30,8 +30,7 @@ import * as url from 'node:url';
 import type { ServerResponse } from 'node:http';
 import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } from '../server/endpoints.js';
 import type { SseClient } from '../server/handlers.js';
-import { CommentWatcher } from '../server/watcher.js';
-import { RemotePoller } from '../server/remote-poller.js';
+import { LocalTransport } from '../storage/local-transport.js';
 import type { MargoConfig } from '../shared/types.js';
 
 const CLI_DIR = path.dirname(url.fileURLToPath(import.meta.url));
@@ -88,27 +87,26 @@ export async function serve(opts: ServeOptions): Promise<void> {
   }
 
   const sseClients = new Set<SseClient>();
-  let poller: RemotePoller | undefined;
+  const transport = new LocalTransport({ rootDir, commentsDir, config });
 
   const ctx = (): EndpointContext => ({
     rootDir,
-    commentsDir,
+    transport,
     config,
     sseClients,
     onSseClientConnect: (client) => {
-      const last = poller?.getLastPayload();
-      if (last) client.write(`data: ${JSON.stringify(last)}\n\n`);
+      const last = transport.getLastRemoteChanges();
+      if (last) {
+        client.write(`data: ${JSON.stringify({ type: 'remote-changes', ...last })}\n\n`);
+      }
     },
-    onAfterSync: () => poller?.reset(),
+    onAfterSync: () => transport.resetRemoteChanges(),
   });
 
-  const watcher = new CommentWatcher(commentsDir);
-  watcher.on('event', (e) => broadcastSse(ctx(), e));
-  watcher.start();
-
-  poller = new RemotePoller(rootDir, config.git.remotePollIntervalMs);
-  poller.on('event', (e) => broadcastSse(ctx(), e));
-  poller.start();
+  transport.subscribe((e) => broadcastSse(ctx(), e));
+  transport.subscribeRemoteChanges((payload) => {
+    if (payload) broadcastSse(ctx(), { type: 'remote-changes', ...payload });
+  });
 
   const server = http.createServer(async (req, res) => {
     // CORS: the sidecar is typically reached via the framework's proxyConfig
@@ -165,8 +163,7 @@ export async function serve(opts: ServeOptions): Promise<void> {
   console.log(`         <script type="module" src="/__margo/bootstrap.js"></script>`);
 
   const shutdown = (): void => {
-    watcher.stop();
-    poller?.stop();
+    void transport.close();
     server.close(() => process.exit(0));
   };
   process.once('SIGINT', shutdown);

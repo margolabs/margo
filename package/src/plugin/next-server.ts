@@ -42,8 +42,8 @@ import {
   type HandlerContext,
   type SseClient,
 } from '../server/handlers.js';
-import { CommentWatcher } from '../server/watcher.js';
-import { RemotePoller } from '../server/remote-poller.js';
+import { LocalTransport } from '../storage/local-transport.js';
+import type { Transport } from '../storage/transport.js';
 import type { CreateCommentRequest, MargoConfig, UpdateCommentRequest } from '../shared/types.js';
 
 const PLUGIN_DIR = path.dirname(url.fileURLToPath(import.meta.url));
@@ -65,10 +65,9 @@ const DEFAULTS: MargoConfig = {
 
 // Module-level singleton — Next.js Route Handlers stay loaded for the
 // lifetime of the dev server, so this initializes once on the first request
-// and reuses the same chokidar watcher + sseClients set across requests.
+// and reuses the same transport + sseClients set across requests.
 let cachedCtx: HandlerContext | null = null;
-let watcherStarted = false;
-let poller: RemotePoller | null = null;
+let cachedTransport: Transport | null = null;
 
 async function ensureCtx(): Promise<HandlerContext> {
   if (cachedCtx) return cachedCtx;
@@ -83,35 +82,37 @@ async function ensureCtx(): Promise<HandlerContext> {
     // .margo/config.json doesn't exist — handlers still work, just with defaults.
   }
   const sseClients = new Set<SseClient>();
+  const transport = new LocalTransport({ rootDir, commentsDir, config });
+  cachedTransport = transport;
   cachedCtx = {
     rootDir,
-    commentsDir,
+    transport,
     config,
     sseClients,
     // Replay the most recent remote-changes payload so a tab that loaded
     // after the poller's initial tick still sees the banner.
     onSseClientConnect: (client) => {
-      const last = poller?.getLastPayload();
-      if (last) client.write(`data: ${JSON.stringify(last)}\n\n`);
+      const last = transport.getLastRemoteChanges();
+      if (last) {
+        client.write(`data: ${JSON.stringify({ type: 'remote-changes', ...last })}\n\n`);
+      }
     },
-    onAfterSync: () => poller?.reset(),
+    onAfterSync: () => transport.resetRemoteChanges(),
   };
 
-  if (!watcherStarted) {
-    watcherStarted = true;
-    const w = new CommentWatcher(commentsDir);
-    w.on('event', (e) => broadcastSse(cachedCtx!, e));
-    w.start();
-    poller = new RemotePoller(rootDir, config.git.remotePollIntervalMs);
-    poller.on('event', (e) => broadcastSse(cachedCtx!, e));
-    poller.start();
-    // Process exit cleans these up; Next.js dev server doesn't tell us
-    // when it shuts down per-route, so we lean on process lifecycle.
-    process.once('exit', () => {
-      void w.stop();
-      poller?.stop();
-    });
-  }
+  // Bridge transport events into the SSE stream. Subscribing once is fine —
+  // the transport coalesces all listeners into a single underlying watcher/
+  // poller pair, and we never unsubscribe in this code path (process exit
+  // tears down the transport along with everything else).
+  transport.subscribe((e) => broadcastSse(cachedCtx!, e));
+  transport.subscribeRemoteChanges((payload) => {
+    if (payload) broadcastSse(cachedCtx!, { type: 'remote-changes', ...payload });
+  });
+  // Process exit cleans up the transport; Next.js dev server doesn't tell us
+  // when it shuts down per-route, so we lean on process lifecycle.
+  process.once('exit', () => {
+    void cachedTransport?.close();
+  });
 
   return cachedCtx;
 }

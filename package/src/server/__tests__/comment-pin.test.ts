@@ -25,6 +25,7 @@ import {
   type HandlerContext,
   type SseClient,
 } from '../handlers.js';
+import { LocalTransport } from '../../storage/local-transport.js';
 import { parseComment } from '../../shared/frontmatter.js';
 import type { CreateCommentRequest, MargoConfig, Target } from '../../shared/types.js';
 
@@ -59,6 +60,7 @@ const DEFAULT_CONFIG: MargoConfig = {
 
 describe('comment-pin handlers — happy path', () => {
   let rootDir: string;
+  let commentsDir: string;
   let ctx: HandlerContext;
   let sseEvents: unknown[];
 
@@ -67,6 +69,7 @@ describe('comment-pin handlers — happy path', () => {
     // touch a process-global background git queue, and we don't want one
     // test's queued op to race into another's working tree.
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'margo-test-'));
+    commentsDir = path.join(rootDir, '.margo', 'comments');
     execSync('git init -q -b main', { cwd: rootDir });
     execSync(`git config user.email ${TEST_AUTHOR_EMAIL}`, { cwd: rootDir });
     execSync(`git config user.name "${TEST_AUTHOR_NAME}"`, { cwd: rootDir });
@@ -78,9 +81,10 @@ describe('comment-pin handlers — happy path', () => {
     sseEvents = [];
     const sseClients = new Set<SseClient>();
     sseClients.add({ write: (payload) => sseEvents.push(payload) });
+    const transport = new LocalTransport({ rootDir, commentsDir, config: DEFAULT_CONFIG });
     ctx = {
       rootDir,
-      commentsDir: path.join(rootDir, '.margo', 'comments'),
+      transport,
       config: DEFAULT_CONFIG,
       sseClients,
     };
@@ -100,7 +104,7 @@ describe('comment-pin handlers — happy path', () => {
 
     expect(id).toMatch(/^[a-zA-Z0-9-]+$/);
 
-    const file = path.join(ctx.commentsDir, `${id}.md`);
+    const file = path.join(commentsDir, `${id}.md`);
     const raw = await fs.readFile(file, 'utf8');
     const parsed = parseComment(raw, file);
 
@@ -157,7 +161,7 @@ describe('comment-pin handlers — happy path', () => {
       patch: { reply: { body: 'Intentional — it carries the marketing emphasis.' } },
     });
 
-    const raw = await fs.readFile(path.join(ctx.commentsDir, `${id}.md`), 'utf8');
+    const raw = await fs.readFile(path.join(commentsDir, `${id}.md`), 'utf8');
     expect(raw).toContain('Why does this card use a different font weight');
     expect(raw).toContain('**reply**');
     expect(raw).toContain(TEST_AUTHOR_EMAIL);
@@ -174,7 +178,7 @@ describe('comment-pin handlers — happy path', () => {
 
     await updateComment(ctx, { id, patch: { status: 'resolved' } });
 
-    const raw = await fs.readFile(path.join(ctx.commentsDir, `${id}.md`), 'utf8');
+    const raw = await fs.readFile(path.join(commentsDir, `${id}.md`), 'utf8');
     const parsed = parseComment(raw, '');
     expect(parsed.frontmatter.status).toBe('resolved');
     const updated = sseEvents.find((e) =>
@@ -189,7 +193,7 @@ describe('comment-pin handlers — happy path', () => {
       body: 'remove me',
       target: makeTarget(),
     });
-    const file = path.join(ctx.commentsDir, `${id}.md`);
+    const file = path.join(commentsDir, `${id}.md`);
     await expect(fs.access(file)).resolves.toBeUndefined();
     sseEvents.length = 0;
 
@@ -218,7 +222,7 @@ describe('comment-pin handlers — happy path', () => {
     execSync('git config user.email other-teammate@example.com', { cwd: rootDir });
 
     await expect(deleteComment(ctx, id)).resolves.toEqual({ ok: true });
-    await expect(fs.access(path.join(ctx.commentsDir, `${id}.md`))).rejects.toThrow();
+    await expect(fs.access(path.join(commentsDir, `${id}.md`))).rejects.toThrow();
   });
 
   it('delete → rejects an obviously malformed id without touching the filesystem', async () => {
