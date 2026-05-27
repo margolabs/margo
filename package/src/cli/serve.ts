@@ -94,6 +94,8 @@ export async function serve(opts: ServeOptions): Promise<void> {
   const ctx = (): EndpointContext => ({
     rootDir,
     transport,
+    storageMode: created.mode,
+    serverInfo: created.serverInfo,
     config,
     sseClients,
     onSseClientConnect: (client) => {

@@ -39,6 +39,13 @@ export interface HandlerContext {
   rootDir: string;
   /** Storage backend — LocalTransport (current default) or RemoteTransport. */
   transport: Transport;
+  /** Which backend is wired up. Surfaced to the overlay via /__margo/me so
+   *  the UI can show "connected to server" indicators when relevant. */
+  storageMode: 'local' | 'server';
+  /** Server connection info — only populated when storageMode === 'server'.
+   *  The overlay shows the project + host (not the token) in its identity
+   *  panel so teammates can tell which workspace they're connected to. */
+  serverInfo?: { url: string; project: string };
   config: MargoConfig;
   sseClients: Set<SseClient>;
   // Called after a new SSE client is registered, so plugins can replay any
@@ -62,11 +69,24 @@ export async function listComments(ctx: HandlerContext): Promise<{ comments: Com
   return { comments: await ctx.transport.list() };
 }
 
-export async function getMe(ctx: HandlerContext): Promise<{ email: string; name: string } | null> {
+export async function getMe(
+  ctx: HandlerContext,
+): Promise<{
+  email: string;
+  name: string;
+  mode: 'local' | 'server';
+  server?: { url: string; project: string };
+} | null> {
   // Return null on missing identity so the overlay can prompt for setup
   // instead of treating the request as a 5xx and surfacing a cryptic
   // "author api failed" error on the next pin attempt.
-  return await ctx.transport.getIdentity();
+  const identity = await ctx.transport.getIdentity();
+  if (!identity) return null;
+  return {
+    ...identity,
+    mode: ctx.storageMode,
+    ...(ctx.serverInfo ? { server: ctx.serverInfo } : {}),
+  };
 }
 
 export async function setMe(

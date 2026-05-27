@@ -89,6 +89,8 @@ async function ensureCtx(): Promise<HandlerContext> {
   cachedCtx = {
     rootDir,
     transport,
+    storageMode: created.mode,
+    serverInfo: created.serverInfo,
     config,
     sseClients,
     // Replay the most recent remote-changes payload so a tab that loaded

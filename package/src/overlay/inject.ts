@@ -89,8 +89,16 @@ export function start(opts: StartOptions): void {
   const store = new Map<string, Comment>();
   // Holds the local git user once /__margo/me resolves. Used to gate the
   // own-only delete affordance — null while the fetch is in flight or in
-  // preview mode (where we don't ask the backend at all).
-  let me: { email: string } | null = null;
+  // preview mode (where we don't ask the backend at all). When the
+  // workspace is in server mode, also carries connection metadata
+  // (`mode`, `server.url`, `server.project`) so the inbox can show a
+  // "connected to <project>" badge.
+  let me: {
+    email: string;
+    name?: string;
+    mode?: 'local' | 'server';
+    server?: { url: string; project: string };
+  } | null = null;
   // Local repo state — drives the divergence diagnostics in expanded
   // orphan rows of the inbox.
   // Refreshed on SSE events (someone else's commit landed) and on tab focus
@@ -302,10 +310,14 @@ export function start(opts: StartOptions): void {
       // identity still produces a broken-looking comment.
       const incomplete = !u || !u.name || !u.email;
       if (incomplete) {
-        u = await openIdentitySetup(sync, {
+        const set = await openIdentitySetup(sync, {
           name: u?.name ?? "",
           email: u?.email ?? "",
         });
+        // Re-fetch via /me so we pick up mode + server info (those aren't
+        // returned by the setMe roundtrip but we need them for the inbox
+        // server-mode badge).
+        u = set ? await sync.getMe() : null;
       }
       me = u;
       renderPins();
@@ -680,7 +692,7 @@ export function renderInboxPanel(
   statusFilter: import("./inbox-view.js").StatusFilter,
   orphanIds: Set<string>,
   pinIds: Set<string>,
-  me: { email: string } | null,
+  me: { email: string; mode?: 'local' | 'server'; server?: { url: string; project: string } } | null,
   gitState: GitState | null,
   filters: InboxFilterState,
   suppressEntranceAnim: boolean,
@@ -758,11 +770,23 @@ export function renderInboxPanel(
   // rows. Order is intentional: status first (anchors the user's mental
   // model — "am I looking at open or everything?"), then narrow-or-widen
   // toggles to the right.
+  // Server-mode badge: shows the project + host so teammates can tell
+  // which workspace they're connected to. Hidden in local mode (the
+  // default; nothing useful to display since the comments live in this
+  // checkout). The host string is the URL's hostname only — no port,
+  // no scheme — to keep the badge compact.
+  let serverBadge = '';
+  if (me?.mode === 'server' && me.server) {
+    let host = me.server.url;
+    try { host = new URL(me.server.url).host; } catch { /* keep raw */ }
+    serverBadge = `<span class="margo-inbox-server-badge" title="${escapeHtml(me.server.url)}">server: ${escapeHtml(me.server.project)}@${escapeHtml(host)}</span>`;
+  }
   panel.innerHTML = `
     <header class="margo-inbox-header">
       <div class="margo-inbox-titlebar">
         <strong>Inbox</strong>
         <span class="margo-inbox-count">${all.length} ${all.length === 1 ? "comment" : "comments"}</span>
+        ${serverBadge}
         <button type="button" class="margo-inbox-close" aria-label="close inbox">×</button>
       </div>
       <div class="margo-inbox-search">
@@ -3574,6 +3598,16 @@ function injectStyles(): void {
     .margo-inbox-titlebar strong { font-size: 14px; }
     .margo-inbox-count {
       font-size: 12px; color: var(--margo-muted-fg); flex: 1;
+    }
+    .margo-inbox-server-badge {
+      font-size: 10px; line-height: 1.4;
+      padding: 2px 6px; border-radius: 999px;
+      background: hsl(220 60% 50% / .12);
+      color: hsl(220 70% 35%);
+      border: 1px solid hsl(220 60% 50% / .25);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 180px;
     }
     .margo-inbox-close {
       background: transparent; border: 0; color: var(--margo-muted-fg);

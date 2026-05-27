@@ -71,7 +71,12 @@ export class SyncClient extends EventTarget {
     }
   }
 
-  async getMe(): Promise<{ email: string; name: string } | null> {
+  async getMe(): Promise<{
+    email: string;
+    name: string;
+    mode?: 'local' | 'server';
+    server?: { url: string; project: string };
+  } | null> {
     try {
       const res = await fetch('/__margo/me');
       if (!res.ok) return null;
@@ -84,6 +89,10 @@ export class SyncClient extends EventTarget {
       return {
         email: typeof body.email === 'string' ? body.email : '',
         name: typeof body.name === 'string' ? body.name : '',
+        mode: body.mode === 'server' || body.mode === 'local' ? body.mode : undefined,
+        server: body.server && typeof body.server === 'object'
+          ? { url: String(body.server.url ?? ''), project: String(body.server.project ?? '') }
+          : undefined,
       };
     } catch { return null; }
   }

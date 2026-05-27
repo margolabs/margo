@@ -85,6 +85,7 @@ describe('comment-pin handlers — happy path', () => {
     ctx = {
       rootDir,
       transport,
+      storageMode: 'local',
       config: DEFAULT_CONFIG,
       sseClients,
     };

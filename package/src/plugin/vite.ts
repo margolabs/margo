@@ -48,12 +48,16 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
   let config: MargoConfig = DEFAULTS;
   const sseClients = new Set<SseClient>();
   let transport: Transport | undefined;
+  let storageMode: 'local' | 'server' = 'local';
+  let serverInfo: { url: string; project: string } | undefined;
 
   const ctx = (): EndpointContext => {
     if (!transport) throw new Error('[margo] transport not initialized');
     return {
       rootDir: viteRoot,
       transport,
+      storageMode,
+      serverInfo,
       config,
       sseClients,
       // Replay the most recent remote-changes payload so a tab that loaded
@@ -93,6 +97,8 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
       // default — workspaces with no margo.config see no behavior change.
       const created = await createTransport({ rootDir: viteRoot, commentsDir, config });
       transport = created.transport;
+      storageMode = created.mode;
+      serverInfo = created.serverInfo;
       console.log(`[margo] storage mode: ${created.mode}${created.configPath ? ` (from ${created.configPath})` : ''}`);
       // Bridge transport events into the SSE stream so connected overlays
       // re-render on file changes / upstream divergence.

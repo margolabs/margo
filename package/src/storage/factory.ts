@@ -22,6 +22,10 @@ export interface CreateTransportResult {
   mode: 'local' | 'server'
   /** Path to the loaded margo.config, or null if none was found. */
   configPath: string | null
+  /** Server connection info — populated when `mode === 'server'`. The
+   *  bearer token is intentionally omitted; only url + project flow
+   *  through to consumers (e.g. surfaced to the overlay UI). */
+  serverInfo?: { url: string; project: string }
 }
 
 /**
@@ -40,10 +44,15 @@ export async function createTransport(
   const mode: 'local' | 'server' = clientCfg.storage === 'server' ? 'server' : 'local'
 
   if (mode === 'server') {
+    const transport = createRemote(clientCfg)
     return {
-      transport: createRemote(clientCfg),
+      transport,
       mode: 'server',
       configPath: loaded?.path ?? null,
+      serverInfo: {
+        url: clientCfg.server!.url,
+        project: clientCfg.server!.project,
+      },
     }
   }
   return {
