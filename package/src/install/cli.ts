@@ -20,6 +20,7 @@ import * as url from 'node:url';
 import { promisify } from 'node:util';
 import { serve } from '../cli/serve.js';
 import { pull, push } from '../cli/sync.js';
+import { watch as watchSync } from '../cli/watch.js';
 import { startHost } from '../host/index.js';
 import { UserStore } from '../host/user-store.js';
 
@@ -52,6 +53,7 @@ Commands:
                           [--force removes local files not on host]
   push                  [server mode] upload local comments to host
                           [--id ID to push just one]
+  watch                 [server mode] long-running auto-sync (SSE + chokidar)
   host                  run the team host (server-mode storage backend)
   host:create-user      --email E --name N [--superuser]
   host:create-token     --user-id ID --label L
@@ -98,6 +100,9 @@ async function main(): Promise<void> {
       break;
     case 'push':
       await push({ cwd: flags.cwd ?? cwd, id: flags.id });
+      break;
+    case 'watch':
+      await watchSync({ cwd: flags.cwd ?? cwd });
       break;
     case 'host':
       await runHost({ port: flags.port, dataDir: flags.dataDir ?? path.join(cwd, 'margo-data') });
