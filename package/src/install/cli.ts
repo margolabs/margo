@@ -41,18 +41,25 @@ ${MARGO_BLOCK_END}`;
 const USAGE = `usage: margo <command> [flags]
 
 Commands:
-  init              scaffold .margo/ in the current project
-  install-skill     install the /margo skill into Claude Code
-  update            update the .margo/ scaffold to the latest templates
-  uninstall         remove the .margo/ scaffold
-  serve             run the sidecar (proxy-mountable dev-time backend)
-  host              run the team host (server-mode storage backend)
-  host:create-user  --email E --name N [--data-dir DIR]
-  host:create-token --user-id ID --label L [--data-dir DIR]
-  host:list-users   [--data-dir DIR]
-  host:list-tokens  [--data-dir DIR]
-  host:revoke-token --token-id ID [--data-dir DIR]
+  init                  scaffold .margo/ in the current project
+  install-skill         install the /margo skill into Claude Code
+  update                update the .margo/ scaffold to the latest templates
+  uninstall             remove the .margo/ scaffold
+  serve                 run the sidecar (proxy-mountable dev-time backend)
+  host                  run the team host (server-mode storage backend)
+  host:create-user      --email E --name N [--superuser]
+  host:create-token     --user-id ID --label L
+  host:list-users
+  host:list-tokens
+  host:revoke-token     --token-id ID
+  host:set-superuser    --user-id ID --value true|false
+  host:create-project   --slug S --name N
+  host:list-projects
+  host:add-member       --project SLUG --user-id ID --role read|write|admin
+  host:remove-member    --project SLUG --user-id ID
+  host:list-members     --project SLUG
 
+Host CLI commands all accept --data-dir DIR.
 Common flags: --port N, --cwd DIR, --data-dir DIR, --user|--project`;
 
 async function main(): Promise<void> {
@@ -94,6 +101,24 @@ async function main(): Promise<void> {
     case 'host:revoke-token':
       await runRevokeToken({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data'), tokenId: flags.tokenId });
       break;
+    case 'host:set-superuser':
+      await runSetSuperuser({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data'), userId: flags.userId, value: flags.value });
+      break;
+    case 'host:create-project':
+      await runCreateProject({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data'), slug: flags.slug, name: flags.name });
+      break;
+    case 'host:list-projects':
+      await runListProjects({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data') });
+      break;
+    case 'host:add-member':
+      await runAddMember({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data'), project: flags.project, userId: flags.userId, role: flags.role });
+      break;
+    case 'host:remove-member':
+      await runRemoveMember({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data'), project: flags.project, userId: flags.userId });
+      break;
+    case 'host:list-members':
+      await runListMembers({ dataDir: flags.dataDir ?? path.join(cwd, 'margo-data'), project: flags.project });
+      break;
     default:
       console.error(`unknown command: ${cmd}`);
       console.error(USAGE);
@@ -112,22 +137,92 @@ async function runHost(opts: { port: number; dataDir: string }): Promise<void> {
   process.once('SIGTERM', shutdown);
 }
 
-async function runCreateUser(opts: { dataDir: string; email?: string; name?: string }): Promise<void> {
+async function runCreateUser(opts: { dataDir: string; email?: string; name?: string; superuser?: boolean }): Promise<void> {
   if (!opts.email || !opts.name) {
-    console.error('usage: margo host:create-user --email <e> --name <n> [--data-dir DIR]');
+    console.error('usage: margo host:create-user --email <e> --name <n> [--superuser] [--data-dir DIR]');
     process.exit(1);
   }
   const users = new UserStore(opts.dataDir);
-  const user = await users.createUser(opts.email, opts.name);
+  const user = await users.createUser(opts.email, opts.name, { isSuperuser: opts.superuser });
   // Auto-issue a token on user creation — the operator almost always
   // wants a token to hand to the new teammate, and a second command for
   // that is friction.
   const { record, plainToken } = await users.createToken(user.id, 'initial');
-  console.log(`created user ${user.id} (${user.email})`);
+  const flag = opts.superuser ? ' [superuser]' : '';
+  console.log(`created user ${user.id} (${user.email})${flag}`);
   console.log(`token   ${record.id}  label=${record.label}`);
   console.log('');
   console.log('  TOKEN (shown once — store securely, the host only keeps a hash):');
   console.log(`  ${plainToken}`);
+}
+
+async function runSetSuperuser(opts: { dataDir: string; userId?: string; value?: string }): Promise<void> {
+  if (!opts.userId || (opts.value !== 'true' && opts.value !== 'false')) {
+    console.error('usage: margo host:set-superuser --user-id <id> --value true|false');
+    process.exit(1);
+  }
+  const users = new UserStore(opts.dataDir);
+  await users.setSuperuser(opts.userId, opts.value === 'true');
+  console.log(`user ${opts.userId} isSuperuser=${opts.value}`);
+}
+
+async function runCreateProject(opts: { dataDir: string; slug?: string; name?: string }): Promise<void> {
+  if (!opts.slug || !opts.name) {
+    console.error('usage: margo host:create-project --slug <s> --name <n>');
+    process.exit(1);
+  }
+  const users = new UserStore(opts.dataDir);
+  const project = await users.createProject(opts.slug, opts.name);
+  console.log(`created project ${project.slug} (${project.name})`);
+  console.log('Note: project is now ACL-enforced. Add members with `margo host:add-member`.');
+}
+
+async function runListProjects(opts: { dataDir: string }): Promise<void> {
+  const users = new UserStore(opts.dataDir);
+  const list = await users.listProjects();
+  if (list.length === 0) {
+    console.log('(no projects registered — unregistered slugs are legacy-open)');
+    return;
+  }
+  for (const p of list) {
+    console.log(`${p.slug}  ${p.name}  created=${p.createdAt}`);
+  }
+}
+
+async function runAddMember(opts: { dataDir: string; project?: string; userId?: string; role?: string }): Promise<void> {
+  if (!opts.project || !opts.userId || (opts.role !== 'read' && opts.role !== 'write' && opts.role !== 'admin')) {
+    console.error('usage: margo host:add-member --project <slug> --user-id <id> --role read|write|admin');
+    process.exit(1);
+  }
+  const users = new UserStore(opts.dataDir);
+  await users.addMember(opts.userId, opts.project, opts.role);
+  console.log(`added/updated ${opts.userId} on ${opts.project} as ${opts.role}`);
+}
+
+async function runRemoveMember(opts: { dataDir: string; project?: string; userId?: string }): Promise<void> {
+  if (!opts.project || !opts.userId) {
+    console.error('usage: margo host:remove-member --project <slug> --user-id <id>');
+    process.exit(1);
+  }
+  const users = new UserStore(opts.dataDir);
+  await users.removeMember(opts.userId, opts.project);
+  console.log(`removed ${opts.userId} from ${opts.project}`);
+}
+
+async function runListMembers(opts: { dataDir: string; project?: string }): Promise<void> {
+  if (!opts.project) {
+    console.error('usage: margo host:list-members --project <slug>');
+    process.exit(1);
+  }
+  const users = new UserStore(opts.dataDir);
+  const members = await users.listMembers(opts.project);
+  if (members.length === 0) {
+    console.log(`(no members on ${opts.project})`);
+    return;
+  }
+  for (const m of members) {
+    console.log(`${m.userId}  role=${m.role}  added=${m.addedAt}`);
+  }
 }
 
 async function runCreateToken(opts: { dataDir: string; userId?: string; label?: string }): Promise<void> {
@@ -188,6 +283,11 @@ function parseFlags(args: string[]): {
   userId?: string;
   label?: string;
   tokenId?: string;
+  superuser?: boolean;
+  value?: string;
+  slug?: string;
+  project?: string;
+  role?: string;
 } {
   const user = args.includes('--user');
   const project = args.includes('--project');
@@ -205,6 +305,11 @@ function parseFlags(args: string[]): {
     userId: readValueFlag(args, '--user-id', undefined),
     label: readValueFlag(args, '--label', undefined),
     tokenId: readValueFlag(args, '--token-id', undefined),
+    superuser: args.includes('--superuser'),
+    value: readValueFlag(args, '--value', undefined),
+    slug: readValueFlag(args, '--slug', undefined),
+    project: readValueFlag(args, '--project', undefined),
+    role: readValueFlag(args, '--role', undefined),
   };
 }
 

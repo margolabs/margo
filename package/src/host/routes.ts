@@ -17,7 +17,7 @@
 // user's code, not the comment store.
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { authenticate, AuthError, type AuthConfig, type AuthIdentity } from './auth.js'
+import { authenticate, authorize, AuthError, type AuthConfig, type AuthIdentity } from './auth.js'
 import { ProjectStore } from './store.js'
 
 export interface SseSubscriber {
@@ -49,7 +49,20 @@ export async function dispatch(
   const [, project, rest] = m
 
   try {
-    const identity = await authenticate(req, ctx.auth)
+    const user = await authenticate(req, ctx.auth)
+    const identity: AuthIdentity = { email: user.email, name: user.name }
+
+    // /me is intentionally pre-authorize: any authenticated user can ask
+    // "who am I?" against any project slug. Returns identity from the
+    // token regardless of project membership.
+    if (rest === 'me' && req.method === 'GET') {
+      return sendJson(res, 200, identity)
+    }
+
+    // Everything else is project-scoped. Required role mirrors HTTP
+    // semantics: safe methods need read; mutating methods need write.
+    const required = req.method === 'GET' || req.method === 'HEAD' ? 'read' : 'write'
+    await authorize(ctx.auth, user, project, required)
 
     if (rest === 'comments' && req.method === 'GET') {
       return await handleList(ctx, project, res)
@@ -63,9 +76,6 @@ export async function dispatch(
     }
     if (rest === 'decisions' && req.method === 'POST') {
       return await handleAppendDecision(ctx, project, identity, req, res)
-    }
-    if (rest === 'me' && req.method === 'GET') {
-      return sendJson(res, 200, identity)
     }
     if (rest === 'sync' && req.method === 'POST') {
       // Server is authoritative — sync is a noop. Kept as an endpoint so

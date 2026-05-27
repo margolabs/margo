@@ -24,6 +24,30 @@ export interface UserRecord {
   email: string
   name: string
   createdAt: string
+  /** Superusers bypass project ACL checks — used for the bootstrap user
+   *  so the operator who set the host up can manage everything. Future:
+   *  this flag is grantable to any user via CLI. */
+  isSuperuser?: boolean
+}
+
+/** Per-project role a user holds. read/write/admin form a strict hierarchy:
+ *  admin > write > read. The auth layer compares against the role required
+ *  by the route (GET → read, PUT/POST/DELETE → write, manage-members → admin). */
+export type Role = 'read' | 'write' | 'admin'
+
+export interface ProjectRecord {
+  /** URL-safe slug — also serves as the directory name under <dataRoot>/.
+   *  This is what clients put in margo.config.server.project. */
+  slug: string
+  name: string
+  createdAt: string
+}
+
+export interface MembershipRecord {
+  userId: string
+  projectSlug: string
+  role: Role
+  addedAt: string
 }
 
 /** Stored shape of a token. plainPrefix is the first 8 chars of the
@@ -44,9 +68,11 @@ interface FileShape {
   version: 1
   users: UserRecord[]
   tokens: TokenRecord[]
+  projects: ProjectRecord[]
+  memberships: MembershipRecord[]
 }
 
-const EMPTY: FileShape = { version: 1, users: [], tokens: [] }
+const EMPTY: FileShape = { version: 1, users: [], tokens: [], projects: [], memberships: [] }
 
 /** Result of creating a token. plainToken is shown to the operator ONCE
  *  at creation; it's not persisted in plain form. */
@@ -108,7 +134,7 @@ export class UserStore {
     return this.data.users.find((u) => u.email.toLowerCase() === lower) ?? null
   }
 
-  async createUser(email: string, name: string): Promise<UserRecord> {
+  async createUser(email: string, name: string, opts?: { isSuperuser?: boolean }): Promise<UserRecord> {
     await this.load()
     const existing = await this.findUserByEmail(email)
     if (existing) throw new Error(`user with email ${email} already exists (id ${existing.id})`)
@@ -117,10 +143,106 @@ export class UserStore {
       email,
       name,
       createdAt: new Date().toISOString(),
+      ...(opts?.isSuperuser ? { isSuperuser: true } : {}),
     }
     return this.mutate((d) => {
       d.users.push(record)
       return record
+    })
+  }
+
+  /** Toggle a user's superuser bit. Useful when promoting an additional
+   *  operator after the host has been running for a while. */
+  async setSuperuser(userId: string, value: boolean): Promise<void> {
+    await this.load()
+    const user = this.data.users.find((u) => u.id === userId)
+    if (!user) throw new Error(`no user with id ${userId}`)
+    await this.mutate((d) => {
+      const u = d.users.find((x) => x.id === userId)
+      if (!u) return
+      if (value) u.isSuperuser = true
+      else delete u.isSuperuser
+    })
+  }
+
+  // ─── Projects ─────────────────────────────────────────────────────────
+
+  async listProjects(): Promise<ProjectRecord[]> {
+    await this.load()
+    return this.data.projects.slice()
+  }
+
+  async getProject(slug: string): Promise<ProjectRecord | null> {
+    await this.load()
+    return this.data.projects.find((p) => p.slug === slug) ?? null
+  }
+
+  async createProject(slug: string, name: string): Promise<ProjectRecord> {
+    if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
+      throw new Error(`invalid project slug: ${slug} (must match [a-zA-Z0-9._-]+)`)
+    }
+    await this.load()
+    if (await this.getProject(slug)) {
+      throw new Error(`project ${slug} already exists`)
+    }
+    const record: ProjectRecord = {
+      slug,
+      name,
+      createdAt: new Date().toISOString(),
+    }
+    return this.mutate((d) => {
+      d.projects.push(record)
+      return record
+    })
+  }
+
+  // ─── Memberships ──────────────────────────────────────────────────────
+
+  async listMembers(projectSlug: string): Promise<MembershipRecord[]> {
+    await this.load()
+    return this.data.memberships.filter((m) => m.projectSlug === projectSlug)
+  }
+
+  async getMembership(userId: string, projectSlug: string): Promise<MembershipRecord | null> {
+    await this.load()
+    return this.data.memberships.find((m) => m.userId === userId && m.projectSlug === projectSlug) ?? null
+  }
+
+  async addMember(userId: string, projectSlug: string, role: Role): Promise<MembershipRecord> {
+    await this.load()
+    if (!(await this.getUser(userId))) throw new Error(`no user with id ${userId}`)
+    if (!(await this.getProject(projectSlug))) throw new Error(`no project with slug ${projectSlug}`)
+    const existing = await this.getMembership(userId, projectSlug)
+    if (existing) {
+      // Idempotent role update — operator typing `add-member` twice with
+      // a different role is the natural way to promote/demote without a
+      // separate `set-member-role` command.
+      await this.mutate((d) => {
+        const m = d.memberships.find(
+          (x) => x.userId === userId && x.projectSlug === projectSlug,
+        )
+        if (m) m.role = role
+      })
+      return { ...existing, role }
+    }
+    const record: MembershipRecord = {
+      userId,
+      projectSlug,
+      role,
+      addedAt: new Date().toISOString(),
+    }
+    return this.mutate((d) => {
+      d.memberships.push(record)
+      return record
+    })
+  }
+
+  async removeMember(userId: string, projectSlug: string): Promise<void> {
+    await this.load()
+    await this.mutate((d) => {
+      d.memberships = d.memberships.filter(
+        (m) => !(m.userId === userId && m.projectSlug === projectSlug),
+      )
     })
   }
 
@@ -260,6 +382,8 @@ function normalize(parsed: FileShape): FileShape {
     version: 1,
     users: Array.isArray(parsed.users) ? parsed.users : [],
     tokens: Array.isArray(parsed.tokens) ? parsed.tokens : [],
+    projects: Array.isArray(parsed.projects) ? parsed.projects : [],
+    memberships: Array.isArray(parsed.memberships) ? parsed.memberships : [],
   }
 }
 
