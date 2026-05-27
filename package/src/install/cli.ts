@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import * as url from 'node:url';
 import { promisify } from 'node:util';
 import { serve } from '../cli/serve.js';
+import { startHost } from '../host/index.js';
 
 const execFileP = promisify(execFile);
 
@@ -36,7 +37,7 @@ const ROOT_CLAUDE_BLOCK = `${MARGO_BLOCK_START}
 This project uses margo for live-app feedback. See \`.margo/CLAUDE.md\` for how AI should engage with the comment inbox. The \`/margo\` skill triages and processes the open inbox.
 ${MARGO_BLOCK_END}`;
 
-const USAGE = 'usage: margo <init|install-skill|update|uninstall|serve> [--user|--project] [--port N] [--cwd DIR]';
+const USAGE = 'usage: margo <init|install-skill|update|uninstall|serve|host> [--user|--project] [--port N] [--cwd DIR] [--data-dir DIR]';
 
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? 'init';
@@ -59,6 +60,9 @@ async function main(): Promise<void> {
     case 'serve':
       await serve({ port: flags.port, cwd: flags.cwd ?? cwd });
       break;
+    case 'host':
+      await runHost({ port: flags.port, dataDir: flags.dataDir ?? path.join(cwd, 'margo-data') });
+      break;
     default:
       console.error(`unknown command: ${cmd}`);
       console.error(USAGE);
@@ -66,10 +70,33 @@ async function main(): Promise<void> {
   }
 }
 
+async function runHost(opts: { port: number; dataDir: string }): Promise<void> {
+  // Token + identity come from env. Hard-fail on a missing token so an
+  // operator can't accidentally boot an unauthenticated server.
+  const token = process.env.MARGO_HOST_TOKEN;
+  if (!token) {
+    console.error('[margo host] MARGO_HOST_TOKEN env var is required');
+    process.exit(1);
+  }
+  const email = process.env.MARGO_HOST_USER_EMAIL ?? 'host-admin@localhost';
+  const name = process.env.MARGO_HOST_USER_NAME ?? 'margo host admin';
+  const handle = await startHost({
+    port: opts.port,
+    dataRoot: opts.dataDir,
+    auth: { token, identity: { email, name } },
+  });
+  const shutdown = (): void => {
+    void handle.close().then(() => process.exit(0));
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+}
+
 function parseFlags(args: string[]): {
   scope: 'project' | 'user';
   port: number;
   cwd?: string;
+  dataDir?: string;
 } {
   const user = args.includes('--user');
   const project = args.includes('--project');
@@ -81,6 +108,7 @@ function parseFlags(args: string[]): {
     scope: user ? 'user' : 'project',
     port: readValueFlag(args, '--port', 3001),
     cwd: readValueFlag(args, '--cwd', undefined),
+    dataDir: readValueFlag(args, '--data-dir', undefined),
   };
 }
 
