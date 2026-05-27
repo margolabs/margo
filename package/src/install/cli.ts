@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import * as url from 'node:url';
 import { promisify } from 'node:util';
 import { serve } from '../cli/serve.js';
+import { pull, push } from '../cli/sync.js';
 import { startHost } from '../host/index.js';
 import { UserStore } from '../host/user-store.js';
 
@@ -47,6 +48,10 @@ Commands:
   update                update the .margo/ scaffold to the latest templates
   uninstall             remove the .margo/ scaffold
   serve                 run the sidecar (proxy-mountable dev-time backend)
+  pull                  [server mode] download host comments to .margo/comments/
+                          [--force removes local files not on host]
+  push                  [server mode] upload local comments to host
+                          [--id ID to push just one]
   host                  run the team host (server-mode storage backend)
   host:create-user      --email E --name N [--superuser]
   host:create-token     --user-id ID --label L
@@ -87,6 +92,12 @@ async function main(): Promise<void> {
       break;
     case 'serve':
       await serve({ port: flags.port, cwd: flags.cwd ?? cwd });
+      break;
+    case 'pull':
+      await pull({ cwd: flags.cwd ?? cwd, force: flags.force });
+      break;
+    case 'push':
+      await push({ cwd: flags.cwd ?? cwd, id: flags.id });
       break;
     case 'host':
       await runHost({ port: flags.port, dataDir: flags.dataDir ?? path.join(cwd, 'margo-data') });
@@ -295,6 +306,8 @@ function parseFlags(args: string[]): {
   role?: string;
   server?: string;
   tokenEnv?: string;
+  id?: string;
+  force?: boolean;
 } {
   const user = args.includes('--user');
   const project = args.includes('--project');
@@ -319,6 +332,8 @@ function parseFlags(args: string[]): {
     role: readValueFlag(args, '--role', undefined),
     server: readValueFlag(args, '--server', undefined),
     tokenEnv: readValueFlag(args, '--token-env', undefined),
+    id: readValueFlag(args, '--id', undefined),
+    force: args.includes('--force'),
   };
 }
 
@@ -448,6 +463,10 @@ async function init(
     // before the dev server reads it.
     await patchServerWorkspaceConfig(path.join(margoDir, 'config.json'));
     await writeMargoConfigJson(cwd, opts.server!, opts.project!, tokenEnv);
+    // Gitignore the AI-side cache directory. `margo pull` writes host
+    // comments here so AI can read them; the host is the source of truth,
+    // so the cache must never end up in the repo's git history.
+    await ensureGitignoreEntry(cwd, '.margo/comments/');
     await verifyHostReachable(opts.server!);
     if (process.env[tokenEnv]) {
       await verifyTokenWorks(opts.server!, opts.project!, process.env[tokenEnv]!);
@@ -519,6 +538,22 @@ async function patchServerWorkspaceConfig(file: string): Promise<void> {
   } catch (err) {
     console.warn(`[margo] could not adjust workspace config for server mode: ${(err as Error).message}`);
   }
+}
+
+/** Append an entry to the repo's .gitignore (creating the file if needed)
+ *  unless it's already present. Used by server-mode init to keep the
+ *  AI-cache directory out of git. */
+async function ensureGitignoreEntry(cwd: string, entry: string): Promise<void> {
+  const file = path.join(cwd, '.gitignore');
+  let existing = '';
+  try {
+    existing = await fs.readFile(file, 'utf8');
+  } catch { /* doesn't exist yet */ }
+  const lines = existing.split('\n').map((l) => l.trim());
+  if (lines.includes(entry) || lines.includes(`/${entry}`)) return;
+  const next = existing.length > 0 && !existing.endsWith('\n') ? existing + '\n' : existing;
+  await fs.writeFile(file, `${next}${entry}\n`, 'utf8');
+  console.log(`[margo] added ${entry} to .gitignore`);
 }
 
 async function verifyHostReachable(url: string): Promise<void> {

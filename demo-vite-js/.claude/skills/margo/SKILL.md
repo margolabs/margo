@@ -9,10 +9,11 @@ margo is a feedback layer where designers, PMs, and devs leave comments on the l
 
 ## How to read the inbox
 
-1. Read `.margo/comments/*.md` (one file per comment). Comments are anchored to a DOM element by default, but some are anchored to a captured network request instead — see **Request pins** below.
-2. Filter: `status` ∈ {`open`, `in-progress`} AND `type: task`. Skip `resolved`, `wontfix`, `ready-for-review`, and `blocked` — those are terminal or already-acted-on states. `wontfix` is the "Dismiss" verdict and is reversible only by humans clicking Reopen; do not re-process it.
-3. Sort by `created` ascending (oldest first), but bump anything with `@ai` in the body to the top.
-4. Skip `type: discussion` (humans only — never modify code in response to these). For `type: question`, answer in-thread but do not modify code.
+1. Check for `margo.config.json` (or `.ts`/`.mjs`/`.js`) at the repo root. If it has `"storage": "server"`, the comments live on a host rather than in this checkout — run `npx margo pull` once before reading so `.margo/comments/` mirrors the host. After making any edits, run `npx margo push` (or `npx margo push --id <id>` for a single comment) so your replies / status changes propagate. In local mode there's no margo.config and the files are already on disk; skip the pull/push steps.
+2. Read `.margo/comments/*.md` (one file per comment). Comments are anchored to a DOM element by default, but some are anchored to a captured network request instead — see **Request pins** below.
+3. Filter: `status` ∈ {`open`, `in-progress`} AND `type: task`. Skip `resolved`, `wontfix`, `ready-for-review`, and `blocked` — those are terminal or already-acted-on states. `wontfix` is the "Dismiss" verdict and is reversible only by humans clicking Reopen; do not re-process it.
+4. Sort by `created` ascending (oldest first), but bump anything with `@ai` in the body to the top.
+5. Skip `type: discussion` (humans only — never modify code in response to these). For `type: question`, answer in-thread but do not modify code.
 
 ## How to process a single comment
 
