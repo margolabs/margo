@@ -42,6 +42,7 @@ const USAGE = `usage: margo <command> [flags]
 
 Commands:
   init                  scaffold .margo/ in the current project
+                          + server mode: --server URL --project SLUG [--token-env NAME]
   install-skill         install the /margo skill into Claude Code
   update                update the .margo/ scaffold to the latest templates
   uninstall             remove the .margo/ scaffold
@@ -69,7 +70,11 @@ async function main(): Promise<void> {
   const cwd = process.cwd();
   switch (cmd) {
     case 'init':
-      await init(cwd);
+      await init(cwd, {
+        server: flags.server,
+        project: flags.project,
+        tokenEnv: flags.tokenEnv,
+      });
       break;
     case 'install-skill':
       await installSkill(cwd, { scope: flags.scope });
@@ -288,6 +293,8 @@ function parseFlags(args: string[]): {
   slug?: string;
   project?: string;
   role?: string;
+  server?: string;
+  tokenEnv?: string;
 } {
   const user = args.includes('--user');
   const project = args.includes('--project');
@@ -310,6 +317,8 @@ function parseFlags(args: string[]): {
     slug: readValueFlag(args, '--slug', undefined),
     project: readValueFlag(args, '--project', undefined),
     role: readValueFlag(args, '--role', undefined),
+    server: readValueFlag(args, '--server', undefined),
+    tokenEnv: readValueFlag(args, '--token-env', undefined),
   };
 }
 
@@ -384,9 +393,28 @@ export async function findMargoDir(cwd: string): Promise<string | null> {
  * don't anchor to git root — that's what produced the cross-app inbox
  * bleed before.
  */
-async function init(cwd: string, opts: { overwriteTemplates?: boolean } = {}): Promise<void> {
+async function init(
+  cwd: string,
+  opts: {
+    overwriteTemplates?: boolean;
+    /** Host URL for server mode. When set, scaffolds margo.config.json
+     *  at the repo root and skips local comments dir / git automation. */
+    server?: string;
+    /** Project slug on the host. Required when `server` is set. */
+    project?: string;
+    /** Env var name that will hold the bearer token. Defaults to MARGO_TOKEN. */
+    tokenEnv?: string;
+  } = {},
+): Promise<void> {
   // Verify a git repo exists above CWD; abort otherwise.
   await resolveGitRoot(cwd);
+
+  const serverMode = !!opts.server;
+  if (serverMode && !opts.project) {
+    console.error('[margo] --server requires --project <slug>');
+    process.exit(1);
+  }
+  const tokenEnv = opts.tokenEnv ?? 'MARGO_TOKEN';
 
   // Warn (but proceed) if there's an existing `.margo/` higher up — the
   // user might have init'd at git root earlier and now be confused about
@@ -400,11 +428,31 @@ async function init(cwd: string, opts: { overwriteTemplates?: boolean } = {}): P
   }
 
   const margoDir = path.join(cwd, '.margo');
-  await fs.mkdir(path.join(margoDir, 'comments'), { recursive: true });
+  // In server mode the comments directory isn't used (storage is remote);
+  // skip creating it so `git status` doesn't show an empty tracked dir.
+  // .margo/CLAUDE.md and config.json are still helpful for AI/UI
+  // metadata that's workspace-shaped regardless of storage backend.
+  if (serverMode) {
+    await fs.mkdir(margoDir, { recursive: true });
+  } else {
+    await fs.mkdir(path.join(margoDir, 'comments'), { recursive: true });
+    await ensureGitkeep(path.join(margoDir, 'comments'));
+  }
 
   await copyTemplate('config.json', path.join(margoDir, 'config.json'), opts.overwriteTemplates);
   await copyTemplate('CLAUDE.md', path.join(margoDir, 'CLAUDE.md'), opts.overwriteTemplates);
-  await ensureGitkeep(path.join(margoDir, 'comments'));
+
+  if (serverMode) {
+    // In server mode autoCommit/autoPush are noise — no local comments
+    // to commit. Patch the freshly-copied config.json to reflect that
+    // before the dev server reads it.
+    await patchServerWorkspaceConfig(path.join(margoDir, 'config.json'));
+    await writeMargoConfigJson(cwd, opts.server!, opts.project!, tokenEnv);
+    await verifyHostReachable(opts.server!);
+    if (process.env[tokenEnv]) {
+      await verifyTokenWorks(opts.server!, opts.project!, process.env[tokenEnv]!);
+    }
+  }
 
   // Pick the first integration that matches the project. We don't try both —
   // a project that mixes Vite + Next.js is unusual enough to handle by hand.
@@ -416,8 +464,98 @@ async function init(cwd: string, opts: { overwriteTemplates?: boolean } = {}): P
   }
 
   console.log('[margo] init complete.');
-  console.log('       Review .margo/config.json (especially the roster) and run `npm run dev`.');
+  if (serverMode) {
+    console.log(`       Server mode: comments live on ${opts.server}, project '${opts.project}'.`);
+    if (!process.env[tokenEnv]) {
+      console.log('');
+      console.log(`       Set ${tokenEnv} in your shell with the token your host admin issued:`);
+      console.log(`         export ${tokenEnv}=mgo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`);
+      console.log('');
+    }
+    console.log('       Then `npm run dev` and pin away — the host is the source of truth.');
+  } else {
+    console.log('       Review .margo/config.json (especially the roster) and run `npm run dev`.');
+  }
   await printSkillHint(cwd);
+}
+
+/** Write `margo.config.json` at the repo root with the server connection
+ *  details. JSON (not TS/JS) so the loader works with zero module
+ *  resolution — the user can convert to TS later for IntelliSense. */
+async function writeMargoConfigJson(
+  cwd: string,
+  serverUrl: string,
+  project: string,
+  tokenEnv: string,
+): Promise<void> {
+  const file = path.join(cwd, 'margo.config.json');
+  try {
+    await fs.access(file);
+    // Don't clobber an existing config — the user may have customized it.
+    console.log(`[margo] margo.config.json already exists at ${file}; leaving it alone.`);
+    return;
+  } catch { /* doesn't exist, write it */ }
+  const body = {
+    storage: 'server',
+    server: {
+      url: serverUrl,
+      project,
+      auth: { type: 'bearer', tokenEnv },
+    },
+  };
+  await fs.writeFile(file, JSON.stringify(body, null, 2) + '\n', 'utf8');
+  console.log(`[margo] wrote ${file}`);
+}
+
+/** Flip autoCommit/autoPush off in a freshly-scaffolded .margo/config.json
+ *  for server mode — leaving them on would be a noop (no local files to
+ *  commit) but confusing in the file. */
+async function patchServerWorkspaceConfig(file: string): Promise<void> {
+  try {
+    const raw = await fs.readFile(file, 'utf8');
+    const cfg = JSON.parse(raw) as { git?: Record<string, unknown> };
+    cfg.git = { ...(cfg.git ?? {}), autoCommit: false, autoPush: false };
+    await fs.writeFile(file, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+  } catch (err) {
+    console.warn(`[margo] could not adjust workspace config for server mode: ${(err as Error).message}`);
+  }
+}
+
+async function verifyHostReachable(url: string): Promise<void> {
+  const trimmed = url.replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${trimmed}/healthz`, { signal: AbortSignal.timeout(3000) });
+    if (res.ok) {
+      console.log(`[margo] host ${trimmed} reachable (200 OK on /healthz).`);
+    } else {
+      console.warn(`[margo] host responded with ${res.status} on /healthz — proceeding anyway.`);
+    }
+  } catch (err) {
+    console.warn(`[margo] could not reach ${trimmed}/healthz: ${(err as Error).message}`);
+    console.warn('        margo.config.json is still scaffolded — the plugin will retry at dev-server boot.');
+  }
+}
+
+async function verifyTokenWorks(url: string, project: string, token: string): Promise<void> {
+  const trimmed = url.replace(/\/+$/, '');
+  try {
+    const res = await fetch(
+      `${trimmed}/api/projects/${encodeURIComponent(project)}/me`,
+      { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) },
+    );
+    if (res.ok) {
+      const me = (await res.json()) as { email?: string; name?: string };
+      console.log(`[margo] token authenticated as ${me.name} <${me.email}>.`);
+    } else if (res.status === 401) {
+      console.warn('[margo] token rejected (401). Ask the host admin to reissue.');
+    } else if (res.status === 403) {
+      console.warn(`[margo] token authenticated but no access to '${project}' (403). Ask to be added to the project.`);
+    } else {
+      console.warn(`[margo] /me returned ${res.status}; check the server URL/project.`);
+    }
+  } catch (err) {
+    console.warn(`[margo] could not verify token: ${(err as Error).message}`);
+  }
 }
 
 /**
