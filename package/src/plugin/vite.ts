@@ -13,7 +13,7 @@ import type { ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
 import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } from '../server/endpoints.js';
 import type { SseClient } from '../server/handlers.js';
-import { LocalTransport } from '../storage/local-transport.js';
+import { createTransport } from '../storage/factory.js';
 import type { Transport } from '../storage/transport.js';
 import type { MargoConfig } from '../shared/types.js';
 
@@ -87,11 +87,13 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
       }
     },
 
-    configureServer(server) {
+    async configureServer(server) {
       if (opts.disabled) return;
-      // Construct the local-mode transport. Future: read margo.config.ts to
-      // pick LocalTransport vs RemoteTransport per workspace.
-      transport = new LocalTransport({ rootDir: viteRoot, commentsDir, config });
+      // Read margo.config.* and pick the right backend. Local stays the
+      // default — workspaces with no margo.config see no behavior change.
+      const created = await createTransport({ rootDir: viteRoot, commentsDir, config });
+      transport = created.transport;
+      console.log(`[margo] storage mode: ${created.mode}${created.configPath ? ` (from ${created.configPath})` : ''}`);
       // Bridge transport events into the SSE stream so connected overlays
       // re-render on file changes / upstream divergence.
       transport.subscribe((e) => broadcastSse(ctx(), e));

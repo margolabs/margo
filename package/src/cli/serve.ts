@@ -30,7 +30,7 @@ import * as url from 'node:url';
 import type { ServerResponse } from 'node:http';
 import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } from '../server/endpoints.js';
 import type { SseClient } from '../server/handlers.js';
-import { LocalTransport } from '../storage/local-transport.js';
+import { createTransport } from '../storage/factory.js';
 import type { MargoConfig } from '../shared/types.js';
 
 const CLI_DIR = path.dirname(url.fileURLToPath(import.meta.url));
@@ -87,7 +87,9 @@ export async function serve(opts: ServeOptions): Promise<void> {
   }
 
   const sseClients = new Set<SseClient>();
-  const transport = new LocalTransport({ rootDir, commentsDir, config });
+  const created = await createTransport({ rootDir, commentsDir, config });
+  const transport = created.transport;
+  console.log(`[margo] storage mode: ${created.mode}${created.configPath ? ` (from ${created.configPath})` : ''}`);
 
   const ctx = (): EndpointContext => ({
     rootDir,

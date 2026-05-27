@@ -42,7 +42,7 @@ import {
   type HandlerContext,
   type SseClient,
 } from '../server/handlers.js';
-import { LocalTransport } from '../storage/local-transport.js';
+import { createTransport } from '../storage/factory.js';
 import type { Transport } from '../storage/transport.js';
 import type { CreateCommentRequest, MargoConfig, UpdateCommentRequest } from '../shared/types.js';
 
@@ -82,8 +82,10 @@ async function ensureCtx(): Promise<HandlerContext> {
     // .margo/config.json doesn't exist — handlers still work, just with defaults.
   }
   const sseClients = new Set<SseClient>();
-  const transport = new LocalTransport({ rootDir, commentsDir, config });
+  const created = await createTransport({ rootDir, commentsDir, config });
+  const transport = created.transport;
   cachedTransport = transport;
+  console.log(`[margo] storage mode: ${created.mode}${created.configPath ? ` (from ${created.configPath})` : ''}`);
   cachedCtx = {
     rootDir,
     transport,
