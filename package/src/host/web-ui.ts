@@ -224,6 +224,93 @@ export function renderLogin(opts: { errorMessage?: string } = {}): string {
   `)
 }
 
+export function renderSetup(): string {
+  // Distinct first-run UX: framed as "claim the host" rather than "create
+  // an account." The form fields are similar to signup but the copy, layout,
+  // and call-to-action are different so an operator doesn't mistake this
+  // for an everyday signup form.
+  return shell('Set up', `
+    <div class="setup-bg">
+      <div class="container narrow" style="padding-top:64px">
+        <div class="setup-card">
+          <div class="setup-eyebrow">First-run setup</div>
+          <h1 class="setup-title">Claim this host</h1>
+          <p class="muted">
+            This margo host has no accounts yet. The first user to set up
+            becomes the <strong>superuser</strong> — they manage projects,
+            members, and the host itself. Anyone you share the URL with
+            after this will sign up as a regular user.
+          </p>
+          <form id="form" autocomplete="on" style="margin-top:18px">
+            <label for="name">Your name</label>
+            <input id="name" name="name" type="text" autocomplete="name" required autofocus />
+            <label for="email">Your email</label>
+            <input id="email" name="email" type="email" autocomplete="email" required />
+            <label for="password">Pick a password</label>
+            <input id="password" name="password" type="password" autocomplete="new-password" required minlength="8" />
+            <p class="muted" style="margin-top:6px; font-size:12px">At least 8 characters. You can change it later from your dashboard.</p>
+            <div class="actions">
+              <button type="submit" class="primary">Become superuser</button>
+            </div>
+          </form>
+          <div id="error" class="error" style="display:none; margin-top:14px"></div>
+        </div>
+        <p class="setup-footnote">
+          Once this account exists, the welcome page is gone and the regular
+          login/signup pages take over.
+        </p>
+      </div>
+    </div>
+    <style>
+      .setup-bg {
+        min-height: 100vh;
+        background:
+          radial-gradient(ellipse at top, hsl(220 70% 50% / .08) 0%, transparent 50%),
+          radial-gradient(ellipse at bottom, hsl(280 70% 50% / .06) 0%, transparent 50%),
+          var(--bg);
+      }
+      .setup-card {
+        background: var(--panel); border: 1px solid var(--border);
+        border-radius: 12px; padding: 32px;
+        box-shadow: 0 12px 40px hsl(220 30% 30% / .06);
+      }
+      .setup-eyebrow {
+        font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--accent); font-weight: 600; margin-bottom: 8px;
+      }
+      .setup-title {
+        margin: 0 0 12px; font-size: 24px; font-weight: 600; letter-spacing: -0.02em;
+      }
+      .setup-footnote {
+        margin-top: 20px; text-align: center; color: var(--muted); font-size: 12px;
+      }
+    </style>
+    <script>
+      const form = document.getElementById('form');
+      const errorBox = document.getElementById('error');
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        errorBox.style.display = 'none';
+        const fd = new FormData(form);
+        const body = {
+          name: fd.get('name'),
+          email: fd.get('email'),
+          password: fd.get('password'),
+        };
+        const res = await fetch('/api/auth/setup-admin', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (res.ok) { location.href = '/dashboard'; return; }
+        const data = await res.json().catch(() => ({}));
+        errorBox.textContent = data.error || ('Setup failed (' + res.status + ').');
+        errorBox.style.display = 'block';
+      });
+    </script>
+  `)
+}
+
 export function renderSignup(opts: { errorMessage?: string } = {}): string {
   const error = opts.errorMessage
     ? `<div class="error">${escapeHtml(opts.errorMessage)}</div>`

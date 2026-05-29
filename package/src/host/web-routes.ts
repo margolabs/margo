@@ -8,7 +8,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { issueSessionCookie, clearSessionCookie, readSession, setCookieHeader } from './session.js'
-import { renderDashboard, renderLogin, renderProject, renderSignup, type DashboardData } from './web-ui.js'
+import { renderDashboard, renderLogin, renderProject, renderSetup, renderSignup, type DashboardData } from './web-ui.js'
 import type { Role, UserRecord, UserStore } from './user-store.js'
 
 export interface WebContext {
@@ -29,11 +29,33 @@ export async function handleWebRoute(
   if (path === '/' && req.method === 'GET') {
     return redirectBasedOnSession(ctx, req, res)
   }
+  if (path === '/setup' && req.method === 'GET') {
+    // First-run welcome page. Disappears once any user exists — visitors
+    // landing here after the admin is claimed get redirected to /login.
+    if ((await ctx.users.userCount()) > 0) {
+      res.writeHead(302, { location: '/login' }).end()
+      return true
+    }
+    return sendHtml(res, 200, renderSetup())
+  }
   if (path === '/login' && req.method === 'GET') {
+    // No admin yet → bounce to /setup. Avoids a confusing "log in with
+    // what?" dead-end on a fresh host.
+    if ((await ctx.users.userCount()) === 0) {
+      res.writeHead(302, { location: '/setup' }).end()
+      return true
+    }
     return sendHtml(res, 200, renderLogin())
   }
   if (path === '/signup' && req.method === 'GET') {
+    if ((await ctx.users.userCount()) === 0) {
+      res.writeHead(302, { location: '/setup' }).end()
+      return true
+    }
     return sendHtml(res, 200, renderSignup())
+  }
+  if (path === '/api/auth/setup-admin' && req.method === 'POST') {
+    return handleSetupAdmin(ctx, req, res)
   }
   if (path === '/dashboard' && req.method === 'GET') {
     return handleDashboard(ctx, req, res)
@@ -98,6 +120,12 @@ async function redirectBasedOnSession(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<boolean> {
+  // Fresh-host case first: no admin → /setup. Beats sending the operator
+  // through a login page they have no credentials for.
+  if ((await ctx.users.userCount()) === 0) {
+    res.writeHead(302, { location: '/setup' }).end()
+    return true
+  }
   const user = await currentUser(ctx, req)
   res.writeHead(302, { location: user ? '/dashboard' : '/login' }).end()
   return true
@@ -144,6 +172,12 @@ async function handleSignup(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<boolean> {
+  // Block regular signup on a fresh host — the operator must claim
+  // admin via /setup first. Returns 412 so the front-end could redirect
+  // to /setup if a stale page somehow bypasses the GET-time redirect.
+  if ((await ctx.users.userCount()) === 0) {
+    return sendJson(res, 412, { error: 'no admin yet — visit /setup to claim the host first' })
+  }
   const body = await readJson<{ email?: string; name?: string; password?: string }>(req)
   const email = (body.email ?? '').trim()
   const name = (body.name ?? '').trim()
@@ -155,6 +189,33 @@ async function handleSignup(
   const secret = await ctx.sessionSecret()
   setCookieHeader(res, issueSessionCookie(user.id, secret))
   return sendJson(res, 201, { id: user.id, email: user.email, name: user.name })
+}
+
+async function handleSetupAdmin(
+  ctx: WebContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<boolean> {
+  // Belt-and-suspenders: even though /setup GET refuses to render after
+  // any user exists, a client could POST directly. Refuse here too.
+  if ((await ctx.users.userCount()) > 0) {
+    return sendJson(res, 409, { error: 'this host is already initialized; use /login' })
+  }
+  const body = await readJson<{ email?: string; name?: string; password?: string }>(req)
+  const email = (body.email ?? '').trim()
+  const name = (body.name ?? '').trim()
+  const password = body.password ?? ''
+  const err = validateSignup(email, name, password)
+  if (err) return sendJson(res, 400, { error: err })
+  const result = await ctx.users.setupAdmin(email, name, password)
+  if (result === 'already_initialized') {
+    // Race: someone else claimed admin between our pre-check and the
+    // mutate. Tell the client to log in instead.
+    return sendJson(res, 409, { error: 'this host was just initialized; use /login' })
+  }
+  const secret = await ctx.sessionSecret()
+  setCookieHeader(res, issueSessionCookie(result.id, secret))
+  return sendJson(res, 201, { id: result.id, email: result.email, name: result.name, isSuperuser: true })
 }
 
 async function handleLogin(

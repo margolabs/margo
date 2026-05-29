@@ -161,21 +161,14 @@ export class UserStore {
     })
   }
 
-  /** Sign up a new user with a password — the flow the web /signup form
-   *  calls. Differs from createUser in that a password hash is required
-   *  AND a duplicate email returns null instead of throwing (so the UI
-   *  can surface a friendly "email already registered" without parsing
-   *  exception messages).
-   *
-   *  First-signup-wins admin policy: if the user store is empty when this
-   *  call lands, the new user gets isSuperuser:true. The check happens
-   *  inside the mutate() critical section so two concurrent first-signups
-   *  can't both claim superuser. */
+  /** Sign up a new regular user. Returns null on duplicate email.
+   *  Always creates a non-superuser account — the first-run admin claim
+   *  goes through a separate setupAdmin() path with its own UI. Callers
+   *  must check `userCount()` upstream and refuse the signup if no
+   *  admin exists yet; this method doesn't gate on that, but consumers
+   *  (web-routes) do. */
   async signup(email: string, name: string, plainPassword: string): Promise<UserRecord | null> {
     await this.load()
-    // Fast-path 409: another user with this email already exists. Re-
-    // checked inside mutate() below to be race-safe against a parallel
-    // signup of the same email between this read and the write.
     if (await this.findUserByEmail(email)) return null
     const passwordHash = await hashPassword(plainPassword)
     const id = `u-${nextSuffix()}`
@@ -185,20 +178,51 @@ export class UserStore {
         if (d.users.some((u) => u.email.toLowerCase() === lowerEmail)) {
           throw new Error('duplicate_email')
         }
-        const isFirstUser = d.users.length === 0
         const record: UserRecord = {
           id,
           email,
           name,
           createdAt: new Date().toISOString(),
           passwordHash,
-          ...(isFirstUser ? { isSuperuser: true } : {}),
         }
         d.users.push(record)
         return record
       })
     } catch (err) {
       if ((err as Error).message === 'duplicate_email') return null
+      throw err
+    }
+  }
+
+  /** First-run admin claim: creates the superuser account on a fresh
+   *  host. Asserts inside the mutate critical section that no user
+   *  exists yet, so two concurrent /setup submissions can't both win.
+   *  Returns:
+   *   - the new superuser record on success
+   *   - 'already_initialized' if the host already has at least one user
+   *   - 'duplicate_email' is impossible here (the store was empty), but
+   *      we keep the same shape for symmetry with signup(). */
+  async setupAdmin(email: string, name: string, plainPassword: string): Promise<UserRecord | 'already_initialized'> {
+    await this.load()
+    if (this.data.users.length > 0) return 'already_initialized'
+    const passwordHash = await hashPassword(plainPassword)
+    const id = `u-${nextSuffix()}`
+    try {
+      return await this.mutate((d) => {
+        if (d.users.length > 0) throw new Error('already_initialized')
+        const record: UserRecord = {
+          id,
+          email,
+          name,
+          createdAt: new Date().toISOString(),
+          passwordHash,
+          isSuperuser: true,
+        }
+        d.users.push(record)
+        return record
+      })
+    } catch (err) {
+      if ((err as Error).message === 'already_initialized') return 'already_initialized'
       throw err
     }
   }
