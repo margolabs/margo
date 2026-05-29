@@ -165,23 +165,42 @@ export class UserStore {
    *  calls. Differs from createUser in that a password hash is required
    *  AND a duplicate email returns null instead of throwing (so the UI
    *  can surface a friendly "email already registered" without parsing
-   *  exception messages). The created user is never a superuser; admin
-   *  promotion is a separate explicit step. */
+   *  exception messages).
+   *
+   *  First-signup-wins admin policy: if the user store is empty when this
+   *  call lands, the new user gets isSuperuser:true. The check happens
+   *  inside the mutate() critical section so two concurrent first-signups
+   *  can't both claim superuser. */
   async signup(email: string, name: string, plainPassword: string): Promise<UserRecord | null> {
     await this.load()
+    // Fast-path 409: another user with this email already exists. Re-
+    // checked inside mutate() below to be race-safe against a parallel
+    // signup of the same email between this read and the write.
     if (await this.findUserByEmail(email)) return null
     const passwordHash = await hashPassword(plainPassword)
-    const record: UserRecord = {
-      id: `u-${nextSuffix()}`,
-      email,
-      name,
-      createdAt: new Date().toISOString(),
-      passwordHash,
+    const id = `u-${nextSuffix()}`
+    const lowerEmail = email.toLowerCase()
+    try {
+      return await this.mutate((d) => {
+        if (d.users.some((u) => u.email.toLowerCase() === lowerEmail)) {
+          throw new Error('duplicate_email')
+        }
+        const isFirstUser = d.users.length === 0
+        const record: UserRecord = {
+          id,
+          email,
+          name,
+          createdAt: new Date().toISOString(),
+          passwordHash,
+          ...(isFirstUser ? { isSuperuser: true } : {}),
+        }
+        d.users.push(record)
+        return record
+      })
+    } catch (err) {
+      if ((err as Error).message === 'duplicate_email') return null
+      throw err
     }
-    return this.mutate((d) => {
-      d.users.push(record)
-      return record
-    })
   }
 
   /** Set or replace a user's password hash. Used by signup-after-bootstrap

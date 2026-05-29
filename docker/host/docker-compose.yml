@@ -1,14 +1,13 @@
 # margo host — self-hostable comment server for teams using server-mode
-# storage. Copy `.env.example` to `.env`, fill in the secrets, then:
+# storage. Stand it up with one command:
 #
 #   docker compose up -d
 #
-# First boot auto-bootstraps a superuser from MARGO_HOST_TOKEN +
-# MARGO_HOST_USER_EMAIL/_NAME so the host comes up ready to issue
-# tokens for teammates via `docker compose exec`:
-#
-#   docker compose exec margo-host node /app/dist/install/cli.js \
-#     host:create-user --email alice@acme --name Alice --data-dir /data
+# No env vars required. Open http://localhost:7331/signup in your
+# browser and the first account to register becomes the superuser. Share
+# the URL with teammates after that and they self-serve their own
+# accounts; you grant project access from the dashboard or via
+# `docker compose exec`.
 #
 # Persist /data via the named volume — that's where users.json + every
 # project's git history lives. Losing it loses the audit trail.
@@ -23,13 +22,6 @@ services:
       # Build context is the package/ directory (see Dockerfile header).
       context: ../../package
       dockerfile: ../docker/host/Dockerfile
-    environment:
-      # Required on first boot only — used to materialize the superuser
-      # account into users.json. After that the value can change or be
-      # removed; the persisted token in users.json is what authenticates.
-      MARGO_HOST_TOKEN: "${MARGO_HOST_TOKEN:?MARGO_HOST_TOKEN required - try openssl rand -hex 32}"
-      MARGO_HOST_USER_EMAIL: "${MARGO_HOST_USER_EMAIL:-admin@localhost}"
-      MARGO_HOST_USER_NAME: "${MARGO_HOST_USER_NAME:-Margo Admin}"
     ports:
       - "${MARGO_HOST_PORT:-7331}:7331"
     volumes:
