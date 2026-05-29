@@ -1,0 +1,36 @@
+{
+  "name": "margo-host",
+  "version": "0.2.0",
+  "description": "Self-hostable margo comment server. Runs once per team; clients connect via the margo-dev plugin in server mode.",
+  "author": "Stanley Song <sxhuan@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/margolabs/margo#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/margolabs/margo.git",
+    "directory": "packages/host"
+  },
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json"
+  },
+  "bin": {
+    "margo-host": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -4,14 +4,14 @@
 # runtime.
 #
 # Build (run from repo root):
-#   docker build -f docker/host/Dockerfile -t margo-host:latest package
+#   docker build -f docker/host/Dockerfile -t margo-host:latest packages/host
 #
 # Or via compose (from docker/host/):
 #   docker compose up -d
 #
-# The build context is `package/` (not the repo root) so node_modules,
-# demo apps, and .git stay out of the layer cache. A `.dockerignore`
-# inside package/ prunes the rest.
+# The build context is `packages/host/` (not the repo root) so
+# node_modules, demo apps, and .git stay out of the layer cache. A
+# `.dockerignore` inside packages/host/ prunes the rest.
 
 ARG NODE_VERSION=20-alpine
 
@@ -24,16 +24,11 @@ WORKDIR /src
 COPY package.json package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
-# Then the source — exclude items via .dockerignore in package/.
+# Then the source.
 COPY tsconfig.json ./
-COPY scripts ./scripts
 COPY src ./src
 
-RUN npm run build
-
-# Drop dev dependencies — the runtime image will install only --omit=dev
-# from package.json, so we no longer need the build-time copy here.
-RUN rm -rf node_modules
+RUN npm run build && rm -rf node_modules
 
 # ─── Runtime stage ───────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}
@@ -51,6 +46,11 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit
 # Compiled output.
 COPY --from=builder /src/dist ./dist
 
+# Make the `margo-host` binary available on PATH inside the container so
+# `docker exec margo-host-local margo-host list-users …` Just Works™.
+RUN chmod +x /app/dist/cli.js && \
+    ln -s /app/dist/cli.js /usr/local/bin/margo-host
+
 # `/data` holds all per-project storage + users.json. Mount as a volume
 # to persist across container restarts.
 RUN mkdir -p /data && chown -R node:node /app /data
@@ -65,4 +65,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 # Run as the non-root `node` user (uid 1000) baked into the base image.
 USER node
 
-ENTRYPOINT ["node", "/app/dist/install/cli.js", "host", "--data-dir", "/data", "--port", "7331"]
+ENTRYPOINT ["node", "/app/dist/cli.js", "run", "--data-dir", "/data", "--port", "7331"]

@@ -19,9 +19,9 @@ services:
     # block below is preserved for that case.
     image: margolabs/margo-host:0.1.0
     build:
-      # Build context is the package/ directory (see Dockerfile header).
-      context: ../../package
-      dockerfile: ../docker/host/Dockerfile
+      # Build context is packages/host/ (see Dockerfile header).
+      context: ../../packages/host
+      dockerfile: ../../docker/host/Dockerfile
     ports:
       - "${MARGO_HOST_PORT:-7331}:7331"
     volumes:

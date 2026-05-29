@@ -2,7 +2,8 @@
   "name": "margo-monorepo",
   "private": true,
   "workspaces": [
-    "package",
+    "packages/dev",
+    "packages/host",
     "demo-vite-js",
     "demo-vite-vue",
     "demo-vite-react",

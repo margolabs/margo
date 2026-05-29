@@ -102,7 +102,7 @@ export async function startHost(opts: StartHostOptions): Promise<HostHandle> {
   console.log(`[margo-host] listening on http://localhost:${opts.port}`)
   console.log(`[margo-host] data root: ${opts.dataRoot}`)
   if (userCount === 0) {
-    console.log(`[margo-host] no admin yet — first signup at http://localhost:${opts.port}/signup becomes superuser.`)
+    console.log(`[margo-host] no admin yet — claim it at http://localhost:${opts.port}/setup`)
     console.log(`[margo-host] DON'T share this URL until you've claimed admin.`)
   } else {
     const supers = (await opts.users.listUsers()).filter((u) => u.isSuperuser).length

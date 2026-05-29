@@ -1,0 +1,526 @@
+// User + token persistence for the host. JSON file at the data root,
+// atomic writes via tmp-file + rename. Deliberately *not* SQLite:
+//
+//   - Self-hosted margo instances see a handful of writes per second at
+//     peak (humans pinning comments). A single JSON file handles that
+//     trivially with no native deps to compile per platform.
+//   - The schema is small (users, tokens, projects, roster) — SQL would
+//     be more ceremony than the problem deserves.
+//   - Easy to migrate later if scale changes: read JSON, write to a real
+//     database.
+//
+// Tokens are hashed at rest (sha256). The plain token is shown once at
+// creation time and never again — if the operator loses it they revoke
+// + reissue rather than recover.
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+const EMPTY = { version: 1, users: [], tokens: [], projects: [], memberships: [] };
+export class UserStore {
+    file;
+    data = EMPTY;
+    loaded = false;
+    // Write serializer so two concurrent updates can't lose a record by
+    // racing the read-modify-write cycle.
+    writeChain = Promise.resolve();
+    constructor(dataRoot) {
+        this.file = path.join(path.resolve(dataRoot), 'users.json');
+    }
+    async load() {
+        if (this.loaded)
+            return;
+        await this.reload();
+        this.loaded = true;
+    }
+    /** Force a re-read from disk. Used by resolveToken so cross-process
+     *  changes (CLI revoke while host is running) take effect immediately. */
+    async reload() {
+        try {
+            const raw = await fs.readFile(this.file, 'utf8');
+            const parsed = JSON.parse(raw);
+            this.data = normalize(parsed);
+        }
+        catch (err) {
+            if (err.code !== 'ENOENT')
+                throw err;
+            this.data = { ...EMPTY };
+        }
+    }
+    /** Total users currently on file (excluding none — there's no soft-delete). */
+    async userCount() {
+        await this.load();
+        return this.data.users.length;
+    }
+    async listUsers() {
+        await this.load();
+        return this.data.users.slice();
+    }
+    async getUser(id) {
+        await this.load();
+        return this.data.users.find((u) => u.id === id) ?? null;
+    }
+    async findUserByEmail(email) {
+        await this.load();
+        const lower = email.toLowerCase();
+        return this.data.users.find((u) => u.email.toLowerCase() === lower) ?? null;
+    }
+    async createUser(email, name, opts) {
+        await this.load();
+        const existing = await this.findUserByEmail(email);
+        if (existing)
+            throw new Error(`user with email ${email} already exists (id ${existing.id})`);
+        const record = {
+            id: `u-${nextSuffix()}`,
+            email,
+            name,
+            createdAt: new Date().toISOString(),
+            ...(opts?.isSuperuser ? { isSuperuser: true } : {}),
+        };
+        return this.mutate((d) => {
+            d.users.push(record);
+            return record;
+        });
+    }
+    /** Sign up a new regular user. Returns null on duplicate email.
+     *  Always creates a non-superuser account — the first-run admin claim
+     *  goes through a separate setupAdmin() path with its own UI. Callers
+     *  must check `userCount()` upstream and refuse the signup if no
+     *  admin exists yet; this method doesn't gate on that, but consumers
+     *  (web-routes) do. */
+    async signup(email, name, plainPassword) {
+        await this.load();
+        if (await this.findUserByEmail(email))
+            return null;
+        const passwordHash = await hashPassword(plainPassword);
+        const id = `u-${nextSuffix()}`;
+        const lowerEmail = email.toLowerCase();
+        try {
+            return await this.mutate((d) => {
+                if (d.users.some((u) => u.email.toLowerCase() === lowerEmail)) {
+                    throw new Error('duplicate_email');
+                }
+                const record = {
+                    id,
+                    email,
+                    name,
+                    createdAt: new Date().toISOString(),
+                    passwordHash,
+                };
+                d.users.push(record);
+                return record;
+            });
+        }
+        catch (err) {
+            if (err.message === 'duplicate_email')
+                return null;
+            throw err;
+        }
+    }
+    /** First-run admin claim: creates the superuser account on a fresh
+     *  host. Asserts inside the mutate critical section that no user
+     *  exists yet, so two concurrent /setup submissions can't both win.
+     *  Returns:
+     *   - the new superuser record on success
+     *   - 'already_initialized' if the host already has at least one user
+     *   - 'duplicate_email' is impossible here (the store was empty), but
+     *      we keep the same shape for symmetry with signup(). */
+    async setupAdmin(email, name, plainPassword) {
+        await this.load();
+        if (this.data.users.length > 0)
+            return 'already_initialized';
+        const passwordHash = await hashPassword(plainPassword);
+        const id = `u-${nextSuffix()}`;
+        try {
+            return await this.mutate((d) => {
+                if (d.users.length > 0)
+                    throw new Error('already_initialized');
+                const record = {
+                    id,
+                    email,
+                    name,
+                    createdAt: new Date().toISOString(),
+                    passwordHash,
+                    isSuperuser: true,
+                };
+                d.users.push(record);
+                return record;
+            });
+        }
+        catch (err) {
+            if (err.message === 'already_initialized')
+                return 'already_initialized';
+            throw err;
+        }
+    }
+    /** Set or replace a user's password hash. Used by signup-after-bootstrap
+     *  (a CLI-created user wants UI access) and by future password-reset
+     *  flows. Email-on-record stays the lookup key. */
+    async setPassword(userId, plainPassword) {
+        await this.load();
+        if (!(await this.getUser(userId)))
+            throw new Error(`no user with id ${userId}`);
+        const passwordHash = await hashPassword(plainPassword);
+        await this.mutate((d) => {
+            const u = d.users.find((x) => x.id === userId);
+            if (u)
+                u.passwordHash = passwordHash;
+        });
+    }
+    /** Verify a plaintext password against the stored hash. Returns the
+     *  user record on success, null on bad credentials OR unknown email.
+     *  Same return shape for both cases keeps the timing leak small (the
+     *  caller can't distinguish "wrong password" from "no such user"). */
+    async verifyLogin(email, plainPassword) {
+        await this.reload(); // cross-process freshness, same reason as resolveToken
+        const user = this.data.users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+        if (!user || !user.passwordHash) {
+            // Run a dummy verify against a known-bad hash to keep timing
+            // roughly equivalent between "no user" and "wrong password".
+            await verifyPassword(plainPassword, '00:00').catch(() => undefined);
+            return null;
+        }
+        const ok = await verifyPassword(plainPassword, user.passwordHash);
+        return ok ? user : null;
+    }
+    /** Lazily mint and persist the session-signing HMAC key, then return
+     *  it. Called by the session module on first use; the key sticks
+     *  around for the lifetime of the host until explicitly rotated. */
+    async getOrCreateSessionSecret() {
+        await this.load();
+        if (this.data.sessionSecret)
+            return this.data.sessionSecret;
+        const secret = crypto.randomBytes(48).toString('hex');
+        await this.mutate((d) => {
+            if (!d.sessionSecret)
+                d.sessionSecret = secret;
+        });
+        return this.data.sessionSecret ?? secret;
+    }
+    /** Toggle a user's superuser bit. Useful when promoting an additional
+     *  operator after the host has been running for a while. */
+    async setSuperuser(userId, value) {
+        await this.load();
+        const user = this.data.users.find((u) => u.id === userId);
+        if (!user)
+            throw new Error(`no user with id ${userId}`);
+        await this.mutate((d) => {
+            const u = d.users.find((x) => x.id === userId);
+            if (!u)
+                return;
+            if (value)
+                u.isSuperuser = true;
+            else
+                delete u.isSuperuser;
+        });
+    }
+    // ─── Projects ─────────────────────────────────────────────────────────
+    async listProjects() {
+        await this.load();
+        return this.data.projects.slice();
+    }
+    async getProject(slug) {
+        await this.load();
+        return this.data.projects.find((p) => p.slug === slug) ?? null;
+    }
+    async createProject(slug, name) {
+        if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
+            throw new Error(`invalid project slug: ${slug} (must match [a-zA-Z0-9._-]+)`);
+        }
+        await this.load();
+        if (await this.getProject(slug)) {
+            throw new Error(`project ${slug} already exists`);
+        }
+        const record = {
+            slug,
+            name,
+            createdAt: new Date().toISOString(),
+        };
+        return this.mutate((d) => {
+            d.projects.push(record);
+            return record;
+        });
+    }
+    /** GitLab-style: any signed-in user can create a project and becomes
+     *  its admin in one atomic step. Race-safe — the slug uniqueness check
+     *  and the create both run inside the mutate critical section, so two
+     *  concurrent create-project calls for the same slug get one winner
+     *  and one 'duplicate' error. */
+    async createProjectAsAdmin(creatorUserId, slug, name) {
+        if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
+            throw new Error(`invalid_slug`);
+        }
+        await this.load();
+        if (!(await this.getUser(creatorUserId)))
+            throw new Error(`no_user`);
+        return this.mutate((d) => {
+            if (d.projects.some((p) => p.slug === slug))
+                throw new Error('duplicate_slug');
+            const project = {
+                slug,
+                name,
+                createdAt: new Date().toISOString(),
+            };
+            const membership = {
+                userId: creatorUserId,
+                projectSlug: slug,
+                role: 'admin',
+                addedAt: project.createdAt,
+            };
+            d.projects.push(project);
+            d.memberships.push(membership);
+            return project;
+        });
+    }
+    /** Memberships for a user, joined with project metadata. Drives the
+     *  dashboard's "Your projects" section. */
+    async listMembershipsForUser(userId) {
+        await this.load();
+        const out = [];
+        for (const m of this.data.memberships) {
+            if (m.userId !== userId)
+                continue;
+            const project = this.data.projects.find((p) => p.slug === m.projectSlug);
+            if (project)
+                out.push({ project, role: m.role });
+        }
+        return out;
+    }
+    // ─── Memberships ──────────────────────────────────────────────────────
+    async listMembers(projectSlug) {
+        await this.load();
+        return this.data.memberships.filter((m) => m.projectSlug === projectSlug);
+    }
+    async getMembership(userId, projectSlug) {
+        await this.load();
+        return this.data.memberships.find((m) => m.userId === userId && m.projectSlug === projectSlug) ?? null;
+    }
+    async addMember(userId, projectSlug, role) {
+        await this.load();
+        if (!(await this.getUser(userId)))
+            throw new Error(`no user with id ${userId}`);
+        if (!(await this.getProject(projectSlug)))
+            throw new Error(`no project with slug ${projectSlug}`);
+        const existing = await this.getMembership(userId, projectSlug);
+        if (existing) {
+            // Idempotent role update — operator typing `add-member` twice with
+            // a different role is the natural way to promote/demote without a
+            // separate `set-member-role` command.
+            await this.mutate((d) => {
+                const m = d.memberships.find((x) => x.userId === userId && x.projectSlug === projectSlug);
+                if (m)
+                    m.role = role;
+            });
+            return { ...existing, role };
+        }
+        const record = {
+            userId,
+            projectSlug,
+            role,
+            addedAt: new Date().toISOString(),
+        };
+        return this.mutate((d) => {
+            d.memberships.push(record);
+            return record;
+        });
+    }
+    async removeMember(userId, projectSlug) {
+        await this.load();
+        await this.mutate((d) => {
+            d.memberships = d.memberships.filter((m) => !(m.userId === userId && m.projectSlug === projectSlug));
+        });
+    }
+    async listTokens() {
+        await this.load();
+        return this.data.tokens.filter((t) => !t.revokedAt);
+    }
+    async createToken(userId, label) {
+        await this.load();
+        const user = await this.getUser(userId);
+        if (!user)
+            throw new Error(`no user with id ${userId}`);
+        // 32 bytes of randomness → 64 hex chars. Plain token is `mgo_<hex>`
+        // so operators can recognize them on sight (similar to npm_/ghp_).
+        const plainToken = `mgo_${crypto.randomBytes(32).toString('hex')}`;
+        const hashed = sha256(plainToken);
+        const record = {
+            id: `t-${nextSuffix()}`,
+            userId,
+            hashedToken: hashed,
+            plainPrefix: plainToken.slice(0, 12),
+            label,
+            createdAt: new Date().toISOString(),
+        };
+        await this.mutate((d) => {
+            d.tokens.push(record);
+        });
+        return { record, plainToken };
+    }
+    /** Store a pre-existing plaintext token under a user. Only used by the
+     *  env-bootstrap path — the operator already chose the secret (via
+     *  MARGO_HOST_TOKEN) before we ever ran, and we adopt it as-is so the
+     *  upgrade is seamless. Normal token issuance goes through createToken,
+     *  which generates entropy itself. */
+    async adoptToken(userId, plainToken, label) {
+        await this.load();
+        const user = await this.getUser(userId);
+        if (!user)
+            throw new Error(`no user with id ${userId}`);
+        const record = {
+            id: `t-${nextSuffix()}`,
+            userId,
+            hashedToken: sha256(plainToken),
+            plainPrefix: plainToken.slice(0, 12),
+            label,
+            createdAt: new Date().toISOString(),
+        };
+        return this.mutate((d) => {
+            d.tokens.push(record);
+            return record;
+        });
+    }
+    async revokeToken(tokenId) {
+        await this.load();
+        const found = this.data.tokens.find((t) => t.id === tokenId);
+        if (!found)
+            throw new Error(`no token with id ${tokenId}`);
+        if (found.revokedAt)
+            return;
+        await this.mutate((d) => {
+            const t = d.tokens.find((x) => x.id === tokenId);
+            if (t)
+                t.revokedAt = new Date().toISOString();
+        });
+    }
+    /** Look up the user a plaintext token authenticates as. Returns null
+     *  for unknown / revoked tokens. Touches lastUsedAt as a side effect
+     *  so operators can see which tokens are live.
+     *
+     *  Always reads fresh from disk before checking. The host and the CLI
+     *  are separate processes that both touch users.json — the CLI revokes
+     *  a token, the host must pick that up on the next auth lookup without
+     *  needing a restart. The file is tiny (sub-KB for typical
+     *  installations), so re-reading per request is microseconds. */
+    async resolveToken(plainToken) {
+        await this.reload();
+        const hashed = sha256(plainToken);
+        const token = this.data.tokens.find((t) => t.hashedToken === hashed && !t.revokedAt);
+        if (!token)
+            return null;
+        const user = this.data.users.find((u) => u.id === token.userId);
+        if (!user)
+            return null;
+        // Fire-and-forget lastUsedAt update so auth latency stays in the
+        // microseconds — the file write is enqueued, not awaited. If two
+        // requests update the same token within a tick we lose one of the
+        // timestamps, which is fine (we only need approximate recency).
+        this.touchLastUsedAt(token.id);
+        return { user, token };
+    }
+    touchLastUsedAt(tokenId) {
+        this.writeChain = this.writeChain
+            .catch(() => undefined)
+            .then(async () => {
+            const t = this.data.tokens.find((x) => x.id === tokenId);
+            if (t) {
+                t.lastUsedAt = new Date().toISOString();
+                await this.persist();
+            }
+        });
+    }
+    async mutate(fn) {
+        // Serialize through writeChain so a flurry of CLI ops or concurrent
+        // mutations never read-then-overwrite with stale data.
+        let resolveOp;
+        let rejectOp;
+        const result = new Promise((resolve, reject) => {
+            resolveOp = resolve;
+            rejectOp = reject;
+        });
+        this.writeChain = this.writeChain
+            .catch(() => undefined)
+            .then(async () => {
+            try {
+                const out = fn(this.data);
+                await this.persist();
+                resolveOp(out);
+            }
+            catch (err) {
+                rejectOp(err);
+            }
+        });
+        return result;
+    }
+    /** Atomic write: serialize to a tmp file, then rename over the target.
+     *  Rename is atomic on POSIX, so a crash mid-write never leaves a
+     *  corrupt half-file on disk. */
+    async persist() {
+        const tmp = `${this.file}.${process.pid}.${Date.now()}.tmp`;
+        await fs.mkdir(path.dirname(this.file), { recursive: true });
+        await fs.writeFile(tmp, JSON.stringify(this.data, null, 2) + '\n', { mode: 0o600 });
+        await fs.rename(tmp, this.file);
+    }
+}
+function normalize(parsed) {
+    return {
+        version: 1,
+        users: Array.isArray(parsed.users) ? parsed.users : [],
+        tokens: Array.isArray(parsed.tokens) ? parsed.tokens : [],
+        projects: Array.isArray(parsed.projects) ? parsed.projects : [],
+        memberships: Array.isArray(parsed.memberships) ? parsed.memberships : [],
+    };
+}
+function sha256(input) {
+    return crypto.createHash('sha256').update(input).digest('hex');
+}
+// 8 random hex chars — plenty unique for the lifetime of a single host
+// while staying human-readable in CLI output ("u-3f8a91c2").
+function nextSuffix() {
+    return crypto.randomBytes(4).toString('hex');
+}
+// scrypt parameters: N=16384 (2^14), r=8, p=1 — the conservative
+// defaults from RFC 7914 + the libsodium docs. Slow enough on modern
+// CPUs (~50ms) to resist offline brute-force on a leaked users.json.
+const SCRYPT_KEYLEN = 64;
+const SCRYPT_OPTS = { N: 1 << 14, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+function deriveScrypt(password, salt) {
+    return new Promise((resolve, reject) => {
+        crypto.scrypt(password, salt, SCRYPT_KEYLEN, SCRYPT_OPTS, (err, key) => {
+            if (err)
+                reject(err);
+            else
+                resolve(key);
+        });
+    });
+}
+/** Hash a password for storage. Returns `<salt-hex>:<derived-hex>`. */
+async function hashPassword(password) {
+    const salt = crypto.randomBytes(16);
+    const derived = await deriveScrypt(password, salt);
+    return `${salt.toString('hex')}:${derived.toString('hex')}`;
+}
+/** Verify a plaintext password against a stored `<salt-hex>:<derived-hex>`.
+ *  Uses timingSafeEqual to avoid leaking the prefix on which the
+ *  comparison diverged. */
+async function verifyPassword(password, stored) {
+    const [saltHex, derivedHex] = stored.split(':');
+    if (!saltHex || !derivedHex)
+        return false;
+    let salt;
+    let expected;
+    try {
+        salt = Buffer.from(saltHex, 'hex');
+        expected = Buffer.from(derivedHex, 'hex');
+    }
+    catch {
+        return false;
+    }
+    if (expected.length !== SCRYPT_KEYLEN)
+        return false;
+    try {
+        const derived = await deriveScrypt(password, salt);
+        return crypto.timingSafeEqual(derived, expected);
+    }
+    catch {
+        return false;
+    }
+}

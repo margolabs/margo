@@ -16,8 +16,8 @@
 import { spawn } from 'node:child_process'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import { parseComment } from '../shared/frontmatter.js'
-import type { Comment } from '../shared/types.js'
+import { parseComment } from './shared/frontmatter.js'
+import type { Comment } from './shared/types.js'
 
 export interface ProjectStoreOptions {
   /** Absolute path to the host's data directory. */

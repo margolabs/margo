@@ -1,6 +1,6 @@
 {
   "name": "margo-dev",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Live-app feedback layer for AI-coding teams. Comments live as files in your repo; AI works through them.",
   "author": "Stanley Song <sxhuan@gmail.com>",
   "homepage": "https://github.com/margolabs/margo#readme",
