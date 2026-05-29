@@ -291,6 +291,53 @@ export class UserStore {
     })
   }
 
+  /** GitLab-style: any signed-in user can create a project and becomes
+   *  its admin in one atomic step. Race-safe — the slug uniqueness check
+   *  and the create both run inside the mutate critical section, so two
+   *  concurrent create-project calls for the same slug get one winner
+   *  and one 'duplicate' error. */
+  async createProjectAsAdmin(
+    creatorUserId: string,
+    slug: string,
+    name: string,
+  ): Promise<ProjectRecord> {
+    if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
+      throw new Error(`invalid_slug`)
+    }
+    await this.load()
+    if (!(await this.getUser(creatorUserId))) throw new Error(`no_user`)
+    return this.mutate((d) => {
+      if (d.projects.some((p) => p.slug === slug)) throw new Error('duplicate_slug')
+      const project: ProjectRecord = {
+        slug,
+        name,
+        createdAt: new Date().toISOString(),
+      }
+      const membership: MembershipRecord = {
+        userId: creatorUserId,
+        projectSlug: slug,
+        role: 'admin',
+        addedAt: project.createdAt,
+      }
+      d.projects.push(project)
+      d.memberships.push(membership)
+      return project
+    })
+  }
+
+  /** Memberships for a user, joined with project metadata. Drives the
+   *  dashboard's "Your projects" section. */
+  async listMembershipsForUser(userId: string): Promise<Array<{ project: ProjectRecord; role: Role }>> {
+    await this.load()
+    const out: Array<{ project: ProjectRecord; role: Role }> = []
+    for (const m of this.data.memberships) {
+      if (m.userId !== userId) continue
+      const project = this.data.projects.find((p) => p.slug === m.projectSlug)
+      if (project) out.push({ project, role: m.role })
+    }
+    return out
+  }
+
   // ─── Memberships ──────────────────────────────────────────────────────
 
   async listMembers(projectSlug: string): Promise<MembershipRecord[]> {

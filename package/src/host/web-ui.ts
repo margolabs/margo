@@ -133,6 +133,34 @@ const SHARED_CSS = `
     margin-left: auto; padding: 2px 8px; border-radius: 10px;
     background: var(--code-bg); color: var(--muted); font-size: 11px;
   }
+  a.project-row { color: inherit; }
+  a.project-row:hover { background: hsl(220 70% 50% / .04); text-decoration: none; }
+  h1 .role {
+    padding: 2px 8px; border-radius: 10px;
+    background: var(--code-bg); color: var(--muted); font-size: 11px;
+    vertical-align: middle; font-weight: 500;
+  }
+  .member-grid {
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+    background: var(--panel);
+  }
+  .member-row {
+    display: grid; grid-template-columns: 1fr auto auto; gap: 12px;
+    align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border);
+  }
+  .member-row:last-child { border-bottom: 0; }
+  .member-name { font-weight: 500; font-size: 13px; }
+  .member-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .member-meta .muted { font-size: 12px; }
+  select.role-select {
+    padding: 4px 8px; border: 1px solid var(--border);
+    border-radius: 6px; font-size: 12px; background: #fff;
+    font-family: inherit;
+  }
+  select#invite-role {
+    padding: 9px 12px; border: 1px solid var(--border);
+    border-radius: 6px; font-size: 14px; background: #fff; font-family: inherit;
+  }
 `
 
 function shell(title: string, body: string): string {
@@ -254,15 +282,25 @@ export interface DashboardData {
   tokens: { id: string; label: string; createdAt: string; lastUsedAt?: string; plainPrefix: string }[]
 }
 
+export interface ProjectPageData {
+  user: { id: string; email: string; name: string; isSuperuser: boolean }
+  project: { slug: string; name: string; createdAt: string }
+  /** The viewer's role on this project (or 'read' for superusers without membership). */
+  myRole: string
+  /** Whether the viewer can manage members (project admin or superuser). */
+  canManage: boolean
+  members: { userId: string; email: string; name: string; role: string }[]
+}
+
 export function renderDashboard(data: DashboardData): string {
   const projectRows = data.projects.length === 0
-    ? `<div class="empty">No projects yet. Ask an admin to add you (<code>margo host:add-member</code>).</div>`
+    ? `<div class="empty">No projects yet. Create one above, or wait for a project admin to invite you.</div>`
     : `<div class="project-grid">${data.projects.map((p) => `
-        <div class="project-row">
+        <a class="project-row" href="/projects/${escapeHtml(p.slug)}">
           <span class="slug">${escapeHtml(p.slug)}</span>
           <span class="muted">${escapeHtml(p.name)}</span>
           <span class="role">${escapeHtml(p.role)}</span>
-        </div>
+        </a>
       `).join('')}</div>`
 
   const tokenRows = data.tokens.length === 0
@@ -293,6 +331,13 @@ export function renderDashboard(data: DashboardData): string {
       </div>
 
       <h1>Your projects</h1>
+      <p class="muted">Create a new project (you'll be its admin) or open one you've already been invited to.</p>
+      <div class="actions" style="margin-bottom:12px">
+        <input id="new-project-slug" type="text" placeholder="Slug (e.g. acme-pricing)" />
+        <input id="new-project-name" type="text" placeholder="Display name" />
+        <button type="button" class="primary" id="new-project">Create project</button>
+      </div>
+      <div id="new-project-error" class="error" style="display:none"></div>
       ${projectRows}
 
       <h1 style="margin-top:32px">Your tokens</h1>
@@ -315,6 +360,27 @@ export function renderDashboard(data: DashboardData): string {
       document.getElementById('logout').addEventListener('click', async () => {
         await fetch('/api/auth/logout', { method: 'POST' });
         location.href = '/login';
+      });
+
+      const newProjectError = document.getElementById('new-project-error');
+      document.getElementById('new-project').addEventListener('click', async () => {
+        newProjectError.style.display = 'none';
+        const slug = document.getElementById('new-project-slug').value.trim();
+        const name = document.getElementById('new-project-name').value.trim();
+        if (!slug || !name) {
+          newProjectError.textContent = 'Slug and display name are required.';
+          newProjectError.style.display = 'block';
+          return;
+        }
+        const res = await fetch('/api/me/projects', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ slug, name }),
+        });
+        if (res.ok) { location.href = '/projects/' + encodeURIComponent(slug); return; }
+        const data = await res.json().catch(() => ({}));
+        newProjectError.textContent = data.error || ('Create failed (' + res.status + ').');
+        newProjectError.style.display = 'block';
       });
 
       const newPanel = document.getElementById('new-token-panel');
@@ -371,6 +437,119 @@ export function renderDashboard(data: DashboardData): string {
       }
       function escapeText(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
       function escapeAttr(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+    </script>
+  `)
+}
+
+export function renderProject(data: ProjectPageData): string {
+  const superBadge = data.user.isSuperuser ? '<span class="badge">superuser</span>' : ''
+  const myRoleBadge = `<span class="role">${escapeHtml(data.myRole)}</span>`
+
+  const memberRows = data.members.map((m) => `
+    <div class="member-row" data-user-id="${escapeHtml(m.userId)}">
+      <div class="member-meta">
+        <div class="member-name">${escapeHtml(m.name)}</div>
+        <div class="muted code">${escapeHtml(m.email)}</div>
+      </div>
+      ${data.canManage ? `
+        <select class="role-select" data-user-id="${escapeHtml(m.userId)}">
+          <option value="read"${m.role === 'read' ? ' selected' : ''}>read</option>
+          <option value="write"${m.role === 'write' ? ' selected' : ''}>write</option>
+          <option value="admin"${m.role === 'admin' ? ' selected' : ''}>admin</option>
+        </select>
+        <button type="button" class="danger" data-remove="${escapeHtml(m.userId)}">Remove</button>
+      ` : `
+        <span class="role">${escapeHtml(m.role)}</span>
+        <span></span>
+      `}
+    </div>
+  `).join('')
+
+  const manageBlock = data.canManage ? `
+    <h2>Invite a member</h2>
+    <p class="muted">They must already have an account on this host — share the URL <code>/signup</code> with them first.</p>
+    <div class="actions" style="margin-bottom:12px">
+      <input id="invite-email" type="email" placeholder="email@your-domain" autocomplete="off" />
+      <select id="invite-role">
+        <option value="read">read</option>
+        <option value="write" selected>write</option>
+        <option value="admin">admin</option>
+      </select>
+      <button type="button" class="primary" id="invite-btn">Invite</button>
+    </div>
+    <div id="invite-error" class="error" style="display:none"></div>
+  ` : ''
+
+  return shell(`Project ${data.project.slug}`, `
+    <div class="container">
+      <div class="nav">
+        <div class="brand"><span class="dot"></span> margo host</div>
+        <div class="grow"></div>
+        <a href="/dashboard" class="alt">← Dashboard</a>
+        <span class="who">${escapeHtml(data.user.name)} &lt;${escapeHtml(data.user.email)}&gt;${superBadge}</span>
+      </div>
+
+      <h1>${escapeHtml(data.project.name)} ${myRoleBadge}</h1>
+      <p class="muted">
+        Slug: <code>${escapeHtml(data.project.slug)}</code>
+        · Created ${formatDate(data.project.createdAt)}
+      </p>
+
+      <h2 style="margin-top:32px">Members</h2>
+      <div class="member-grid" id="members">${memberRows}</div>
+
+      ${manageBlock}
+    </div>
+
+    <script>
+      const PROJECT_SLUG = ${JSON.stringify(data.project.slug)};
+
+      ${data.canManage ? `
+        const inviteErr = document.getElementById('invite-error');
+        document.getElementById('invite-btn').addEventListener('click', async () => {
+          inviteErr.style.display = 'none';
+          const email = document.getElementById('invite-email').value.trim();
+          const role = document.getElementById('invite-role').value;
+          if (!email) { inviteErr.textContent = 'Email is required.'; inviteErr.style.display = 'block'; return; }
+          const res = await fetch('/api/projects/' + encodeURIComponent(PROJECT_SLUG) + '/members', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ email, role }),
+          });
+          if (res.ok) { location.reload(); return; }
+          const data = await res.json().catch(() => ({}));
+          inviteErr.textContent = data.error || ('Invite failed (' + res.status + ').');
+          inviteErr.style.display = 'block';
+        });
+
+        document.addEventListener('change', async (ev) => {
+          const userId = ev.target?.dataset?.userId;
+          if (!userId || !ev.target.classList.contains('role-select')) return;
+          const role = ev.target.value;
+          const res = await fetch('/api/projects/' + encodeURIComponent(PROJECT_SLUG) + '/members/' + encodeURIComponent(userId), {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ role }),
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            alert(data.error || 'Role change failed.');
+            location.reload();
+          }
+        });
+
+        document.addEventListener('click', async (ev) => {
+          const userId = ev.target?.dataset?.remove;
+          if (!userId) return;
+          if (!confirm('Remove this member from the project?')) return;
+          const res = await fetch('/api/projects/' + encodeURIComponent(PROJECT_SLUG) + '/members/' + encodeURIComponent(userId), {
+            method: 'DELETE',
+          });
+          if (res.ok) { location.reload(); return; }
+          const data = await res.json().catch(() => ({}));
+          alert(data.error || 'Remove failed.');
+        });
+      ` : ''}
     </script>
   `)
 }
