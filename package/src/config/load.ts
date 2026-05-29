@@ -12,8 +12,15 @@ import * as path from 'node:path'
 import * as crypto from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
-import { build as esbuild } from 'esbuild'
 import type { MargoClientConfig } from './types.js'
+
+// esbuild is only needed to transpile TS/ESM-js config files on the fly.
+// Lazy-imported so margo-host (which doesn't load workspace config) can run
+// without esbuild installed — keeps the runtime container ~20 MB smaller.
+async function loadEsbuildBuild(): Promise<typeof import('esbuild').build> {
+  const mod = await import('esbuild')
+  return mod.build
+}
 
 const CANDIDATES = [
   'margo.config.ts',
@@ -60,6 +67,7 @@ async function readFromPath(filePath: string): Promise<MargoClientConfig> {
     tmpdir(),
     `margo.config.${crypto.randomBytes(6).toString('hex')}.mjs`,
   )
+  const esbuild = await loadEsbuildBuild()
   try {
     await esbuild({
       entryPoints: [filePath],

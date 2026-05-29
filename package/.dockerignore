@@ -1,0 +1,17 @@
+# Keep the build context lean. Excluded files don't get sent to the
+# docker daemon, which speeds builds and keeps layers small.
+node_modules
+dist
+.git
+.gitignore
+.npmrc
+.env
+.env.*
+*.log
+**/__tests__
+**/*.test.ts
+**/*.test.js
+**/*.test.d.ts
+.vscode
+.idea
+.DS_Store
