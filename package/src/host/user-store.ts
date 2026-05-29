@@ -28,6 +28,12 @@ export interface UserRecord {
    *  so the operator who set the host up can manage everything. Future:
    *  this flag is grantable to any user via CLI. */
   isSuperuser?: boolean
+  /** scrypt-hashed password for web UI login. Stored as
+   *  `<salt-hex>:<derived-hex>`. Absent for users created via env-
+   *  bootstrap or CLI without a password — they can still use the API
+   *  with bearer tokens but can't log in to the UI until they `signup`
+   *  with the same email (which fills in the hash). */
+  passwordHash?: string
 }
 
 /** Per-project role a user holds. read/write/admin form a strict hierarchy:
@@ -70,6 +76,10 @@ interface FileShape {
   tokens: TokenRecord[]
   projects: ProjectRecord[]
   memberships: MembershipRecord[]
+  /** Random per-host HMAC key used to sign session cookies. Auto-
+   *  generated on first persist; rotating it (deleting the field +
+   *  restarting) invalidates every issued session and forces re-login. */
+  sessionSecret?: string
 }
 
 const EMPTY: FileShape = { version: 1, users: [], tokens: [], projects: [], memberships: [] }
@@ -149,6 +159,72 @@ export class UserStore {
       d.users.push(record)
       return record
     })
+  }
+
+  /** Sign up a new user with a password — the flow the web /signup form
+   *  calls. Differs from createUser in that a password hash is required
+   *  AND a duplicate email returns null instead of throwing (so the UI
+   *  can surface a friendly "email already registered" without parsing
+   *  exception messages). The created user is never a superuser; admin
+   *  promotion is a separate explicit step. */
+  async signup(email: string, name: string, plainPassword: string): Promise<UserRecord | null> {
+    await this.load()
+    if (await this.findUserByEmail(email)) return null
+    const passwordHash = await hashPassword(plainPassword)
+    const record: UserRecord = {
+      id: `u-${nextSuffix()}`,
+      email,
+      name,
+      createdAt: new Date().toISOString(),
+      passwordHash,
+    }
+    return this.mutate((d) => {
+      d.users.push(record)
+      return record
+    })
+  }
+
+  /** Set or replace a user's password hash. Used by signup-after-bootstrap
+   *  (a CLI-created user wants UI access) and by future password-reset
+   *  flows. Email-on-record stays the lookup key. */
+  async setPassword(userId: string, plainPassword: string): Promise<void> {
+    await this.load()
+    if (!(await this.getUser(userId))) throw new Error(`no user with id ${userId}`)
+    const passwordHash = await hashPassword(plainPassword)
+    await this.mutate((d) => {
+      const u = d.users.find((x) => x.id === userId)
+      if (u) u.passwordHash = passwordHash
+    })
+  }
+
+  /** Verify a plaintext password against the stored hash. Returns the
+   *  user record on success, null on bad credentials OR unknown email.
+   *  Same return shape for both cases keeps the timing leak small (the
+   *  caller can't distinguish "wrong password" from "no such user"). */
+  async verifyLogin(email: string, plainPassword: string): Promise<UserRecord | null> {
+    await this.reload() // cross-process freshness, same reason as resolveToken
+    const user = this.data.users.find((u) => u.email.toLowerCase() === email.toLowerCase())
+    if (!user || !user.passwordHash) {
+      // Run a dummy verify against a known-bad hash to keep timing
+      // roughly equivalent between "no user" and "wrong password".
+      await verifyPassword(plainPassword, '00:00').catch(() => undefined)
+      return null
+    }
+    const ok = await verifyPassword(plainPassword, user.passwordHash)
+    return ok ? user : null
+  }
+
+  /** Lazily mint and persist the session-signing HMAC key, then return
+   *  it. Called by the session module on first use; the key sticks
+   *  around for the lifetime of the host until explicitly rotated. */
+  async getOrCreateSessionSecret(): Promise<string> {
+    await this.load()
+    if (this.data.sessionSecret) return this.data.sessionSecret
+    const secret = crypto.randomBytes(48).toString('hex')
+    await this.mutate((d) => {
+      if (!d.sessionSecret) d.sessionSecret = secret
+    })
+    return this.data.sessionSecret ?? secret
   }
 
   /** Toggle a user's superuser bit. Useful when promoting an additional
@@ -395,4 +471,49 @@ function sha256(input: string): string {
 // while staying human-readable in CLI output ("u-3f8a91c2").
 function nextSuffix(): string {
   return crypto.randomBytes(4).toString('hex')
+}
+
+// scrypt parameters: N=16384 (2^14), r=8, p=1 — the conservative
+// defaults from RFC 7914 + the libsodium docs. Slow enough on modern
+// CPUs (~50ms) to resist offline brute-force on a leaked users.json.
+const SCRYPT_KEYLEN = 64
+const SCRYPT_OPTS = { N: 1 << 14, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }
+
+function deriveScrypt(password: string, salt: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, SCRYPT_KEYLEN, SCRYPT_OPTS, (err, key) => {
+      if (err) reject(err)
+      else resolve(key)
+    })
+  })
+}
+
+/** Hash a password for storage. Returns `<salt-hex>:<derived-hex>`. */
+async function hashPassword(password: string): Promise<string> {
+  const salt = crypto.randomBytes(16)
+  const derived = await deriveScrypt(password, salt)
+  return `${salt.toString('hex')}:${derived.toString('hex')}`
+}
+
+/** Verify a plaintext password against a stored `<salt-hex>:<derived-hex>`.
+ *  Uses timingSafeEqual to avoid leaking the prefix on which the
+ *  comparison diverged. */
+async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const [saltHex, derivedHex] = stored.split(':')
+  if (!saltHex || !derivedHex) return false
+  let salt: Buffer
+  let expected: Buffer
+  try {
+    salt = Buffer.from(saltHex, 'hex')
+    expected = Buffer.from(derivedHex, 'hex')
+  } catch {
+    return false
+  }
+  if (expected.length !== SCRYPT_KEYLEN) return false
+  try {
+    const derived = await deriveScrypt(password, salt)
+    return crypto.timingSafeEqual(derived, expected)
+  } catch {
+    return false
+  }
 }

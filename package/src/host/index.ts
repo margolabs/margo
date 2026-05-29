@@ -14,6 +14,7 @@ import * as http from 'node:http'
 import { dispatch, type RoutesContext, type SseSubscriber } from './routes.js'
 import { ProjectStore } from './store.js'
 import { UserStore } from './user-store.js'
+import { handleWebRoute, type WebContext } from './web-routes.js'
 
 export interface StartHostOptions {
   port: number
@@ -60,6 +61,18 @@ export async function startHost(opts: StartHostOptions): Promise<HostHandle> {
     },
   }
 
+  // Cached so we don't hit users.json on every request; the secret
+  // doesn't change for the life of the process.
+  let cachedSecret: string | null = null
+  const webCtx: WebContext = {
+    users: opts.users,
+    sessionSecret: async () => {
+      if (cachedSecret) return cachedSecret
+      cachedSecret = await opts.users.getOrCreateSessionSecret()
+      return cachedSecret
+    },
+  }
+
   const server = http.createServer(async (req, res) => {
     res.setHeader('access-control-allow-origin', req.headers.origin ?? '*')
     res.setHeader('access-control-allow-methods', 'GET, POST, PUT, DELETE, OPTIONS')
@@ -74,6 +87,10 @@ export async function startHost(opts: StartHostOptions): Promise<HostHandle> {
       res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}')
       return
     }
+    // Web UI routes (cookie-authenticated) take priority for their
+    // specific paths. dispatch() handles the bearer-authenticated API
+    // under /api/projects/:project/*. The two surfaces never overlap.
+    if (await handleWebRoute(webCtx, req, res)) return
     await dispatch(ctx, req, res)
   })
 
