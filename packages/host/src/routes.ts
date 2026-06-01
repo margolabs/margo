@@ -54,10 +54,28 @@ export async function dispatch(
     const identity: AuthIdentity = { email: user.email, name: user.name }
 
     // /me is intentionally pre-authorize: any authenticated user can ask
-    // "who am I?" against any project slug. Returns identity from the
-    // token regardless of project membership.
+    // "who am I?" against any project slug, even ones they don't have
+    // access to — so the overlay can render a clear "you're not a member
+    // of this project" state instead of silently failing on every other
+    // request. Returns the identity plus the role on the requested
+    // project (or `null` when the user has no membership and isn't a
+    // superuser). Superusers always report 'admin' since they bypass
+    // ACL anyway.
     if (rest === 'me' && req.method === 'GET') {
-      return sendJson(res, 200, identity)
+      // Distinguish "project doesn't exist" (typo / forgot to create) from
+      // "exists but no membership" — both surfaced via 200 so the overlay
+      // can render an informative state instead of generic 404. Clients
+      // (CLI init + plugin) decide what to display.
+      const projectRecord = await ctx.auth.users.getProject(project)
+      const projectExists = projectRecord !== null
+      let role: 'read' | 'write' | 'admin' | null = null
+      if (user.isSuperuser) {
+        role = 'admin'
+      } else if (projectExists) {
+        const m = await ctx.auth.users.getMembership(user.id, project)
+        if (m) role = m.role
+      }
+      return sendJson(res, 200, { ...identity, role, projectExists })
     }
 
     // Everything else is project-scoped. Required role mirrors HTTP
@@ -85,6 +103,9 @@ export async function dispatch(
     }
     if (rest === 'events' && req.method === 'GET') {
       return handleEvents(ctx, project, req, res)
+    }
+    if (rest === 'binding' && req.method === 'POST') {
+      return await handleClaimBinding(ctx, project, user, req, res)
     }
     res.writeHead(404, { 'content-type': 'application/json' }).end('{"error":"not found"}')
   } catch (err) {
@@ -215,6 +236,52 @@ async function handleAppendDecision(
     authorName: identity.name,
   })
   sendJson(res, 200, { ok: true })
+}
+
+async function handleClaimBinding(
+  ctx: RoutesContext,
+  project: string,
+  user: { id: string; isSuperuser?: boolean },
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const body = await readJson<{ kind?: string; value?: string; force?: boolean }>(req)
+  if (body.kind !== 'git-origin' && body.kind !== 'uuid') {
+    sendJson(res, 400, { error: 'kind must be git-origin or uuid' })
+    return
+  }
+  if (!body.value || typeof body.value !== 'string') {
+    sendJson(res, 400, { error: 'value is required' })
+    return
+  }
+  // Force-rebind is a destructive admin action — wipes the recorded
+  // history of "this project belongs to repo X". Any project admin /
+  // superuser can do it; regular members can only claim/check.
+  let force = !!body.force
+  if (force) {
+    if (!user.isSuperuser) {
+      const membership = await ctx.auth.users.getMembership(user.id, project)
+      if (membership?.role !== 'admin') {
+        sendJson(res, 403, { error: 'force-rebind requires project admin or superuser' })
+        return
+      }
+    }
+  }
+  try {
+    const result = await ctx.auth.users.claimOrCheckProjectBinding(
+      project,
+      { kind: body.kind, value: body.value },
+      { force },
+    )
+    sendJson(res, 200, result)
+  } catch (err) {
+    const msg = (err as Error).message
+    if (msg === 'no_project') {
+      sendJson(res, 404, { error: 'no such project' })
+      return
+    }
+    sendJson(res, 500, { error: msg })
+  }
 }
 
 function handleEvents(

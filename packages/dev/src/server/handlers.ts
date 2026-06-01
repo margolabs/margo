@@ -74,6 +74,8 @@ export async function getMe(
 ): Promise<{
   email: string;
   name: string;
+  role?: 'read' | 'write' | 'admin' | null;
+  projectExists?: boolean;
   mode: 'local' | 'server';
   server?: { url: string; project: string };
 } | null> {

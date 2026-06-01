@@ -33,6 +33,15 @@ export interface RemoteTransportOptions {
   token: string
 }
 
+/** Result of a /binding round-trip — surfaced by getBindingStatus() so
+ *  the plugin can pipe it through to the overlay's no-access/mismatch UX. */
+export type BindingStatus =
+  | { status: 'claimed'; recorded: { kind: string; value: string; recordedAt: string } }
+  | { status: 'matched'; recorded: { kind: string; value: string; recordedAt: string } }
+  | { status: 'mismatch'; recorded: { kind: string; value: string; recordedAt: string }; presented: { kind: string; value: string } }
+  | { status: 'rebound'; recorded: { kind: string; value: string; recordedAt: string }; previous: { kind: string; value: string; recordedAt: string } }
+  | { status: 'error'; message: string }
+
 export class RemoteTransport implements Transport {
   private readonly base: string
   private readonly token: string
@@ -43,6 +52,10 @@ export class RemoteTransport implements Transport {
    *  concurrency control. Cleared on SSE 'deleted'; refreshed on each
    *  read/write round-trip. */
   private readonly etags = new Map<string, string>()
+  /** Cached binding status from the last /binding round-trip. Surfaced
+   *  via getBindingStatus() so the plugin's /__margo/me proxy can include
+   *  it in the response without re-fetching. */
+  private cachedBindingStatus: BindingStatus | null = null
 
   constructor(opts: RemoteTransportOptions) {
     // Strip trailing slash so URL composition stays clean (`${base}/api/...`).
@@ -227,7 +240,18 @@ export class RemoteTransport implements Transport {
           },
           signal,
         })
-        if (!res.ok || !res.body) throw new Error(`SSE returned ${res.status}`)
+        if (!res.ok || !res.body) {
+          // Permanent failures (auth/access/missing project) shouldn't
+          // be retried — that would just hammer the host. 401 = bad
+          // token, 403 = not a member of this project, 404 = project
+          // doesn't exist. Log once and stop the loop; the plugin will
+          // try again on next dev-server restart.
+          if (res.status === 401 || res.status === 403 || res.status === 404) {
+            console.warn(`[margo] SSE stream not available (HTTP ${res.status}) — not retrying. Run \`docker logs\` on the host for details.`)
+            return
+          }
+          throw new Error(`SSE returned ${res.status}`)
+        }
         backoffMs = 500 // reset on a clean connect
         const reader = res.body.getReader()
         const decoder = new TextDecoder()

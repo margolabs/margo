@@ -13,6 +13,7 @@ import type { ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
 import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } from '../server/endpoints.js';
 import type { SseClient } from '../server/handlers.js';
+import { mirrorTransportToDir } from '../storage/cache-mirror.js';
 import { createTransport } from '../storage/factory.js';
 import type { Transport } from '../storage/transport.js';
 import type { MargoConfig } from '../shared/types.js';
@@ -100,6 +101,17 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
       storageMode = created.mode;
       serverInfo = created.serverInfo;
       console.log(`[margo] storage mode: ${created.mode}${created.configPath ? ` (from ${created.configPath})` : ''}`);
+      // Server mode: pull all comments into the local cache once on boot
+      // so AI agents (which read .margo/comments/*.md off disk) see fresh
+      // state without anyone running `npx margo pull` first. Fire and
+      // forget — the dev server boots immediately even if the host is
+      // unreachable, and a partial cache is better than a crashed plugin.
+      if (created.mode === 'server' && transport) {
+        const captured = transport;
+        void mirrorTransportToDir(captured, commentsDir)
+          .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI`))
+          .catch((err) => console.warn('[margo] initial pull failed (AI cache may be stale):', (err as Error).message));
+      }
       // Bridge transport events into the SSE stream so connected overlays
       // re-render on file changes / upstream divergence.
       transport.subscribe((e) => broadcastSse(ctx(), e));

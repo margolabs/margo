@@ -15,151 +15,267 @@
 const SHARED_CSS = `
   :root {
     --bg: #fafafa;
-    --panel: #fff;
-    --fg: #18181b;
+    --panel: #ffffff;
+    --fg: #0a0a0a;
+    --fg-strong: #000000;
     --muted: #71717a;
+    --muted-strong: #52525b;
     --border: #e4e4e7;
-    --accent: hsl(220 70% 50%);
-    --accent-fg: #fff;
-    --danger: hsl(0 70% 45%);
-    --ok: hsl(140 50% 35%);
+    --border-strong: #d4d4d8;
+    --hover: #f4f4f5;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --accent-fg: #ffffff;
+    --accent-soft: rgba(37, 99, 235, 0.08);
+    --accent-soft-strong: rgba(37, 99, 235, 0.12);
+    --danger: #dc2626;
+    --danger-soft: rgba(220, 38, 38, 0.08);
+    --ok: #16a34a;
+    --ok-soft: rgba(22, 163, 74, 0.08);
+    --warn: #d97706;
+    --warn-soft: rgba(217, 119, 6, 0.08);
     --code-bg: #f4f4f5;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-focus: 0 0 0 3px rgba(37, 99, 235, 0.18);
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-pill: 9999px;
+    --control-h: 38px;
+    --control-h-sm: 30px;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; height: 100%; }
   body {
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
     background: var(--bg); color: var(--fg);
     min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
   a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .container {
-    max-width: 720px; margin: 0 auto; padding: 48px 24px;
-  }
-  .container.narrow { max-width: 380px; }
+  a:hover { color: var(--accent-hover); }
+  ::selection { background: var(--accent-soft-strong); color: var(--fg-strong); }
+
+  .container { max-width: 760px; margin: 0 auto; padding: 56px 24px 80px; }
+  .container.narrow { max-width: 400px; padding-top: 80px; }
+
   .brand {
-    font-size: 18px; font-weight: 600; letter-spacing: -0.02em;
-    color: var(--fg); margin-bottom: 32px; display: flex; align-items: center; gap: 6px;
+    font-size: 16px; font-weight: 600; letter-spacing: -0.015em;
+    color: var(--fg-strong); margin: 0 0 36px;
+    display: inline-flex; align-items: center; gap: 8px;
   }
   .brand .dot {
-    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
     background: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-soft);
   }
+
   .panel {
     background: var(--panel); border: 1px solid var(--border);
-    border-radius: 10px; padding: 24px;
+    border-radius: var(--radius-lg); padding: 32px;
+    box-shadow: var(--shadow-sm);
   }
-  h1 { margin: 0 0 16px; font-size: 20px; font-weight: 600; }
-  h2 { margin: 24px 0 12px; font-size: 16px; font-weight: 600; }
-  p.muted { color: var(--muted); margin: 0 0 16px; font-size: 13px; }
-  label { display: block; margin: 12px 0 4px; font-size: 13px; font-weight: 500; }
-  input[type="email"], input[type="text"], input[type="password"] {
-    width: 100%; padding: 9px 12px; border: 1px solid var(--border);
-    border-radius: 6px; font-size: 14px; background: #fff; color: var(--fg);
-    font-family: inherit;
+
+  /* Typography */
+  h1 { margin: 0 0 8px; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; color: var(--fg-strong); }
+  h2 {
+    margin: 40px 0 6px; font-size: 13px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted-strong);
   }
-  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
-  button {
-    padding: 9px 14px; border: 0; border-radius: 6px;
-    font-size: 14px; font-weight: 500; cursor: pointer; font-family: inherit;
-  }
-  button.primary { background: var(--accent); color: var(--accent-fg); }
-  button.primary:hover { filter: brightness(1.05); }
-  button.subtle {
-    background: transparent; color: var(--muted); padding: 4px 8px;
-    font-size: 12px;
-  }
-  button.subtle:hover { color: var(--fg); }
-  button.danger { background: transparent; color: var(--danger); padding: 4px 8px; font-size: 12px; }
-  button.danger:hover { background: hsl(0 70% 45% / .08); }
-  button[disabled] { opacity: .5; cursor: not-allowed; }
-  .actions { display: flex; gap: 8px; margin-top: 20px; align-items: center; }
-  .actions .grow { flex: 1; }
+  h1 + p.muted, h2 + p.muted { margin-top: 0; }
+  p.muted { color: var(--muted); margin: 0 0 20px; font-size: 13px; line-height: 1.55; }
   .alt { font-size: 13px; color: var(--muted); }
-  .error {
-    margin-top: 14px; padding: 9px 12px; border-radius: 6px;
-    background: hsl(0 70% 50% / .08); color: var(--danger); font-size: 13px;
-    border: 1px solid hsl(0 70% 50% / .2);
-  }
-  .ok-banner {
-    margin: 0 0 16px; padding: 10px 12px; border-radius: 6px;
-    background: hsl(140 50% 50% / .08); color: var(--ok); font-size: 13px;
-    border: 1px solid hsl(140 50% 50% / .2);
-  }
-  .token-grid {
-    border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
-  }
-  .token-row {
-    display: grid; grid-template-columns: 1fr auto auto; gap: 12px;
-    align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border);
-    font-size: 13px;
-  }
-  .token-row:last-child { border-bottom: 0; }
-  .token-label { font-weight: 500; }
-  .token-meta { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
-  .empty { padding: 20px; text-align: center; color: var(--muted); font-size: 13px; }
   code, .code {
     font-family: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
-    font-size: 12px;
+    font-size: 12px; color: var(--fg-strong);
   }
-  pre.token-display {
-    margin: 12px 0 0; padding: 12px; background: var(--code-bg);
-    border-radius: 6px; overflow-x: auto; font-size: 12px;
-    word-break: break-all; white-space: pre-wrap;
+  p code, span code { background: var(--code-bg); padding: 1.5px 5px; border-radius: 4px; font-size: 12px; }
+
+  /* Form controls — uniform height, no weird wrapping */
+  label { display: block; margin: 14px 0 6px; font-size: 13px; font-weight: 500; color: var(--fg-strong); }
+  input[type="email"],
+  input[type="text"],
+  input[type="password"],
+  select {
+    width: 100%; height: var(--control-h);
+    padding: 0 12px; border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm); font-size: 14px;
+    background: var(--panel); color: var(--fg);
+    font-family: inherit; line-height: 1; box-shadow: var(--shadow-sm);
+    transition: border-color .15s ease, box-shadow .15s ease;
   }
+  input::placeholder { color: var(--muted); }
+  input:hover:not(:focus), select:hover:not(:focus) { border-color: var(--muted); }
+  input:focus, select:focus {
+    outline: none; border-color: var(--accent); box-shadow: var(--shadow-focus);
+  }
+  select {
+    appearance: none; padding-right: 32px;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg viewBox='0 0 12 12' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2371717a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center; background-size: 12px;
+  }
+
+  /* Buttons — uniform height, single line, proper padding */
+  button {
+    height: var(--control-h);
+    padding: 0 16px; border: 1px solid transparent; border-radius: var(--radius-sm);
+    font-size: 14px; font-weight: 500; cursor: pointer; font-family: inherit;
+    line-height: 1; white-space: nowrap;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    transition: background-color .12s ease, border-color .12s ease, color .12s ease, transform .04s ease;
+  }
+  button:active { transform: translateY(0.5px); }
+  button.primary {
+    background: var(--accent); color: var(--accent-fg);
+    box-shadow: var(--shadow-sm);
+  }
+  button.primary:hover { background: var(--accent-hover); }
+  button.primary:focus-visible { box-shadow: var(--shadow-focus); outline: none; }
+  button.secondary {
+    background: var(--panel); color: var(--fg-strong); border-color: var(--border-strong);
+    box-shadow: var(--shadow-sm);
+  }
+  button.secondary:hover { background: var(--hover); border-color: var(--muted); }
+  button.subtle {
+    background: transparent; color: var(--muted-strong);
+    height: var(--control-h-sm); padding: 0 10px; font-size: 13px; border: 0;
+  }
+  button.subtle:hover { color: var(--fg-strong); background: var(--hover); }
+  button.danger {
+    background: transparent; color: var(--danger);
+    height: var(--control-h-sm); padding: 0 10px; font-size: 13px; font-weight: 500;
+    border: 0;
+  }
+  button.danger:hover { background: var(--danger-soft); }
+  button[disabled] { opacity: .45; cursor: not-allowed; }
+
+  /* Layout helpers */
+  .actions { display: flex; gap: 10px; margin-top: 24px; align-items: center; }
+  .actions .grow { flex: 1; }
+  .form-row {
+    display: grid; gap: 10px; align-items: center; margin-top: 8px;
+  }
+  .form-row.two   { grid-template-columns: 1fr 1fr auto; }
+  .form-row.input-plus-btn { grid-template-columns: 1fr auto; }
+
+  /* Feedback banners */
+  .error {
+    margin-top: 16px; padding: 10px 12px; border-radius: var(--radius-sm);
+    background: var(--danger-soft); color: var(--danger);
+    font-size: 13px; line-height: 1.45;
+    border: 1px solid rgba(220, 38, 38, 0.18);
+  }
+  .ok-banner {
+    margin: 0 0 16px; padding: 11px 14px; border-radius: var(--radius-sm);
+    background: var(--ok-soft); color: var(--ok); font-size: 13px;
+    border: 1px solid rgba(22, 163, 74, 0.2);
+  }
+
+  /* Nav */
   .nav {
-    display: flex; align-items: center; gap: 12px; margin-bottom: 24px;
-    padding-bottom: 12px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 0 20px; margin: 0 0 8px;
+    border-bottom: 1px solid var(--border);
   }
   .nav .brand { margin: 0; }
   .nav .grow { flex: 1; }
-  .nav .who { font-size: 13px; color: var(--muted); }
+  .nav .who {
+    font-size: 13px; color: var(--muted);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .nav .who strong { color: var(--fg-strong); font-weight: 500; }
+
+  /* Badges */
   .badge {
-    display: inline-block; padding: 1px 6px; border-radius: 10px;
-    font-size: 10px; line-height: 1.5; vertical-align: middle;
-    background: hsl(220 70% 50% / .12); color: var(--accent); margin-left: 4px;
+    display: inline-flex; align-items: center;
+    padding: 1px 8px; border-radius: var(--radius-pill);
+    font-size: 11px; font-weight: 500; letter-spacing: 0.01em; line-height: 1.6;
+    vertical-align: middle;
+    background: var(--accent-soft); color: var(--accent);
+    margin-left: 8px;
   }
-  .project-grid {
-    display: grid; gap: 8px; margin-top: 8px;
+
+  /* Lists / grids — projects, tokens, members */
+  .project-grid, .token-grid, .member-grid {
+    display: flex; flex-direction: column;
+    border: 1px solid var(--border); border-radius: var(--radius-md);
+    background: var(--panel); overflow: hidden;
+    box-shadow: var(--shadow-sm);
+    margin-top: 12px;
   }
-  .project-row {
-    display: flex; gap: 8px; align-items: center; padding: 8px 10px;
-    border: 1px solid var(--border); border-radius: 6px;
-    background: var(--panel); font-size: 13px;
+  .project-row, .token-row, .member-row {
+    display: grid; align-items: center;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px; transition: background-color .12s ease;
   }
-  .project-row .slug { font-weight: 500; }
-  .project-row .role {
-    margin-left: auto; padding: 2px 8px; border-radius: 10px;
-    background: var(--code-bg); color: var(--muted); font-size: 11px;
-  }
+  .project-row:last-child, .token-row:last-child, .member-row:last-child { border-bottom: 0; }
+  .project-row { grid-template-columns: minmax(0, 220px) 1fr auto; gap: 14px; }
+  .token-row   { grid-template-columns: minmax(0, 1fr) auto; gap: 16px; }
+  .member-row  { grid-template-columns: minmax(0, 1fr) 130px 80px; gap: 12px; }
+
   a.project-row { color: inherit; }
-  a.project-row:hover { background: hsl(220 70% 50% / .04); text-decoration: none; }
+  a.project-row:hover { background: var(--hover); }
+
+  .project-row .slug {
+    font-weight: 500; color: var(--fg-strong);
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
+    font-size: 13px;
+  }
+  .project-row .muted, .project-row > span.muted { color: var(--muted); font-size: 13px; }
+  .project-row .role,
   h1 .role {
-    padding: 2px 8px; border-radius: 10px;
-    background: var(--code-bg); color: var(--muted); font-size: 11px;
-    vertical-align: middle; font-weight: 500;
+    padding: 2px 10px; border-radius: var(--radius-pill);
+    background: var(--code-bg); color: var(--muted-strong);
+    font-size: 11px; font-weight: 500; line-height: 1.7;
+    text-transform: capitalize;
+    margin-left: auto; vertical-align: middle;
   }
-  .member-grid {
-    border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
-    background: var(--panel);
+  h1 .role { margin-left: 10px; }
+
+  .token-label { font-weight: 500; color: var(--fg-strong); }
+  .token-meta {
+    color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px;
+    margin-top: 2px;
   }
-  .member-row {
-    display: grid; grid-template-columns: 1fr auto auto; gap: 12px;
-    align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border);
+
+  /* Empty state */
+  .empty {
+    padding: 36px 20px; text-align: center;
+    color: var(--muted); font-size: 13px;
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-md);
+    background: transparent; margin-top: 12px;
   }
-  .member-row:last-child { border-bottom: 0; }
-  .member-name { font-weight: 500; font-size: 13px; }
+  .empty strong { color: var(--fg-strong); font-weight: 500; }
+
+  /* Secret token display */
+  pre.token-display {
+    margin: 12px 0 0; padding: 14px; background: var(--code-bg);
+    border-radius: var(--radius-sm); overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
+    font-size: 12px; line-height: 1.5;
+    word-break: break-all; white-space: pre-wrap;
+    color: var(--fg-strong);
+    border: 1px solid var(--border);
+  }
+
+  /* Member-row specifics */
+  .member-name { font-weight: 500; font-size: 13px; color: var(--fg-strong); }
   .member-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-  .member-meta .muted { font-size: 12px; }
+  .member-meta .muted { font-size: 12px; color: var(--muted); }
+
   select.role-select {
-    padding: 4px 8px; border: 1px solid var(--border);
-    border-radius: 6px; font-size: 12px; background: #fff;
-    font-family: inherit;
+    height: var(--control-h-sm); padding: 0 28px 0 10px;
+    font-size: 12px; box-shadow: none;
+    background-size: 10px; background-position: right 8px center;
   }
   select#invite-role {
-    padding: 9px 12px; border: 1px solid var(--border);
-    border-radius: 6px; font-size: 14px; background: #fff; font-family: inherit;
+    /* Inherits standard select sizing; just ensure it sits at the same
+       height as the input + button in the form row. */
+    width: auto; min-width: 110px;
   }
 `
 
@@ -413,29 +529,31 @@ export function renderDashboard(data: DashboardData): string {
       <div class="nav">
         <div class="brand"><span class="dot"></span> margo host</div>
         <div class="grow"></div>
-        <span class="who">${escapeHtml(data.user.name)} &lt;${escapeHtml(data.user.email)}&gt;${superBadge}</span>
+        <span class="who"><strong>${escapeHtml(data.user.name)}</strong> &lt;${escapeHtml(data.user.email)}&gt;${superBadge}</span>
         <button type="button" class="subtle" id="logout">Log out</button>
       </div>
 
+      <h2>Projects</h2>
       <h1>Your projects</h1>
-      <p class="muted">Create a new project (you'll be its admin) or open one you've already been invited to.</p>
-      <div class="actions" style="margin-bottom:12px">
-        <input id="new-project-slug" type="text" placeholder="Slug (e.g. acme-pricing)" />
-        <input id="new-project-name" type="text" placeholder="Display name" />
+      <p class="muted">Create a new project — you'll be its admin — or open one you've already been invited to.</p>
+      <div class="form-row two">
+        <input id="new-project-slug" type="text" placeholder="Slug (e.g. acme-pricing)" autocomplete="off" />
+        <input id="new-project-name" type="text" placeholder="Display name" autocomplete="off" />
         <button type="button" class="primary" id="new-project">Create project</button>
       </div>
       <div id="new-project-error" class="error" style="display:none"></div>
       ${projectRows}
 
-      <h1 style="margin-top:32px">Your tokens</h1>
+      <h2 style="margin-top:48px">Tokens</h2>
+      <h1>Your tokens</h1>
       <p class="muted">Use a token as <code>MARGO_TOKEN</code> in your shell. Issued tokens are hashed at rest — once you close the panel below, the host can no longer reveal them.</p>
 
-      <div class="actions" style="margin-bottom:12px">
-        <input id="new-token-label" type="text" placeholder="Label (e.g. laptop-dev)" />
+      <div class="form-row input-plus-btn">
+        <input id="new-token-label" type="text" placeholder="Label (e.g. laptop-dev)" autocomplete="off" />
         <button type="button" class="primary" id="new-token">Mint new token</button>
       </div>
 
-      <div id="new-token-panel" style="display:none; margin-bottom:16px">
+      <div id="new-token-panel" style="display:none; margin: 16px 0 0;">
         <div class="ok-banner">Token created. Copy it now — you won't see it again.</div>
         <pre class="token-display" id="new-token-value"></pre>
       </div>
@@ -553,9 +671,10 @@ export function renderProject(data: ProjectPageData): string {
   `).join('')
 
   const manageBlock = data.canManage ? `
-    <h2>Invite a member</h2>
-    <p class="muted">They must already have an account on this host — share the URL <code>/signup</code> with them first.</p>
-    <div class="actions" style="margin-bottom:12px">
+    <h2 style="margin-top:48px">Invite</h2>
+    <h1>Add a member</h1>
+    <p class="muted">They must already have an account on this host — share <code>/signup</code> with them first.</p>
+    <div class="form-row two">
       <input id="invite-email" type="email" placeholder="email@your-domain" autocomplete="off" />
       <select id="invite-role">
         <option value="read">read</option>
@@ -573,16 +692,16 @@ export function renderProject(data: ProjectPageData): string {
         <div class="brand"><span class="dot"></span> margo host</div>
         <div class="grow"></div>
         <a href="/dashboard" class="alt">← Dashboard</a>
-        <span class="who">${escapeHtml(data.user.name)} &lt;${escapeHtml(data.user.email)}&gt;${superBadge}</span>
+        <span class="who"><strong>${escapeHtml(data.user.name)}</strong> &lt;${escapeHtml(data.user.email)}&gt;${superBadge}</span>
       </div>
 
+      <h2>Project</h2>
       <h1>${escapeHtml(data.project.name)} ${myRoleBadge}</h1>
       <p class="muted">
-        Slug: <code>${escapeHtml(data.project.slug)}</code>
-        · Created ${formatDate(data.project.createdAt)}
+        <code>${escapeHtml(data.project.slug)}</code> · created ${formatDate(data.project.createdAt)}
       </p>
 
-      <h2 style="margin-top:32px">Members</h2>
+      <h2 style="margin-top:40px">Members</h2>
       <div class="member-grid" id="members">${memberRows}</div>
 
       ${manageBlock}

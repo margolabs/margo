@@ -346,6 +346,7 @@ async function writeMargoConfigJson(
     console.log(`[margo] margo.config.json already exists at ${file}; leaving it alone.`);
     return;
   } catch { /* doesn't exist, write it */ }
+  const binding = await deriveRepoBinding(cwd);
   const body = {
     storage: 'server',
     server: {
@@ -353,9 +354,30 @@ async function writeMargoConfigJson(
       project,
       auth: { type: 'bearer', tokenEnv },
     },
+    repoBinding: binding,
   };
   await fs.writeFile(file, JSON.stringify(body, null, 2) + '\n', 'utf8');
-  console.log(`[margo] wrote ${file}`);
+  if (binding.kind === 'git-origin') {
+    console.log(`[margo] wrote ${file} (repo bound to ${binding.value})`);
+  } else {
+    console.log(`[margo] wrote ${file} (no git origin; generated UUID binding)`);
+  }
+}
+
+/** Pick the right anchor for this workspace. Prefer git origin URL when
+ *  available (the natural identity every team repo already has), fall
+ *  back to a random UUID when not (committed into margo.config so every
+ *  future clone sees the same value). */
+async function deriveRepoBinding(cwd: string): Promise<{ kind: 'git-origin' | 'uuid'; value: string }> {
+  try {
+    const { stdout } = await execFileP('git', ['remote', 'get-url', 'origin'], { cwd });
+    const url = stdout.trim();
+    if (url) return { kind: 'git-origin', value: url };
+  } catch { /* no git or no origin — fall through to UUID */ }
+  // Use Node's randomUUID for the fallback. Format is human-readable
+  // enough to spot in the dashboard ("bind: uuid:7a0b3…") if needed.
+  const { randomUUID } = await import('node:crypto');
+  return { kind: 'uuid', value: randomUUID() };
 }
 
 /** Flip autoCommit/autoPush off in a freshly-scaffolded .margo/config.json
@@ -411,8 +433,23 @@ async function verifyTokenWorks(url: string, project: string, token: string): Pr
       { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) },
     );
     if (res.ok) {
-      const me = (await res.json()) as { email?: string; name?: string };
-      console.log(`[margo] token authenticated as ${me.name} <${me.email}>.`);
+      const me = (await res.json()) as {
+        email?: string;
+        name?: string;
+        role?: 'read' | 'write' | 'admin' | null;
+        projectExists?: boolean;
+      };
+      // Three distinct verified states, surfaced loudly so a slug typo
+      // doesn't silently turn into "empty inbox" at dev-server boot.
+      if (me.projectExists === false) {
+        console.warn(`[margo] ⚠ project '${project}' does NOT exist on ${trimmed}.`);
+        console.warn(`        Either fix the spelling in margo.config.json or ask an admin to create the project at ${trimmed}/dashboard.`);
+      } else if (me.role === null || me.role === undefined) {
+        console.warn(`[margo] token authenticated as ${me.name} <${me.email}>, but '${project}' is private to its members.`);
+        console.warn(`        Ask an admin to invite ${me.email} at ${trimmed}/projects/${encodeURIComponent(project)}.`);
+      } else {
+        console.log(`[margo] token authenticated as ${me.name} <${me.email}> · role: ${me.role} on '${project}'.`);
+      }
     } else if (res.status === 401) {
       console.warn('[margo] token rejected (401). Ask the host admin to reissue.');
     } else if (res.status === 403) {

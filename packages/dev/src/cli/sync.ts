@@ -14,6 +14,7 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { loadMargoConfig } from '../config/load.js'
+import { mirrorTransportToDir } from '../storage/cache-mirror.js'
 import { RemoteTransport } from '../storage/remote-transport.js'
 import { ConflictError } from '../storage/transport.js'
 
@@ -61,35 +62,17 @@ async function buildContext(cwd: string, label: string): Promise<SyncContext> {
  */
 export async function pull(opts: { cwd: string; force?: boolean }): Promise<void> {
   const ctx = await buildContext(opts.cwd, 'pull')
-  await fs.mkdir(ctx.commentsDir, { recursive: true })
-  const comments = await ctx.transport.list()
-  const expected = new Set<string>()
-  for (const c of comments) {
-    const file = path.join(ctx.commentsDir, `${c.frontmatter.id}.md`)
-    expected.add(`${c.frontmatter.id}.md`)
-    // c.raw is the original frontmatter+body verbatim as stored on the
-    // host — writing it back preserves any operator-introduced
-    // formatting (extra blank lines, key order) instead of canonicalizing.
-    await fs.writeFile(file, c.raw, 'utf8')
-  }
-  // Local-only files: warn unless --force, in which case we delete them.
-  let localFiles: string[] = []
-  try {
-    localFiles = (await fs.readdir(ctx.commentsDir)).filter((f) => f.endsWith('.md'))
-  } catch { /* dir might not exist yet, fine */ }
-  const orphans = localFiles.filter((f) => !expected.has(f))
+  const { pulled, orphans } = await mirrorTransportToDir(ctx.transport, ctx.commentsDir)
   if (orphans.length > 0) {
     if (opts.force) {
-      for (const f of orphans) {
-        await fs.unlink(path.join(ctx.commentsDir, f))
-      }
+      for (const f of orphans) await fs.unlink(path.join(ctx.commentsDir, f))
       console.log(`[margo pull] removed ${orphans.length} local-only file(s).`)
     } else {
       console.warn(`[margo pull] ${orphans.length} local file(s) not on host (use --force to delete):`)
       for (const f of orphans) console.warn(`        ${f}`)
     }
   }
-  console.log(`[margo pull] ${comments.length} comment(s) from ${(await ctx.transport.getIdentity())?.email ?? 'host'}.`)
+  console.log(`[margo pull] ${pulled} comment(s) from ${(await ctx.transport.getIdentity())?.email ?? 'host'}.`)
   await ctx.transport.close()
 }
 

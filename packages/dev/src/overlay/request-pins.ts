@@ -301,7 +301,7 @@ function statusClass(status: number): string {
 export const REQUEST_PINS_CSS = `
 .margo-launcher-request {
   position: fixed;
-  bottom: 256px;
+  bottom: 208px;
   right: 16px;
   height: 32px;
   padding: 0 12px;

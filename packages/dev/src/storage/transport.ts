@@ -29,10 +29,16 @@ export class ConflictError extends Error {
 
 /** Identity of the current user — the author recorded on new comments and
  *  replies. Source depends on transport (git config locally, auth token
- *  remotely). */
+ *  remotely). `role` is only populated in server mode and reflects the
+ *  user's membership on the workspace's configured project — `null` when
+ *  they're authenticated but not a member. `projectExists` lets the UI
+ *  separate "I typo'd the slug" (false) from "project's real, I just
+ *  need access" (true + role:null). */
 export interface Identity {
   email: string
   name: string
+  role?: 'read' | 'write' | 'admin' | null
+  projectExists?: boolean
 }
 
 /** Event the transport pushes back when comments change underneath us.

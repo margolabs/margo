@@ -74,6 +74,8 @@ export class SyncClient extends EventTarget {
   async getMe(): Promise<{
     email: string;
     name: string;
+    role?: 'read' | 'write' | 'admin' | null;
+    projectExists?: boolean;
     mode?: 'local' | 'server';
     server?: { url: string; project: string };
   } | null> {
@@ -86,9 +88,16 @@ export class SyncClient extends EventTarget {
       // exactly what we know so the boot flow can decide whether to prompt
       // and pre-fill the half that's already set.
       if (!body) return null;
+      const role = body.role;
       return {
         email: typeof body.email === 'string' ? body.email : '',
         name: typeof body.name === 'string' ? body.name : '',
+        // Explicit null = "not a member" (server-mode access denied);
+        // undefined = role wasn't reported (local mode, or older host).
+        role: role === 'read' || role === 'write' || role === 'admin'
+          ? role
+          : (role === null ? null : undefined),
+        projectExists: typeof body.projectExists === 'boolean' ? body.projectExists : undefined,
         mode: body.mode === 'server' || body.mode === 'local' ? body.mode : undefined,
         server: body.server && typeof body.server === 'object'
           ? { url: String(body.server.url ?? ''), project: String(body.server.project ?? '') }

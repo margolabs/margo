@@ -91,11 +91,14 @@ export function start(opts: StartOptions): void {
   // own-only delete affordance — null while the fetch is in flight or in
   // preview mode (where we don't ask the backend at all). When the
   // workspace is in server mode, also carries connection metadata
-  // (`mode`, `server.url`, `server.project`) so the inbox can show a
-  // "connected to <project>" badge.
+  // (`mode`, `server.url`, `server.project`) and the user's role on the
+  // configured project (or null when authenticated-but-not-a-member, so
+  // the UI can render a clear "no access" state).
   let me: {
     email: string;
     name?: string;
+    role?: 'read' | 'write' | 'admin' | null;
+    projectExists?: boolean;
     mode?: 'local' | 'server';
     server?: { url: string; project: string };
   } | null = null;
@@ -320,6 +323,7 @@ export function start(opts: StartOptions): void {
         u = set ? await sync.getMe() : null;
       }
       me = u;
+      updateFabIdentity();
       renderPins();
     })();
     void refreshGitState();
@@ -330,15 +334,9 @@ export function start(opts: StartOptions): void {
       if (document.visibilityState === "visible") void refreshGitState();
     });
   }
-  // Toggle is rendered once and lives outside renderAllPins (which clears its
-  // own children every cycle). The button mutates `showResolved` and triggers
-  // a re-render — no need to re-create the toggle each time.
-  renderHidePinsToggle(root, hidePins, (next) => {
-    hidePins = next;
-    localStorage.setItem(hidePinsKey, next ? "1" : "0");
-    root.toggleAttribute("data-margo-hidden", next);
-    renderPins();
-  });
+  // The hide-pins (eye) toggle is now embedded into the FAB pill itself
+  // via updateFabIdentity, so no standalone tray button is created. State
+  // changes go through the fabMain click delegation.
   renderInboxToggle(root, () => {
     inboxOpen = !inboxOpen;
     sessionStorage.setItem(inboxOpenKey, inboxOpen ? "1" : "0");
@@ -366,12 +364,83 @@ export function start(opts: StartOptions): void {
   fabMain.setAttribute("aria-expanded", "false");
   fabMain.setAttribute("aria-label", "open margo menu");
   fabMain.title = "Margo";
-  fabMain.innerHTML = `<span class="margo-fab-main-pin">${icon("pin", 16)}</span><span class="margo-fab-main-label">Pin</span><span class="margo-fab-main-chev" aria-hidden="true">▾</span>`;
   fabMain.addEventListener("click", (e) => {
     e.stopPropagation();
+    // Eye toggle inside the pill — handled here via delegation so the
+    // markup stays static and updateFabIdentity can rebuild innerHTML
+    // freely without rebinding listeners. Returns before the tray
+    // expand so clicking the eye doesn't also open the menu.
+    const eyeEl = (e.target as HTMLElement | null)?.closest('.margo-fab-eye');
+    if (eyeEl) {
+      hidePins = !hidePins;
+      localStorage.setItem(hidePinsKey, hidePins ? '1' : '0');
+      root.toggleAttribute('data-margo-hidden', hidePins);
+      renderPins();
+      updateFabIdentity();
+      return;
+    }
+    // No-access short-circuit: every tray action would either 403 or
+    // surface an empty inbox, so don't expand at all. The closed-FAB
+    // identity strip already conveys the state, and the title tooltip
+    // tells the user what to do (ask a project admin to invite them).
+    if (root.hasAttribute("data-margo-no-access")) return;
     setFabOpen(!fabOpen);
   });
   root.appendChild(fabMain);
+
+  // Re-renders the Pin FAB's innerHTML to embed the user's avatar + project
+  // (server mode) or just the avatar (local mode) into the always-visible
+  // button. Same data as the inbox-header identity strip; updated by the
+  // me-binding code path. In preview mode we omit identity entirely — the
+  // overlay is read-only there and "who's writing" doesn't apply.
+  const updateFabIdentity = (): void => {
+    // Eye toggle embedded in the FAB pill itself — leftmost segment, always
+    // visible. Pin-creating affordances stay in the expandable tray; this
+    // is the one toggle that's worth a single click. Icon swaps on state.
+    const eyeChunk = `<span class="margo-fab-eye" role="button" aria-label="${hidePins ? 'show' : 'hide'} margo pins" title="${hidePins ? 'Pins hidden — click to show' : 'Hide pins to view the page without overlay'}">${icon(hidePins ? 'eye-off' : 'eye', 14)}</span><span class="margo-fab-sep" aria-hidden="true"></span>`;
+    const baseLabel = `<span class="margo-fab-main-pin">${icon("pin", 16)}</span><span class="margo-fab-main-label">Pin</span><span class="margo-fab-main-chev" aria-hidden="true">▾</span>`;
+    if (!me?.email || opts.mode === "preview") {
+      fabMain.innerHTML = eyeChunk + baseLabel;
+      fabMain.title = "Margo";
+      return;
+    }
+    const initial = (me.name?.trim()?.[0] ?? me.email[0] ?? "?").toUpperCase();
+    const noAccess = me.mode === "server" && me.role === null;
+    // Gate every pin-creating affordance behind the access state. A user
+    // who isn't a member of the configured project can't write comments
+    // anyway (host returns 403), so disabling the buttons up front avoids
+    // a confusing "click → error" flow. Detected via CSS attribute on
+    // root; updated here so it tracks /__margo/me refreshes.
+    root.toggleAttribute("data-margo-no-access", noAccess);
+    let identityChunk = eyeChunk + `<span class="margo-fab-avatar${noAccess ? " margo-fab-avatar-denied" : ""}" aria-hidden="true">${escapeHtml(initial)}</span>`;
+    if (me.mode === "server" && me.server) {
+      if (noAccess) {
+        // Two distinct failure modes worth separating in the UI:
+        // - project doesn't exist on this host (probably a typo in
+        //   margo.config.json, OR the admin hasn't created it yet)
+        // - project exists but the user isn't a member (needs an invite)
+        // The host's /me distinguishes via `projectExists`. If the field
+        // is missing (older host or local mode), fall back to "no access".
+        const projectMissing = me.projectExists === false;
+        if (projectMissing) {
+          identityChunk += `<span class="margo-fab-project margo-fab-project-denied" title="No project '${escapeHtml(me.server.project)}' on ${escapeHtml(me.server.url)}. Check the spelling in margo.config.json, or ask an admin to create it.">project not found · ${escapeHtml(me.server.project)}</span><span class="margo-fab-sep" aria-hidden="true"></span>`;
+          fabMain.title = `Signed in as ${me.email} · no project '${me.server.project}' exists on ${me.server.url}. Likely typo in margo.config.json.`;
+        } else {
+          identityChunk += `<span class="margo-fab-project margo-fab-project-denied" title="${escapeHtml(me.email)} has no access to ${escapeHtml(me.server.project)}. Ask a project admin to invite you at ${escapeHtml(me.server.url)}/projects/${escapeHtml(me.server.project)}">no access · ${escapeHtml(me.server.project)}</span><span class="margo-fab-sep" aria-hidden="true"></span>`;
+          fabMain.title = `Signed in as ${me.email} · NOT a member of ${me.server.project} on ${me.server.url}`;
+        }
+      } else {
+        identityChunk += `<span class="margo-fab-project" title="${escapeHtml(me.server.project)} on ${escapeHtml(me.server.url)} · ${escapeHtml(me.role ?? 'access')}">${escapeHtml(me.server.project)}</span><span class="margo-fab-sep" aria-hidden="true"></span>`;
+        fabMain.title = `Signed in as ${me.email} · ${me.server.project} on ${me.server.url} (${me.role ?? 'access'})`;
+      }
+    } else {
+      identityChunk += `<span class="margo-fab-sep" aria-hidden="true"></span>`;
+      fabMain.title = `Signed in as ${me.email} · local mode`;
+    }
+    fabMain.innerHTML = identityChunk + baseLabel;
+  };
+  // Initial render before /me resolves: just the bare Pin button.
+  updateFabIdentity();
 
   // Bubble-phase click listener. Sub-FAB's own click handler runs first
   // (target phase); we collapse the menu after, so the close never fights
@@ -770,23 +839,15 @@ export function renderInboxPanel(
   // rows. Order is intentional: status first (anchors the user's mental
   // model — "am I looking at open or everything?"), then narrow-or-widen
   // toggles to the right.
-  // Server-mode badge: shows the project + host so teammates can tell
-  // which workspace they're connected to. Hidden in local mode (the
-  // default; nothing useful to display since the comments live in this
-  // checkout). The host string is the URL's hostname only — no port,
-  // no scheme — to keep the badge compact.
-  let serverBadge = '';
-  if (me?.mode === 'server' && me.server) {
-    let host = me.server.url;
-    try { host = new URL(me.server.url).host; } catch { /* keep raw */ }
-    serverBadge = `<span class="margo-inbox-server-badge" title="${escapeHtml(me.server.url)}">server: ${escapeHtml(me.server.project)}@${escapeHtml(host)}</span>`;
-  }
+  // Identity (who + project + access state) lives in the FAB tray now —
+  // see updateFabIdentity. Keeping it out of the inbox header avoids
+  // duplicating the same information in two places, especially the
+  // no-access warning which the FAB makes loud enough already.
   panel.innerHTML = `
     <header class="margo-inbox-header">
       <div class="margo-inbox-titlebar">
         <strong>Inbox</strong>
         <span class="margo-inbox-count">${all.length} ${all.length === 1 ? "comment" : "comments"}</span>
-        ${serverBadge}
         <button type="button" class="margo-inbox-close" aria-label="close inbox">×</button>
       </div>
       <div class="margo-inbox-search">
@@ -1190,9 +1251,12 @@ function renderHidePinsToggle(
     btn.title = value
       ? "Pins hidden — click to show"
       : "Hide pins to view your product without overlay";
+    // Compact icon-only button — text removed per UX feedback. State is
+    // conveyed by the eye / eye-off icon swap. The aria-label + title
+    // above keep the affordance accessible.
     btn.innerHTML = value
-      ? `<span class="margo-eye">${icon("eye", 13)}</span><span>show pins</span>`
-      : `<span class="margo-eye">${icon("eye-off", 13)}</span><span>hide pins</span>`;
+      ? `<span class="margo-eye">${icon("eye", 16)}</span>`
+      : `<span class="margo-eye">${icon("eye-off", 16)}</span>`;
   };
   refresh();
   btn.addEventListener("click", () => {
@@ -3496,22 +3560,19 @@ function injectStyles(): void {
     }
     .margo-inbox-toggle:hover { background: var(--margo-muted); color: var(--margo-fg); }
     .margo-inbox-toggle:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
-    /* ——— hide-pins (focus-mode) toggle ——— */
-    .margo-hide-pins {
-      position: fixed; bottom: 60px; right: 16px; z-index: 1000002;
-      display: inline-flex; align-items: center; gap: 6px;
-      height: 32px; padding: 0 12px;
-      background: var(--margo-bg); color: var(--margo-muted-fg);
-      border: 1px solid var(--margo-border); border-radius: 9999px;
-      font: inherit; font-size: 12px; font-weight: 500;
-      cursor: pointer;
-      box-shadow: 0 2px 6px rgb(0 0 0 / .08);
-      transition: color .12s, background-color .12s, border-color .12s;
+    /* Eye toggle embedded into the FAB pill (handled via click delegation
+       on fabMain). Styled as a discrete clickable segment that doesn't
+       trigger tray expansion. */
+    .margo-fab-eye {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 22px; height: 22px; border-radius: 50%;
+      background: rgb(255 255 255 / .15); color: var(--margo-primary-fg);
+      cursor: pointer; line-height: 1;
+      transition: background-color .12s;
+      flex: 0 0 auto;
     }
-    .margo-hide-pins:hover { background: var(--margo-muted); color: var(--margo-fg); }
-    .margo-hide-pins:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
+    .margo-fab-eye:hover { background: rgb(255 255 255 / .28); }
     .margo-eye { display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
-    .margo-hide-pins-on { color: var(--margo-fg); border-color: var(--margo-ring); background: var(--margo-muted); }
     /* When focus mode is on, hide every other margo affordance — pins,
        highlights, the orphan tray, the bulk-resolve bar, the launcher,
        and the show-resolved toggle. The hide-pins button itself stays
@@ -3532,6 +3593,105 @@ function injectStyles(): void {
       box-shadow: 0 4px 14px rgb(0 0 0 / .18);
       transition: background-color .12s, box-shadow .12s;
     }
+    /* Avatar + project name embedded into the Pin FAB itself, so the
+       teammate sees the compact "avatar | project | Pin" pill in the
+       corner. Updated by updateFabIdentity() whenever /__margo/me
+       resolves. Hidden entirely in preview mode. */
+    .margo-fab-avatar {
+      width: 22px; height: 22px; border-radius: 50%;
+      background: rgb(255 255 255 / .18); color: var(--margo-primary-fg);
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 600; line-height: 1;
+      flex: 0 0 auto;
+      margin-right: -2px;
+    }
+    .margo-fab-project {
+      font-size: 11px; font-weight: 500; opacity: .9;
+      max-width: 100px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    /* Authenticated but not a project member — the user can see the host
+       responded but they don't have access. Visually distinct from the
+       normal connected state so a developer notices at a glance. */
+    .margo-fab-avatar-denied {
+      background: rgb(255 90 90 / .3);
+      color: hsl(0 80% 96%);
+    }
+    .margo-fab-project-denied {
+      max-width: 160px;
+      color: hsl(0 80% 90%);
+      font-weight: 600;
+    }
+    /* No-access mode: disable every pin-creating affordance. The user can
+       still open the inbox (read-only — it'll be empty / show their
+       no-access state), but Pin/Gap/Request are unclickable and visually
+       muted. The data-margo-no-access attribute is set on root by
+       updateFabIdentity(). */
+    [data-margo-no-access] .margo-launcher,
+    [data-margo-no-access] .margo-launcher-gap,
+    [data-margo-no-access] .margo-launcher-request {
+      opacity: .35;
+      pointer-events: none;
+      cursor: not-allowed;
+      filter: grayscale(1);
+    }
+    /* In no-access mode the FAB itself is non-interactive — clicking does
+       nothing so the tray never expands. Cursor + opacity make the
+       disabled state visible; the title tooltip still explains what to do. */
+    [data-margo-no-access] .margo-fab-main {
+      cursor: not-allowed;
+      opacity: .88;
+    }
+    [data-margo-no-access] .margo-fab-main-chev {
+      opacity: .35;
+    }
+    [data-margo-no-access] .margo-fab-main:hover {
+      box-shadow: 0 4px 14px rgb(0 0 0 / .18);
+    }
+    .margo-fab-sep {
+      width: 1px; height: 16px; background: rgb(255 255 255 / .25);
+      flex: 0 0 auto;
+      margin: 0 2px;
+    }
+    a.margo-fab-identity:hover {
+      box-shadow: 0 6px 18px rgb(0 0 0 / .18);
+      background: var(--margo-muted);
+      text-decoration: none;
+    }
+    .margo-fab-identity-avatar {
+      width: 22px; height: 22px; border-radius: 50%;
+      background: hsl(220 60% 50% / .18); color: hsl(220 70% 30%);
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 600;
+      flex: 0 0 auto;
+    }
+    .margo-fab-identity-name {
+      padding-left: 2px; padding-right: 4px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 110px;
+    }
+    .margo-fab-identity-server {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 9px 3px 7px; border-radius: 9999px;
+      background: hsl(220 60% 50% / .14); color: hsl(220 70% 35%);
+      font-size: 11px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 160px;
+    }
+    .margo-fab-identity-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: hsl(140 60% 45%);
+      box-shadow: 0 0 0 1.5px hsl(140 60% 45% / .25);
+      flex: 0 0 auto;
+    }
+    .margo-fab-identity-project { font-weight: 600; }
+    .margo-fab-identity-host { opacity: .7; font-variant-numeric: tabular-nums; }
+    .margo-fab-identity-mode {
+      padding: 2px 7px; border-radius: 9999px;
+      background: hsl(0 0% 50% / .12); color: var(--margo-muted-fg);
+      border: 1px solid hsl(0 0% 50% / .2);
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+    }
     .margo-fab-main:hover { box-shadow: 0 6px 18px rgb(0 0 0 / .22); }
     .margo-fab-main:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 3px; }
     .margo-fab-main-pin { display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
@@ -3549,8 +3709,7 @@ function injectStyles(): void {
        intercept clicks while invisible. */
     .margo-launcher,
     .margo-launcher-gap,
-    .margo-inbox-toggle,
-    .margo-hide-pins {
+    .margo-inbox-toggle {
       visibility: hidden;
       opacity: 0;
       pointer-events: none;
@@ -3558,8 +3717,7 @@ function injectStyles(): void {
     }
     [data-margo-fab-open] .margo-launcher,
     [data-margo-fab-open] .margo-launcher-gap,
-    [data-margo-fab-open] .margo-inbox-toggle,
-    [data-margo-fab-open] .margo-hide-pins {
+    [data-margo-fab-open] .margo-inbox-toggle {
       visibility: visible;
       opacity: 1;
       pointer-events: auto;
@@ -3567,10 +3725,12 @@ function injectStyles(): void {
     }
     /* Single source of truth for menu-item positions — applied unconditionally
        so opening doesn't trigger position transitions. */
+    /* Stack from the bottom up. Eye lives inside the FAB pill itself
+       (see updateFabIdentity); only pin-creating launchers + inbox
+       toggle live in the expandable tray. */
     .margo-launcher       { bottom: 64px;  right: 16px; }
     .margo-launcher-gap   { bottom: 112px; right: 16px; }
     .margo-inbox-toggle   { bottom: 160px; right: 16px; }
-    .margo-hide-pins      { bottom: 208px; right: 16px; }
     /* ——— inbox panel (slides in from the right) ——— */
     .margo-inbox {
       position: fixed; top: 16px; right: 16px; bottom: 16px;
@@ -3609,6 +3769,8 @@ function injectStyles(): void {
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       max-width: 180px;
     }
+    /* (Identity strip CSS removed — that information now lives only in
+       the FAB tray via .margo-fab-* rules above.) */
     .margo-inbox-close {
       background: transparent; border: 0; color: var(--margo-muted-fg);
       font-size: 20px; line-height: 1; cursor: pointer;

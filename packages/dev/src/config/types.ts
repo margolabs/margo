@@ -24,6 +24,17 @@ export interface MargoClientConfig {
       tokenEnv: string
     }
   }
+  /** Anchor that ties THIS repo to a margo-host project. Captured at
+   *  `margo init --server` (git remote URL when one exists, random UUID
+   *  otherwise) and committed so every clone of the repo carries the
+   *  same value. The plugin sends it to the host at boot for a first-
+   *  bind-wins check — a mismatch indicates the wrong margo.config
+   *  landed in this workspace (typo, fork, copy-paste) and surfaces as
+   *  a warning in the overlay UI. */
+  repoBinding?: {
+    kind: 'git-origin' | 'uuid'
+    value: string
+  }
 }
 
 /** Type-safe authoring helper for margo.config.ts. Returns the input

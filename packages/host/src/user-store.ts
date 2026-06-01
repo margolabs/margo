@@ -47,7 +47,28 @@ export interface ProjectRecord {
   slug: string
   name: string
   createdAt: string
+  /** Anchor to the developer's real repo. Recorded on first connect from
+   *  any plugin (first-bind-wins). Subsequent connects must match or get
+   *  a mismatch warning surfaced to the overlay UI. Catches typo'd slugs,
+   *  accidentally-shared slugs across unrelated repos, and forks that
+   *  forgot to update margo.config.
+   *
+   *  Two kinds: `git-origin` (the natural anchor when a team remote
+   *  exists) and `uuid` (fallback for repos without an origin URL —
+   *  committed into the workspace's margo.config so every clone sees the
+   *  same value). */
+  repoBinding?: { kind: 'git-origin' | 'uuid'; value: string; recordedAt: string }
 }
+
+/** Result of asking the host to claim or check a repo binding. The
+ *  client (plugin) hits this once at boot and surfaces the status in the
+ *  overlay so a developer with the wrong checkout sees a clear warning
+ *  instead of silently corrupting some other team's project. */
+export type BindingResult =
+  | { status: 'claimed'; recorded: NonNullable<ProjectRecord['repoBinding']> }
+  | { status: 'matched'; recorded: NonNullable<ProjectRecord['repoBinding']> }
+  | { status: 'mismatch'; recorded: NonNullable<ProjectRecord['repoBinding']>; presented: { kind: string; value: string } }
+  | { status: 'rebound'; recorded: NonNullable<ProjectRecord['repoBinding']>; previous: NonNullable<ProjectRecord['repoBinding']> }
 
 export interface MembershipRecord {
   userId: string
@@ -360,6 +381,43 @@ export class UserStore {
       if (project) out.push({ project, role: m.role })
     }
     return out
+  }
+
+  /** Either claim a binding (project has none yet) or verify it. With
+   *  `force: true` the caller can overwrite an existing binding —
+   *  reserved for `margo rebind` after a legit fork or repo move; the
+   *  route layer gates that to project admins / superusers. */
+  async claimOrCheckProjectBinding(
+    projectSlug: string,
+    presented: { kind: 'git-origin' | 'uuid'; value: string },
+    opts: { force?: boolean } = {},
+  ): Promise<BindingResult> {
+    await this.load()
+    const existing = this.data.projects.find((p) => p.slug === projectSlug)
+    if (!existing) throw new Error(`no_project`)
+    const now = new Date().toISOString()
+    if (!existing.repoBinding) {
+      const recorded = { ...presented, recordedAt: now }
+      await this.mutate((d) => {
+        const p = d.projects.find((x) => x.slug === projectSlug)
+        if (p) p.repoBinding = recorded
+      })
+      return { status: 'claimed', recorded }
+    }
+    const same = existing.repoBinding.kind === presented.kind && existing.repoBinding.value === presented.value
+    if (same) {
+      return { status: 'matched', recorded: existing.repoBinding }
+    }
+    if (opts.force) {
+      const recorded = { ...presented, recordedAt: now }
+      const previous = existing.repoBinding
+      await this.mutate((d) => {
+        const p = d.projects.find((x) => x.slug === projectSlug)
+        if (p) p.repoBinding = recorded
+      })
+      return { status: 'rebound', recorded, previous }
+    }
+    return { status: 'mismatch', recorded: existing.repoBinding, presented }
   }
 
   // ─── Memberships ──────────────────────────────────────────────────────

@@ -42,6 +42,7 @@ import {
   type HandlerContext,
   type SseClient,
 } from '../server/handlers.js';
+import { mirrorTransportToDir } from '../storage/cache-mirror.js';
 import { createTransport } from '../storage/factory.js';
 import type { Transport } from '../storage/transport.js';
 import type { CreateCommentRequest, MargoConfig, UpdateCommentRequest } from '../shared/types.js';
@@ -104,6 +105,13 @@ async function ensureCtx(): Promise<HandlerContext> {
     onAfterSync: () => transport.resetRemoteChanges(),
   };
 
+  // Server mode: pull all comments into the local cache once on boot so
+  // AI agents have fresh disk state without needing manual `margo pull`.
+  if (created.mode === 'server') {
+    void mirrorTransportToDir(transport, commentsDir)
+      .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI`))
+      .catch((err) => console.warn('[margo] initial pull failed (AI cache may be stale):', (err as Error).message));
+  }
   // Bridge transport events into the SSE stream. Subscribing once is fine —
   // the transport coalesces all listeners into a single underlying watcher/
   // poller pair, and we never unsubscribe in this code path (process exit

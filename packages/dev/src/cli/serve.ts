@@ -30,6 +30,7 @@ import * as url from 'node:url';
 import type { ServerResponse } from 'node:http';
 import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } from '../server/endpoints.js';
 import type { SseClient } from '../server/handlers.js';
+import { mirrorTransportToDir } from '../storage/cache-mirror.js';
 import { createTransport } from '../storage/factory.js';
 import type { MargoConfig } from '../shared/types.js';
 
@@ -107,6 +108,11 @@ export async function serve(opts: ServeOptions): Promise<void> {
     onAfterSync: () => transport.resetRemoteChanges(),
   });
 
+  if (created.mode === 'server') {
+    void mirrorTransportToDir(transport, commentsDir)
+      .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI`))
+      .catch((err) => console.warn('[margo] initial pull failed (AI cache may be stale):', (err as Error).message));
+  }
   transport.subscribe((e) => broadcastSse(ctx(), e));
   transport.subscribeRemoteChanges((payload) => {
     if (payload) broadcastSse(ctx(), { type: 'remote-changes', ...payload });
