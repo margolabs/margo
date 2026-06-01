@@ -40,9 +40,13 @@ async function buildContext(cwd: string, label: string): Promise<SyncContext> {
     console.error(`[margo ${label}] margo.config has storage: 'server' but no server block.`)
     process.exit(1)
   }
-  const token = process.env[server.auth.tokenEnv]
+  // Same defaults as the dev-plugin factory — `auth` is optional with
+  // `{ type: 'bearer', tokenEnv: 'MARGO_TOKEN' }` baked in.
+  const tokenEnv = server.auth?.tokenEnv ?? 'MARGO_TOKEN'
+  const token = process.env[tokenEnv]
   if (!token) {
-    console.error(`[margo ${label}] env var ${server.auth.tokenEnv} is not set.`)
+    console.error(`[margo ${label}] env var ${tokenEnv} is not set.`)
+    console.error(`        Set it in .env.local or your shell, then retry.`)
     process.exit(1)
   }
   return {

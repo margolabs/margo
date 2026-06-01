@@ -77,14 +77,19 @@ function createRemote(cfg: MargoClientConfig): RemoteTransport {
   if (!s) throw new Error("[margo] storage: 'server' requires a `server: {...}` block in margo.config")
   if (!s.url) throw new Error('[margo] server.url is required')
   if (!s.project) throw new Error('[margo] server.project is required')
-  if (s.auth?.type !== 'bearer') throw new Error('[margo] only auth.type "bearer" is supported in this version')
-  const tokenEnv = s.auth.tokenEnv
-  if (!tokenEnv) throw new Error('[margo] server.auth.tokenEnv is required')
+  // Defaults applied here so margo.config.json doesn't need to spell out
+  // the auth block in the common case. Only `bearer` is supported; if the
+  // user spells out something else, fail loudly so they know it's wrong.
+  const authType = s.auth?.type ?? 'bearer'
+  if (authType !== 'bearer') {
+    throw new Error('[margo] only auth.type "bearer" is supported in this version')
+  }
+  const tokenEnv = s.auth?.tokenEnv ?? 'MARGO_TOKEN'
   const token = process.env[tokenEnv]
   if (!token) {
     throw new Error(
-      `[margo] env var ${tokenEnv} is empty — set it before starting the dev server, ` +
-        `or revert margo.config to storage: 'local'.`,
+      `[margo] env var ${tokenEnv} is empty — set it before starting the dev server ` +
+        `(e.g. echo "${tokenEnv}=mgo_…" >> .env.local), or revert margo.config to storage: 'local'.`,
     )
   }
   return new RemoteTransport({ serverUrl: s.url, project: s.project, token })

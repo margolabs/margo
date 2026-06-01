@@ -352,38 +352,41 @@ async function writeMargoConfigJson(
     console.log(`[margo] margo.config.json already exists at ${file}; leaving it alone.`);
     return;
   } catch { /* doesn't exist, write it */ }
-  const binding = await deriveRepoBinding(cwd);
-  const body = {
-    storage: 'server',
-    server: {
-      url: serverUrl,
-      project,
-      auth: { type: 'bearer', tokenEnv },
-    },
-    repoBinding: binding,
-  };
+  // Keep the committed config small. Only spell out auth.tokenEnv when
+  // the user overrode the default 'MARGO_TOKEN'. No repoBinding is
+  // written — the plugin auto-derives `git remote get-url origin` at
+  // runtime when present, and workspaces without a git remote get no
+  // binding protection (intentional: prototype/local-only dirs have no
+  // team to protect from typo'd configs).
+  const server: Record<string, unknown> = { url: serverUrl, project };
+  if (tokenEnv !== 'MARGO_TOKEN') {
+    server.auth = { tokenEnv };
+  }
+  const body = { storage: 'server', server };
   await fs.writeFile(file, JSON.stringify(body, null, 2) + '\n', 'utf8');
-  if (binding.kind === 'git-origin') {
-    console.log(`[margo] wrote ${file} (repo bound to ${binding.value})`);
+  // Surface the binding state so a fresh init makes its protection
+  // story visible — operators see whether their workspace got bound or
+  // chose the no-protection path.
+  const origin = await detectGitOrigin(cwd);
+  if (origin) {
+    console.log(`[margo] wrote ${file} (will bind to git origin: ${origin})`);
   } else {
-    console.log(`[margo] wrote ${file} (no git origin; generated UUID binding)`);
+    console.log(`[margo] wrote ${file}`);
+    console.log(`[margo] (no git remote — skipping repo-binding protection. \`git remote add origin <url>\` to enable.)`);
   }
 }
 
-/** Pick the right anchor for this workspace. Prefer git origin URL when
- *  available (the natural identity every team repo already has), fall
- *  back to a random UUID when not (committed into margo.config so every
- *  future clone sees the same value). */
-async function deriveRepoBinding(cwd: string): Promise<{ kind: 'git-origin' | 'uuid'; value: string }> {
+/** Return the git origin URL when this workspace has one, null otherwise.
+ *  Used by init to surface the binding story; the plugin re-derives at
+ *  runtime, so the result here isn't load-bearing for correctness. */
+async function detectGitOrigin(cwd: string): Promise<string | null> {
   try {
     const { stdout } = await execFileP('git', ['remote', 'get-url', 'origin'], { cwd });
     const url = stdout.trim();
-    if (url) return { kind: 'git-origin', value: url };
-  } catch { /* no git or no origin — fall through to UUID */ }
-  // Use Node's randomUUID for the fallback. Format is human-readable
-  // enough to spot in the dashboard ("bind: uuid:7a0b3…") if needed.
-  const { randomUUID } = await import('node:crypto');
-  return { kind: 'uuid', value: randomUUID() };
+    return url || null;
+  } catch {
+    return null;
+  }
 }
 
 /** Flip autoCommit/autoPush off in a freshly-scaffolded .margo/config.json

@@ -38,9 +38,10 @@ export async function watch(opts: WatchOptions): Promise<void> {
     console.error('[margo watch] margo.config has storage: server but no server block.')
     process.exit(1)
   }
-  const token = process.env[server.auth.tokenEnv]
+  const tokenEnv = server.auth?.tokenEnv ?? 'MARGO_TOKEN'
+  const token = process.env[tokenEnv]
   if (!token) {
-    console.error(`[margo watch] env var ${server.auth.tokenEnv} is not set.`)
+    console.error(`[margo watch] env var ${tokenEnv} is not set.`)
     process.exit(1)
   }
   const commentsDir = path.join(opts.cwd, '.margo', 'comments')
