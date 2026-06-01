@@ -21,6 +21,9 @@ This repo uses **margo** — a live-app feedback layer where teammates pin comme
 - `status: resolved`, `status: wontfix` → **do not process or modify code in response**. You may read these for historical context (e.g., to avoid re-proposing something the team already declined), but never re-open them or treat them as actionable. The `wontfix` status is what the UI calls "Dismiss" — an explicit "we considered this and aren't going to act on it." Reversible via Reopen if the team changes its mind.
 - Never set `status: resolved`. Only humans do that. Your terminal states are `ready-for-review` and `blocked`.
 - When you change code that affects a pinned element, update the comment's `target` fields in the same edit so the pin still resolves.
+- `target.kind: 'request'` → comment is pinned to a captured network call, not a DOM element. The full workflow is in the `/margo` skill; in short, find the route handler for `target.request.endpoint` and act from there. Don't try to update the anchor — endpoints are stable.
+- `target.request.trigger` (on request pins) → snapshot of the UI element whose interaction fired this call (selector, text, role, coords). Auto-captured at fetch dispatch — the user pins the *request*, margo records what GUI action caused it. Read it to know "fired by clicking Subscribe" without the user having to also pin the button.
+- `target.request.traceId` (on request pins) → per-interaction id sent as `x-margo-trace` header on same-origin calls. Useful for grepping app-level access logs to surface handler-side context.
 - Commit message convention: `margo: <description>` for any commit that touches `.margo/`.
 
 For the full processing protocol see `.claude/skills/margo/SKILL.md`.

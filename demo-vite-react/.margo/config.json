@@ -1,21 +1,36 @@
 {
   "$schema": "https://margo-dev.com/schema/config.v0.json",
   "workspace": {
-    "name": "margo-demo-vite-react",
+    "name": "acme-product",
     "appUrl": {
-      "dev": "http://localhost:5175",
+      "dev": "http://localhost:3000",
       "preview": null
     }
   },
   "roster": [
-    { "email": "demo@margo.local", "role": "designer", "displayName": "Demo User" }
+    {
+      "email": "jane@team.com",
+      "role": "pm",
+      "displayName": "Jane Liu"
+    },
+    {
+      "email": "alex@team.com",
+      "role": "designer",
+      "displayName": "Alex Park"
+    },
+    {
+      "email": "sam@team.com",
+      "role": "dev",
+      "displayName": "Sam Chen"
+    }
   ],
   "git": {
-    "autoCommit": true,
-    "autoPush":   false,
+    "autoCommit": false,
+    "autoPush": false,
     "commitPrefix": "margo:",
     "branchPolicy": "current",
-    "pullBeforePush": false
+    "pullBeforePush": true,
+    "remotePollIntervalMs": 60000
   },
   "ai": {
     "implicitTaskTrigger": true,

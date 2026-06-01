@@ -1,0 +1,11 @@
+{
+  "storage": "server",
+  "server": {
+    "url": "http://localhost:7331",
+    "project": "acme-pricing",
+    "auth": {
+      "type": "bearer",
+      "tokenEnv": "MARGO_TOKEN"
+    }
+  }
+}
