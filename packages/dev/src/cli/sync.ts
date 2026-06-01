@@ -15,6 +15,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { loadMargoConfig } from '../config/load.js'
 import { mirrorTransportToDir } from '../storage/cache-mirror.js'
+import { loadDotenvFiles } from '../storage/env-loader.js'
 import { RemoteTransport } from '../storage/remote-transport.js'
 import { ConflictError } from '../storage/transport.js'
 
@@ -25,6 +26,9 @@ interface SyncContext {
 }
 
 async function buildContext(cwd: string, label: string): Promise<SyncContext> {
+  // Pick up `.env.local` / `.env` before we resolve tokenEnv from
+  // process.env — same convention as the plugin's createTransport.
+  loadDotenvFiles(cwd)
   const loaded = await loadMargoConfig(cwd)
   if (!loaded || loaded.config.storage !== 'server') {
     console.error(`[margo ${label}] no server-mode margo.config in ${cwd} — nothing to sync.`)

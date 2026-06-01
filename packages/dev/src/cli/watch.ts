@@ -15,6 +15,7 @@ import * as crypto from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { loadMargoConfig } from '../config/load.js'
+import { loadDotenvFiles } from '../storage/env-loader.js'
 import { RemoteTransport } from '../storage/remote-transport.js'
 import { ConflictError } from '../storage/transport.js'
 
@@ -23,6 +24,9 @@ export interface WatchOptions {
 }
 
 export async function watch(opts: WatchOptions): Promise<void> {
+  // Pick up `.env.local` / `.env` before we resolve tokenEnv — same
+  // convention as the dev plugin's createTransport.
+  loadDotenvFiles(opts.cwd)
   const loaded = await loadMargoConfig(opts.cwd)
   if (!loaded || loaded.config.storage !== 'server') {
     console.error('[margo watch] no server-mode margo.config in this workspace.')

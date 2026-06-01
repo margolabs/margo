@@ -299,6 +299,11 @@ async function init(
     // comments here so AI can read them; the host is the source of truth,
     // so the cache must never end up in the repo's git history.
     await ensureGitignoreEntry(cwd, '.margo/comments/');
+    // Gitignore standard dotenv files so a teammate can drop their
+    // MARGO_TOKEN into .env.local without worrying about leaking it.
+    // The plugin auto-loads these at boot (see storage/env-loader.ts).
+    await ensureGitignoreEntry(cwd, '.env.local');
+    await ensureGitignoreEntry(cwd, '.env');
     await verifyHostReachable(opts.server!);
     if (process.env[tokenEnv]) {
       await verifyTokenWorks(opts.server!, opts.project!, process.env[tokenEnv]!);
@@ -319,8 +324,9 @@ async function init(
     console.log(`       Server mode: comments live on ${opts.server}, project '${opts.project}'.`);
     if (!process.env[tokenEnv]) {
       console.log('');
-      console.log(`       Set ${tokenEnv} in your shell with the token your host admin issued:`);
-      console.log(`         export ${tokenEnv}=mgo_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`);
+      console.log(`       Drop your token into .env.local (gitignored) — the plugin auto-loads it on boot:`);
+      console.log(`         echo '${tokenEnv}=mgo_…' >> .env.local`);
+      console.log(`       (or export ${tokenEnv}=mgo_… in your shell if you prefer)`);
       console.log('');
     }
     console.log('       Then `npm run dev` and pin away — the host is the source of truth.');

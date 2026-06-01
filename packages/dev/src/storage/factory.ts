@@ -4,6 +4,7 @@
 
 import { loadMargoConfig } from '../config/load.js'
 import type { MargoClientConfig } from '../config/types.js'
+import { loadDotenvFiles } from './env-loader.js'
 import { LocalTransport } from './local-transport.js'
 import { RemoteTransport } from './remote-transport.js'
 import type { Transport } from './transport.js'
@@ -39,6 +40,11 @@ export interface CreateTransportResult {
 export async function createTransport(
   opts: CreateTransportOptions,
 ): Promise<CreateTransportResult> {
+  // Load `.env.local` / `.env` into process.env BEFORE we read tokenEnv.
+  // This is what lets teammates drop `MARGO_TOKEN=mgo_…` into a
+  // gitignored .env.local instead of `export`ing in their shell rc.
+  // Shell env still wins (never overrides existing values).
+  loadDotenvFiles(opts.rootDir)
   const loaded = await loadMargoConfig(opts.rootDir)
   const clientCfg = loaded?.config ?? {}
   const mode: 'local' | 'server' = clientCfg.storage === 'server' ? 'server' : 'local'

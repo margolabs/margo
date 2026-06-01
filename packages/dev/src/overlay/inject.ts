@@ -406,6 +406,12 @@ export function start(opts: StartOptions): void {
     }
     const initial = (me.name?.trim()?.[0] ?? me.email[0] ?? "?").toUpperCase();
     const noAccess = me.mode === "server" && me.role === null;
+    // Read-only users (members with role:'read') can browse the inbox but
+    // can't create comments — the host would 403 every POST/PUT. Disable
+    // Pin/Gap/Request the same way as no-access, but keep the tray
+    // expandable and the inbox usable since they CAN read.
+    const readOnly = me.mode === "server" && me.role === "read";
+    root.toggleAttribute("data-margo-read-only", readOnly);
     // Gate every pin-creating affordance behind the access state. A user
     // who isn't a member of the configured project can't write comments
     // anyway (host returns 403), so disabling the buttons up front avoids
@@ -3627,9 +3633,18 @@ function injectStyles(): void {
        no-access state), but Pin/Gap/Request are unclickable and visually
        muted. The data-margo-no-access attribute is set on root by
        updateFabIdentity(). */
+    /* Pin-creating affordances disabled when the user can't write —
+       either because they have no project membership at all (no-access)
+       or because they have read-only membership. Visual treatment is
+       identical; the difference is whether the tray itself can expand
+       (no-access blocks expansion entirely, read-only allows it so the
+       inbox + eye are still reachable). */
     [data-margo-no-access] .margo-launcher,
     [data-margo-no-access] .margo-launcher-gap,
-    [data-margo-no-access] .margo-launcher-request {
+    [data-margo-no-access] .margo-launcher-request,
+    [data-margo-read-only] .margo-launcher,
+    [data-margo-read-only] .margo-launcher-gap,
+    [data-margo-read-only] .margo-launcher-request {
       opacity: .35;
       pointer-events: none;
       cursor: not-allowed;

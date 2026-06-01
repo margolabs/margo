@@ -3,3 +3,5 @@ dist
 .vite
 *.log
 .margo/comments/
+.env.local
+.env
