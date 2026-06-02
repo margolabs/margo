@@ -2,9 +2,9 @@
 // by all three plugin entry points (Vite, Next, CLI sidecar) so the
 // "local vs server" decision lives in exactly one place.
 
+import { findCredential } from '../auth/credentials-store.js'
 import { loadMargoConfig } from '../config/load.js'
 import type { MargoClientConfig } from '../config/types.js'
-import { loadDotenvFiles } from './env-loader.js'
 import { LocalTransport } from './local-transport.js'
 import { RemoteTransport } from './remote-transport.js'
 import type { Transport } from './transport.js'
@@ -40,17 +40,12 @@ export interface CreateTransportResult {
 export async function createTransport(
   opts: CreateTransportOptions,
 ): Promise<CreateTransportResult> {
-  // Load `.env.local` / `.env` into process.env BEFORE we read tokenEnv.
-  // This is what lets teammates drop `MARGO_TOKEN=mgo_…` into a
-  // gitignored .env.local instead of `export`ing in their shell rc.
-  // Shell env still wins (never overrides existing values).
-  loadDotenvFiles(opts.rootDir)
   const loaded = await loadMargoConfig(opts.rootDir)
   const clientCfg = loaded?.config ?? {}
   const mode: 'local' | 'server' = clientCfg.storage === 'server' ? 'server' : 'local'
 
   if (mode === 'server') {
-    const transport = createRemote(clientCfg)
+    const transport = await createRemote(clientCfg)
     return {
       transport,
       mode: 'server',
@@ -72,7 +67,7 @@ export async function createTransport(
   }
 }
 
-function createRemote(cfg: MargoClientConfig): RemoteTransport {
+async function createRemote(cfg: MargoClientConfig): Promise<RemoteTransport> {
   const s = cfg.server
   if (!s) throw new Error("[margo] storage: 'server' requires a `server: {...}` block in margo.config")
   if (!s.url) throw new Error('[margo] server.url is required')
@@ -85,12 +80,32 @@ function createRemote(cfg: MargoClientConfig): RemoteTransport {
     throw new Error('[margo] only auth.type "bearer" is supported in this version')
   }
   const tokenEnv = s.auth?.tokenEnv ?? 'MARGO_TOKEN'
-  const token = process.env[tokenEnv]
+  const token = await resolveToken(tokenEnv, s.url)
   if (!token) {
     throw new Error(
-      `[margo] env var ${tokenEnv} is empty — set it before starting the dev server ` +
-        `(e.g. echo "${tokenEnv}=mgo_…" >> .env.local), or revert margo.config to storage: 'local'.`,
+      `[margo] no saved credentials for ${s.url} and ${tokenEnv} is unset — ` +
+        `run \`npx margo login ${s.url}\` to authorize this device.`,
     )
   }
   return new RemoteTransport({ serverUrl: s.url, project: s.project, token })
+}
+
+/** Token-lookup chain shared by the dev plugin (here) and the
+ *  margo pull/push/watch CLIs. Order: process.env (for CI / Docker dev
+ *  containers / shell-exported tokens) → ~/.margo/credentials.json
+ *  (populated by `margo login`). On a credentials-file hit we also push
+ *  the value into process.env so downstream code paths that read
+ *  env-vars directly (e.g. host verification in `margo init`) see it. */
+export async function resolveToken(
+  tokenEnv: string,
+  serverUrl: string,
+): Promise<string | null> {
+  const fromEnv = process.env[tokenEnv]
+  if (fromEnv) return fromEnv
+  const cred = await findCredential(serverUrl)
+  if (cred && cred.token) {
+    process.env[tokenEnv] = cred.token
+    return cred.token
+  }
+  return null
 }

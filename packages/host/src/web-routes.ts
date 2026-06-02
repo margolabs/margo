@@ -8,7 +8,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { issueSessionCookie, clearSessionCookie, readSession, setCookieHeader } from './session.js'
-import { renderDashboard, renderLogin, renderProject, renderSetup, renderSignup, type DashboardData } from './web-ui.js'
+import { renderCliLogin, renderDashboard, renderLogin, renderProject, renderSetup, renderSignup, type CliLoginPageData, type DashboardData } from './web-ui.js'
 import type { Role, UserRecord, UserStore } from './user-store.js'
 
 export interface WebContext {
@@ -87,6 +87,12 @@ export async function handleWebRoute(
   }
   if (path === '/api/me/projects' && req.method === 'POST') {
     return handleCreateProject(ctx, req, res)
+  }
+  if (path === '/cli-login' && req.method === 'GET') {
+    return handleCliLoginPage(ctx, req, res)
+  }
+  if (path === '/api/auth/cli-login/authorize' && req.method === 'POST') {
+    return handleCliLoginAuthorize(ctx, req, res)
   }
   // Project detail page (HTML).
   const projectViewMatch = /^\/projects\/([a-zA-Z0-9._-]+)$/.exec(path)
@@ -505,6 +511,96 @@ async function handleProjectPage(
     canManage,
     members: hydrated,
   }))
+}
+
+// ─── CLI device-login (session-authed confirmation page) ─────────────
+
+async function handleCliLoginPage(
+  ctx: WebContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<boolean> {
+  const user = await currentUser(ctx, req)
+  if (!user) {
+    // The CLI flow asks the user to open this URL; if they're not
+    // logged in yet, route to /login. We deliberately don't carry a
+    // `next` param — after login they land on the dashboard and just
+    // re-open the URL the CLI printed. Simpler than threading state
+    // through every web route.
+    res.writeHead(302, { location: '/login' }).end()
+    return true
+  }
+  const rawCode = parseQueryParam(req.url ?? '', 'code')
+  if (!rawCode) {
+    return sendHtml(res, 400, renderCliLogin({
+      user: { email: user.email, name: user.name },
+      errorMessage: 'No code in the URL. Re-open the link from your terminal.',
+    }))
+  }
+  const session = await ctx.users.findCliLoginSessionByUserCode(rawCode)
+  const errorMessage = describeCliSessionUnavailability(session)
+  if (errorMessage || !session) {
+    return sendHtml(res, 200, renderCliLogin({
+      user: { email: user.email, name: user.name },
+      errorMessage: errorMessage ?? 'Unknown verification code.',
+    }))
+  }
+  const data: CliLoginPageData = {
+    user: { email: user.email, name: user.name },
+    session: { userCode: session.userCode, label: session.label, expiresAt: session.expiresAt },
+  }
+  return sendHtml(res, 200, renderCliLogin(data))
+}
+
+async function handleCliLoginAuthorize(
+  ctx: WebContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<boolean> {
+  const user = await currentUser(ctx, req)
+  if (!user) return sendJson(res, 401, { error: 'not logged in' })
+  const body = await readJson<{ userCode?: string }>(req)
+  const userCode = (body.userCode ?? '').trim()
+  if (!userCode) return sendJson(res, 400, { error: 'invalid userCode' })
+  const result = await ctx.users.authorizeCliLoginSession(userCode, user.id)
+  if (!result) return sendJson(res, 404, { error: 'session not found or expired' })
+  return sendJson(res, 200, { ok: true })
+}
+
+/** Return a user-facing message if the session can't be confirmed in
+ *  its current state, or null if it's good to go. Centralized so the
+ *  page and the API give consistent wording. */
+function describeCliSessionUnavailability(
+  session: { status: string; expiresAt: string; consumedAt?: string } | null,
+): string | null {
+  if (!session) return 'Unknown verification code. Re-check the code shown in your terminal.'
+  if (session.consumedAt) return 'This device was already authorized. If your CLI still needs a token, start a new login.'
+  if (new Date(session.expiresAt).getTime() < Date.now()) {
+    return 'This login request expired. Run the CLI command again to get a fresh code.'
+  }
+  if (session.status === 'authorized') {
+    return 'This device is already authorized. Your CLI should complete in a moment.'
+  }
+  if (session.status === 'denied') return 'This login request was denied.'
+  return null
+}
+
+function parseQueryParam(url: string, name: string): string | null {
+  const qIdx = url.indexOf('?')
+  if (qIdx === -1) return null
+  const qs = url.slice(qIdx + 1)
+  for (const pair of qs.split('&')) {
+    const eq = pair.indexOf('=')
+    const key = eq === -1 ? pair : pair.slice(0, eq)
+    if (decodeURIComponent(key) !== name) continue
+    const raw = eq === -1 ? '' : pair.slice(eq + 1)
+    try {
+      return decodeURIComponent(raw.replace(/\+/g, ' '))
+    } catch {
+      return raw
+    }
+  }
+  return null
 }
 
 async function canManageProject(ctx: WebContext, user: UserRecord, slug: string): Promise<boolean> {

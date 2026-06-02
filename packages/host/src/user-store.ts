@@ -91,6 +91,36 @@ export interface TokenRecord {
   revokedAt?: string
 }
 
+/** Short-lived state for a CLI device-login flow. The CLI POSTs to
+ *  /api/auth/cli-login/start, gets a deviceCode (its polling credential)
+ *  + a human-readable userCode the user types into the browser. The
+ *  browser-authed user visits /cli-login?code=… and confirms, flipping
+ *  status to 'authorized'. The CLI's next poll mints a real bearer
+ *  token, sets consumedAt, and never re-mints. Sessions expire 15 min
+ *  after creation; expired/consumed entries get pruned on the next
+ *  start call so users.json doesn't grow without bound. */
+export interface CliLoginSession {
+  /** 32 random hex chars. The CLI's polling credential — anyone who has
+   *  this can poll for status and (once authorized) mint a token. */
+  deviceCode: string
+  /** 8 hex chars uppercase, hyphenated like "ABCD-1234". Shown to the
+   *  user, typed/clicked into the browser to identify the session. */
+  userCode: string
+  /** Human-readable device label (e.g. "alice-laptop") — becomes the
+   *  token label once authorized. Defaults to "cli-device" if the CLI
+   *  didn't supply one. */
+  label: string
+  status: 'pending' | 'authorized' | 'denied'
+  createdAt: string
+  /** createdAt + 15 minutes. Polls after this point get 410 expired. */
+  expiresAt: string
+  /** Set when status flips to 'authorized'. The browser-authed user's id. */
+  authorizedUserId?: string
+  /** Set when the CLI's poll mints the token. Subsequent polls 404 so
+   *  the deviceCode can't be replayed to mint multiple tokens. */
+  consumedAt?: string
+}
+
 interface FileShape {
   version: 1
   users: UserRecord[]
@@ -101,9 +131,19 @@ interface FileShape {
    *  generated on first persist; rotating it (deleting the field +
    *  restarting) invalidates every issued session and forces re-login. */
   sessionSecret?: string
+  /** Short-lived CLI device-login sessions. Optional for forward-compat
+   *  with older users.json files written before the field existed. */
+  cliLoginSessions?: CliLoginSession[]
 }
 
-const EMPTY: FileShape = { version: 1, users: [], tokens: [], projects: [], memberships: [] }
+const EMPTY: FileShape = {
+  version: 1,
+  users: [],
+  tokens: [],
+  projects: [],
+  memberships: [],
+  cliLoginSessions: [],
+}
 
 /** Result of creating a token. plainToken is shown to the operator ONCE
  *  at creation; it's not persisted in plain form. */
@@ -555,6 +595,112 @@ export class UserStore {
     return { user, token }
   }
 
+  // ─── CLI device-login sessions ───────────────────────────────────────
+
+  /** Start a new CLI device-login flow. Generates a 32-hex deviceCode
+   *  (the CLI's polling credential) plus an 8-char hyphenated userCode
+   *  for the user to enter in the browser. Prunes expired/consumed
+   *  sessions while we're already inside the mutate critical section
+   *  so users.json doesn't accumulate dead entries from abandoned
+   *  logins. */
+  async createCliLoginSession(label: string): Promise<CliLoginSession> {
+    await this.load()
+    const now = new Date()
+    const session: CliLoginSession = {
+      deviceCode: crypto.randomBytes(16).toString('hex'),
+      userCode: formatUserCode(crypto.randomBytes(4).toString('hex')),
+      label,
+      status: 'pending',
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+    }
+    return this.mutate((d) => {
+      const list = d.cliLoginSessions ?? (d.cliLoginSessions = [])
+      // Drop anything that's already past its expiry or already minted
+      // a token — keeps the file small for hosts that see lots of CLI
+      // logins.
+      const nowMs = now.getTime()
+      d.cliLoginSessions = list.filter((s) => !s.consumedAt && new Date(s.expiresAt).getTime() >= nowMs)
+      d.cliLoginSessions.push(session)
+      return session
+    })
+  }
+
+  /** Look up a session by its deviceCode. Reads fresh from disk because
+   *  the CLI polls every 2s while a separate process (browser) flips
+   *  the status to 'authorized' — same cross-process freshness story
+   *  as resolveToken. */
+  async findCliLoginSessionByDeviceCode(deviceCode: string): Promise<CliLoginSession | null> {
+    await this.reload()
+    const list = this.data.cliLoginSessions ?? []
+    return list.find((s) => s.deviceCode === deviceCode) ?? null
+  }
+
+  /** Look up a session by its userCode. Case-INSENSITIVE so users can
+   *  type lowercase without confusion. Same fresh-read rationale as
+   *  findCliLoginSessionByDeviceCode. */
+  async findCliLoginSessionByUserCode(userCode: string): Promise<CliLoginSession | null> {
+    await this.reload()
+    const upper = userCode.toUpperCase()
+    const list = this.data.cliLoginSessions ?? []
+    return list.find((s) => s.userCode.toUpperCase() === upper) ?? null
+  }
+
+  /** Flip a session to 'authorized' under the signed-in user's id. The
+   *  status check happens inside the mutate critical section so two
+   *  concurrent confirms (user double-clicks Authorize) can't both win
+   *  with different userIds. Returns null if the session is unknown,
+   *  expired, denied, or already consumed. */
+  async authorizeCliLoginSession(userCode: string, userId: string): Promise<CliLoginSession | null> {
+    await this.load()
+    const upper = userCode.toUpperCase()
+    try {
+      return await this.mutate((d) => {
+        const list = d.cliLoginSessions ?? []
+        const session = list.find((s) => s.userCode.toUpperCase() === upper)
+        if (!session) throw new Error('not_found')
+        if (session.consumedAt) throw new Error('not_found')
+        if (new Date(session.expiresAt).getTime() < Date.now()) throw new Error('not_found')
+        if (session.status === 'denied') throw new Error('not_found')
+        session.status = 'authorized'
+        session.authorizedUserId = userId
+        return session
+      })
+    } catch (err) {
+      if ((err as Error).message === 'not_found') return null
+      throw err
+    }
+  }
+
+  /** Called by the CLI's polling endpoint once it sees status='authorized'.
+   *  Atomically marks the session as consumed and returns the user the
+   *  caller should mint a token for. Returns null if the session is
+   *  unknown, expired, not yet authorized, or already consumed — the
+   *  consumedAt check makes the deviceCode single-use so a stolen
+   *  deviceCode can't replay-mint additional tokens after the original
+   *  poll. */
+  async consumeCliLoginSession(deviceCode: string): Promise<{ session: CliLoginSession; user: UserRecord } | null> {
+    await this.load()
+    try {
+      return await this.mutate((d) => {
+        const list = d.cliLoginSessions ?? []
+        const session = list.find((s) => s.deviceCode === deviceCode)
+        if (!session) throw new Error('not_found')
+        if (session.consumedAt) throw new Error('not_found')
+        if (new Date(session.expiresAt).getTime() < Date.now()) throw new Error('not_found')
+        if (session.status !== 'authorized') throw new Error('not_found')
+        if (!session.authorizedUserId) throw new Error('not_found')
+        const user = d.users.find((u) => u.id === session.authorizedUserId)
+        if (!user) throw new Error('not_found')
+        session.consumedAt = new Date().toISOString()
+        return { session, user }
+      })
+    } catch (err) {
+      if ((err as Error).message === 'not_found') return null
+      throw err
+    }
+  }
+
   private touchLastUsedAt(tokenId: string): void {
     this.writeChain = this.writeChain
       .catch(() => undefined)
@@ -602,13 +748,16 @@ export class UserStore {
 }
 
 function normalize(parsed: FileShape): FileShape {
-  return {
+  const out: FileShape = {
     version: 1,
     users: Array.isArray(parsed.users) ? parsed.users : [],
     tokens: Array.isArray(parsed.tokens) ? parsed.tokens : [],
     projects: Array.isArray(parsed.projects) ? parsed.projects : [],
     memberships: Array.isArray(parsed.memberships) ? parsed.memberships : [],
+    cliLoginSessions: Array.isArray(parsed.cliLoginSessions) ? parsed.cliLoginSessions : [],
   }
+  if (parsed.sessionSecret) out.sessionSecret = parsed.sessionSecret
+  return out
 }
 
 function sha256(input: string): string {
@@ -619,6 +768,16 @@ function sha256(input: string): string {
 // while staying human-readable in CLI output ("u-3f8a91c2").
 function nextSuffix(): string {
   return crypto.randomBytes(4).toString('hex')
+}
+
+// Format 8 hex chars as "ABCD-1234" — easier to read aloud and copy
+// without losing track of position than an unbroken string. Crockford
+// would prefer a base32 alphabet without ambiguous chars, but plain hex
+// keeps the entropy story simple and is good enough for a 15-minute
+// window with a per-userCode session.
+function formatUserCode(hex8: string): string {
+  const upper = hex8.toUpperCase()
+  return `${upper.slice(0, 4)}-${upper.slice(4, 8)}`
 }
 
 // scrypt parameters: N=16384 (2^14), r=8, p=1 — the conservative

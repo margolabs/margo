@@ -15,7 +15,7 @@ import * as crypto from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { loadMargoConfig } from '../config/load.js'
-import { loadDotenvFiles } from '../storage/env-loader.js'
+import { resolveToken } from '../storage/factory.js'
 import { RemoteTransport } from '../storage/remote-transport.js'
 import { ConflictError } from '../storage/transport.js'
 
@@ -24,9 +24,6 @@ export interface WatchOptions {
 }
 
 export async function watch(opts: WatchOptions): Promise<void> {
-  // Pick up `.env.local` / `.env` before we resolve tokenEnv — same
-  // convention as the dev plugin's createTransport.
-  loadDotenvFiles(opts.cwd)
   const loaded = await loadMargoConfig(opts.cwd)
   if (!loaded || loaded.config.storage !== 'server') {
     console.error('[margo watch] no server-mode margo.config in this workspace.')
@@ -38,10 +35,14 @@ export async function watch(opts: WatchOptions): Promise<void> {
     console.error('[margo watch] margo.config has storage: server but no server block.')
     process.exit(1)
   }
+  // resolveToken consults process.env first, then
+  // ~/.margo/credentials.json — so `margo login` is enough to start
+  // watching without also exporting MARGO_TOKEN.
   const tokenEnv = server.auth?.tokenEnv ?? 'MARGO_TOKEN'
-  const token = process.env[tokenEnv]
+  const token = await resolveToken(tokenEnv, server.url)
   if (!token) {
-    console.error(`[margo watch] env var ${tokenEnv} is not set.`)
+    console.error(`[margo watch] no saved credentials for ${server.url} and ${tokenEnv} is unset.`)
+    console.error(`        Run \`npx margo login ${server.url}\` to authorize this device.`)
     process.exit(1)
   }
   const commentsDir = path.join(opts.cwd, '.margo', 'comments')

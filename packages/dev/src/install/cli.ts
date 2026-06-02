@@ -18,9 +18,12 @@ import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import * as url from 'node:url';
 import { promisify } from 'node:util';
+import { login } from '../cli/login.js';
+import { logout } from '../cli/logout.js';
 import { serve } from '../cli/serve.js';
 import { pull, push } from '../cli/sync.js';
 import { watch as watchSync } from '../cli/watch.js';
+import { resolveToken } from '../storage/factory.js';
 
 const execFileP = promisify(execFile);
 
@@ -52,6 +55,9 @@ Commands:
   push                  [server mode] upload local comments to host
                           [--id ID to push just one]
   watch                 [server mode] long-running auto-sync (SSE + chokidar)
+  login URL             authorize this device against a margo host (opens browser)
+                          --token mgo_… : skip browser; save a pre-minted token
+  logout [URL]          remove saved credentials (one host, or all if URL omitted)
 
 Common flags: --port N, --cwd DIR, --user|--project
 
@@ -93,6 +99,27 @@ async function main(): Promise<void> {
     case 'watch':
       await watchSync({ cwd: flags.cwd ?? cwd });
       break;
+    case 'login': {
+      // Host URL is positional: `npx margo login http://localhost:7331`.
+      // We don't want it confused with a --flag value, so validate up
+      // front before handing off to the login flow.
+      const host = process.argv[3] ?? '';
+      if (!host || !/^https?:\/\//i.test(host)) {
+        console.error('[margo login] usage: margo login <host-url>');
+        console.error('              e.g.  margo login http://localhost:7331');
+        process.exit(1);
+      }
+      await login({ host, label: flags.label, token: flags.token });
+      break;
+    }
+    case 'logout': {
+      // Optional positional host: `margo logout http://localhost:7331`
+      // removes a single entry; bare `margo logout` clears every saved
+      // credential. Matches the gh / aws / npm logout conventions.
+      const host = process.argv[3];
+      await logout({ host });
+      break;
+    }
     case 'host':
     case 'host:create-user':
     case 'host:create-token':
@@ -137,6 +164,7 @@ function parseFlags(args: string[]): {
   role?: string;
   server?: string;
   tokenEnv?: string;
+  token?: string;
   id?: string;
   force?: boolean;
 } {
@@ -164,6 +192,7 @@ function parseFlags(args: string[]): {
     role: readValueFlag(args, '--role', undefined),
     server: readValueFlag(args, '--server', undefined),
     tokenEnv: readValueFlag(args, '--token-env', undefined),
+    token: readValueFlag(args, '--token', undefined),
     id: readValueFlag(args, '--id', undefined),
     force: args.includes('--force'),
   };
@@ -299,14 +328,14 @@ async function init(
     // comments here so AI can read them; the host is the source of truth,
     // so the cache must never end up in the repo's git history.
     await ensureGitignoreEntry(cwd, '.margo/comments/');
-    // Gitignore standard dotenv files so a teammate can drop their
-    // MARGO_TOKEN into .env.local without worrying about leaking it.
-    // The plugin auto-loads these at boot (see storage/env-loader.ts).
-    await ensureGitignoreEntry(cwd, '.env.local');
-    await ensureGitignoreEntry(cwd, '.env');
     await verifyHostReachable(opts.server!);
-    if (process.env[tokenEnv]) {
-      await verifyTokenWorks(opts.server!, opts.project!, process.env[tokenEnv]!);
+    // Tokens live in ~/.margo/credentials.json (populated by `margo
+    // login`), not in the project tree. Look one up via the same chain
+    // the plugin uses; if found, verify it; if not, leave the next-steps
+    // message to nudge the user toward `margo login`.
+    const existingToken = await resolveToken(tokenEnv, opts.server!);
+    if (existingToken) {
+      await verifyTokenWorks(opts.server!, opts.project!, existingToken);
     }
   }
 
@@ -322,11 +351,12 @@ async function init(
   console.log('[margo] init complete.');
   if (serverMode) {
     console.log(`       Server mode: comments live on ${opts.server}, project '${opts.project}'.`);
-    if (!process.env[tokenEnv]) {
+    const haveToken = await resolveToken(tokenEnv, opts.server!);
+    if (!haveToken) {
       console.log('');
-      console.log(`       Drop your token into .env.local (gitignored) — the plugin auto-loads it on boot:`);
-      console.log(`         echo '${tokenEnv}=mgo_…' >> .env.local`);
-      console.log(`       (or export ${tokenEnv}=mgo_… in your shell if you prefer)`);
+      console.log(`       Authorize this device against the host:`);
+      console.log(`         npx margo login ${opts.server}`);
+      console.log(`       (opens a browser; token is saved to ~/.margo/credentials.json)`);
       console.log('');
     }
     console.log('       Then `npm run dev` and pin away — the host is the source of truth.');

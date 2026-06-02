@@ -760,6 +760,127 @@ export function renderProject(data: ProjectPageData): string {
   `)
 }
 
+export interface CliLoginPageData {
+  user: { email: string; name: string }
+  /** Present when the userCode lookup succeeded and the session is in a
+   *  confirmable state ('pending', not yet consumed). */
+  session?: { userCode: string; label: string; expiresAt: string }
+  /** Present when the lookup failed — unknown code, expired, denied,
+   *  already consumed, etc. We render an explanatory card instead of
+   *  the authorize/cancel form. */
+  errorMessage?: string
+}
+
+export function renderCliLogin(data: CliLoginPageData): string {
+  if (!data.session) {
+    return shell('CLI authorization', `
+      <div class="container narrow">
+        <div class="brand"><span class="dot"></span> margo host</div>
+        <div class="panel">
+          <div class="cli-eyebrow">CLI authorization</div>
+          <h1>Can't confirm this device</h1>
+          <p class="muted">${escapeHtml(data.errorMessage ?? 'This CLI login code is no longer valid.')}</p>
+          <div class="actions">
+            <a href="/dashboard" class="alt">← Back to dashboard</a>
+          </div>
+        </div>
+      </div>
+      <style>
+        .cli-eyebrow {
+          font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+          color: var(--accent); font-weight: 600; margin-bottom: 8px;
+        }
+      </style>
+    `)
+  }
+  const session = data.session
+  return shell('CLI authorization', `
+    <div class="container narrow">
+      <div class="brand"><span class="dot"></span> margo host</div>
+      <div class="panel">
+        <div class="cli-eyebrow">CLI authorization</div>
+        <h1>Authorize this device?</h1>
+        <p class="muted">
+          A CLI on <strong>${escapeHtml(session.label)}</strong> is
+          requesting a bearer token for your account
+          (<code>${escapeHtml(data.user.email)}</code>). Approving will
+          mint a new token tied to you — the CLI will see it once and
+          you can revoke it any time from the dashboard.
+        </p>
+        <div class="cli-code-box">
+          <div class="cli-code-label">Verification code</div>
+          <div class="cli-code-value">${escapeHtml(session.userCode)}</div>
+          <div class="cli-code-meta">Confirm this matches the code shown in your terminal.</div>
+        </div>
+        <div class="actions">
+          <button type="button" class="primary" id="authorize">Authorize device</button>
+          <button type="button" class="subtle" id="cancel">Cancel</button>
+        </div>
+        <div id="error" class="error" style="display:none"></div>
+        <div id="ok" class="ok-banner" style="display:none"></div>
+      </div>
+    </div>
+    <style>
+      .cli-eyebrow {
+        font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--accent); font-weight: 600; margin-bottom: 8px;
+      }
+      .cli-code-box {
+        margin: 20px 0 0; padding: 18px 20px;
+        border: 1px solid var(--border); border-radius: var(--radius-md);
+        background: var(--code-bg); text-align: center;
+      }
+      .cli-code-label {
+        font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--muted); font-weight: 600; margin-bottom: 8px;
+      }
+      .cli-code-value {
+        font-family: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
+        font-size: 28px; font-weight: 600; letter-spacing: 0.1em;
+        color: var(--fg-strong);
+      }
+      .cli-code-meta {
+        margin-top: 10px; font-size: 12px; color: var(--muted);
+      }
+    </style>
+    <script>
+      const USER_CODE = ${JSON.stringify(session.userCode)};
+      const authorizeBtn = document.getElementById('authorize');
+      const cancelBtn = document.getElementById('cancel');
+      const errorBox = document.getElementById('error');
+      const okBox = document.getElementById('ok');
+
+      authorizeBtn.addEventListener('click', async () => {
+        errorBox.style.display = 'none';
+        authorizeBtn.disabled = true;
+        cancelBtn.disabled = true;
+        const res = await fetch('/api/auth/cli-login/authorize', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ userCode: USER_CODE }),
+        });
+        if (res.ok) {
+          okBox.textContent = 'Device authorized! You can close this tab — your CLI will complete the login.';
+          okBox.style.display = 'block';
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        errorBox.textContent = data.error || ('Authorize failed (' + res.status + ').');
+        errorBox.style.display = 'block';
+        authorizeBtn.disabled = false;
+        cancelBtn.disabled = false;
+      });
+
+      cancelBtn.addEventListener('click', () => {
+        authorizeBtn.disabled = true;
+        cancelBtn.disabled = true;
+        okBox.textContent = 'Cancelled. You can close this tab — the CLI request will time out on its own.';
+        okBox.style.display = 'block';
+      });
+    </script>
+  `)
+}
+
 function formatDate(iso: string): string {
   try {
     return new Date(iso).toLocaleString()

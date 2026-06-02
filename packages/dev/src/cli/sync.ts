@@ -15,7 +15,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { loadMargoConfig } from '../config/load.js'
 import { mirrorTransportToDir } from '../storage/cache-mirror.js'
-import { loadDotenvFiles } from '../storage/env-loader.js'
+import { resolveToken } from '../storage/factory.js'
 import { RemoteTransport } from '../storage/remote-transport.js'
 import { ConflictError } from '../storage/transport.js'
 
@@ -26,9 +26,6 @@ interface SyncContext {
 }
 
 async function buildContext(cwd: string, label: string): Promise<SyncContext> {
-  // Pick up `.env.local` / `.env` before we resolve tokenEnv from
-  // process.env — same convention as the plugin's createTransport.
-  loadDotenvFiles(cwd)
   const loaded = await loadMargoConfig(cwd)
   if (!loaded || loaded.config.storage !== 'server') {
     console.error(`[margo ${label}] no server-mode margo.config in ${cwd} — nothing to sync.`)
@@ -41,12 +38,14 @@ async function buildContext(cwd: string, label: string): Promise<SyncContext> {
     process.exit(1)
   }
   // Same defaults as the dev-plugin factory — `auth` is optional with
-  // `{ type: 'bearer', tokenEnv: 'MARGO_TOKEN' }` baked in.
+  // `{ type: 'bearer', tokenEnv: 'MARGO_TOKEN' }` baked in. resolveToken
+  // consults process.env first (for CI / Docker dev containers) and
+  // ~/.margo/credentials.json second (populated by `margo login`).
   const tokenEnv = server.auth?.tokenEnv ?? 'MARGO_TOKEN'
-  const token = process.env[tokenEnv]
+  const token = await resolveToken(tokenEnv, server.url)
   if (!token) {
-    console.error(`[margo ${label}] env var ${tokenEnv} is not set.`)
-    console.error(`        Set it in .env.local or your shell, then retry.`)
+    console.error(`[margo ${label}] no saved credentials for ${server.url} and ${tokenEnv} is unset.`)
+    console.error(`        Run \`npx margo login ${server.url}\` to authorize this device.`)
     process.exit(1)
   }
   return {
