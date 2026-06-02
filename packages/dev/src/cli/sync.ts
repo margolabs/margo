@@ -15,7 +15,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { loadMargoConfig } from '../config/load.js'
 import { mirrorTransportToDir } from '../storage/cache-mirror.js'
-import { resolveToken } from '../storage/factory.js'
+import { resolveToken, serverCacheCommentsDir } from '../storage/factory.js'
 import { RemoteTransport } from '../storage/remote-transport.js'
 import { ConflictError } from '../storage/transport.js'
 
@@ -32,30 +32,33 @@ async function buildContext(cwd: string, label: string): Promise<SyncContext> {
     console.error(`        Run \`margo init --server <url> --project <slug>\` first.`)
     process.exit(1)
   }
-  const server = loaded.config.server
-  if (!server) {
-    console.error(`[margo ${label}] margo.config has storage: 'server' but no server block.`)
+  const cfg = loaded.config
+  if (!cfg.host || !cfg.project) {
+    console.error(`[margo ${label}] server-mode margo.config is missing host or project.`)
     process.exit(1)
   }
   // Same defaults as the dev-plugin factory — `auth` is optional with
   // `{ type: 'bearer', tokenEnv: 'MARGO_TOKEN' }` baked in. resolveToken
   // consults process.env first (for CI / Docker dev containers) and
   // ~/.margo/credentials.json second (populated by `margo login`).
-  const tokenEnv = server.auth?.tokenEnv ?? 'MARGO_TOKEN'
-  const token = await resolveToken(tokenEnv, server.url)
+  const tokenEnv = cfg.auth?.tokenEnv ?? 'MARGO_TOKEN'
+  const token = await resolveToken(tokenEnv, cfg.host)
   if (!token) {
-    console.error(`[margo ${label}] no saved credentials for ${server.url} and ${tokenEnv} is unset.`)
-    console.error(`        Run \`npx margo login ${server.url}\` to authorize this device.`)
+    console.error(`[margo ${label}] no saved credentials for ${cfg.host} and ${tokenEnv} is unset.`)
+    console.error(`        Run \`npx margo login ${cfg.host}\` to authorize this device.`)
     process.exit(1)
   }
+  // Mirror lives under ~/.margo/cache/<host>/<project>/comments/ — same
+  // place the dev plugin reads from. Importing serverCacheCommentsDir
+  // from factory keeps the resolution rule in one spot.
   return {
     cwd,
     transport: new RemoteTransport({
-      serverUrl: server.url,
-      project: server.project,
+      serverUrl: cfg.host,
+      project: cfg.project,
       token,
     }),
-    commentsDir: path.join(cwd, '.margo', 'comments'),
+    commentsDir: serverCacheCommentsDir(cfg.host, cfg.project),
   }
 }
 

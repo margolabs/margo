@@ -76,8 +76,8 @@ export class SyncClient extends EventTarget {
     name: string;
     role?: 'read' | 'write' | 'admin' | null;
     projectExists?: boolean;
-    mode?: 'local' | 'server';
-    server?: { url: string; project: string };
+    mode?: 'standalone' | 'server';
+    server?: { host: string; project: string };
     needsAuth?: boolean;
   } | null> {
     try {
@@ -94,9 +94,9 @@ export class SyncClient extends EventTarget {
         return {
           email: '',
           name: '',
-          mode: body.mode === 'server' || body.mode === 'local' ? body.mode : 'server',
+          mode: body.mode === 'server' || body.mode === 'standalone' ? body.mode : 'server',
           server: body.server && typeof body.server === 'object'
-            ? { url: String(body.server.url ?? ''), project: String(body.server.project ?? '') }
+            ? { host: String(body.server.host ?? ''), project: String(body.server.project ?? '') }
             : undefined,
           needsAuth: true,
         };
@@ -106,14 +106,14 @@ export class SyncClient extends EventTarget {
         email: typeof body.email === 'string' ? body.email : '',
         name: typeof body.name === 'string' ? body.name : '',
         // Explicit null = "not a member" (server-mode access denied);
-        // undefined = role wasn't reported (local mode, or older host).
+        // undefined = role wasn't reported (standalone mode, or older host).
         role: role === 'read' || role === 'write' || role === 'admin'
           ? role
           : (role === null ? null : undefined),
         projectExists: typeof body.projectExists === 'boolean' ? body.projectExists : undefined,
-        mode: body.mode === 'server' || body.mode === 'local' ? body.mode : undefined,
+        mode: body.mode === 'server' || body.mode === 'standalone' ? body.mode : undefined,
         server: body.server && typeof body.server === 'object'
-          ? { url: String(body.server.url ?? ''), project: String(body.server.project ?? '') }
+          ? { host: String(body.server.host ?? ''), project: String(body.server.project ?? '') }
           : undefined,
       };
     } catch { return null; }
@@ -163,6 +163,23 @@ export class SyncClient extends EventTarget {
       // doesn't kill the whole flow. We'll bail when the deadline passes.
     }
     throw new Error('sign-in timed out — please try again');
+  }
+
+  /** Outbox status — surfaces how many writes haven't reached the host
+   *  yet. The plugin's RemoteTransport returns the real count; standalone
+   *  mode returns { pending: 0 } so the overlay's banner logic doesn't
+   *  branch on mode. */
+  async getSyncStatus(): Promise<{ pending: number; lastSyncAt: string | null; lastError: string | null } | null> {
+    try {
+      const res = await fetch('/__margo/sync-status');
+      if (!res.ok) return null;
+      const body = await res.json();
+      return {
+        pending: typeof body.pending === 'number' ? body.pending : 0,
+        lastSyncAt: typeof body.lastSyncAt === 'string' ? body.lastSyncAt : null,
+        lastError: typeof body.lastError === 'string' ? body.lastError : null,
+      };
+    } catch { return null; }
   }
 
   /** Forget the credential for the host this plugin is configured

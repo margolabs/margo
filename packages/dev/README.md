@@ -1,9 +1,11 @@
 # margo-dev
 
-Live-app feedback layer for AI-coding teams. Designers, PMs, and devs leave comments on the running app; AI works through them. Two storage modes — both self-hosted, no SaaS:
+Live-app feedback layer for AI-coding teams. Designers, PMs, and devs leave comments on the running app; AI works through them. Two storage modes — both self-hosted, no SaaS, no project-tree footprint:
 
-- **Local (default)** — comments as files in your repo, synced over git.
-- **Server (optional)** — comments on a self-hostable [margo-host](https://hub.docker.com/r/margolabs/margo-host) Docker container; your repo stays clean. Per-project member roster, browser sign-in from the overlay.
+- **Standalone (default)** — solo workspace, "me + AI on my machine." Comments at `~/.margo/standalone/<id>/`. No host, no sign-in, zero infra.
+- **Server (collaboration)** — comments on a self-hostable [margo-host](https://hub.docker.com/r/margolabs/margo-host) Docker container; plugin caches to `~/.margo/cache/<host>/<project>/`. Per-project member roster, browser sign-in from the overlay, offline-first writes that queue when the host is unreachable.
+
+Neither mode touches your project repo's git history. The whole footprint in the repo is one file: `margo.config.json` at the root.
 
 ## Install
 
@@ -11,19 +13,14 @@ Live-app feedback layer for AI-coding teams. Designers, PMs, and devs leave comm
 
 ```sh
 npm install -D margo-dev
-npx margo-dev init
+npx margo init
 ```
 
-The `init` command scaffolds the runtime state — non-negotiable, this is what margo needs to run:
+`init` writes `margo.config.json` at the repo root (defaulting to standalone mode) and patches your `vite.config.*` / `next.config.*` to register the margo plugin. In a monorepo, run `init` once per app — each gets its own workspace id (or server project).
 
-- Creates `.margo/` **in the current directory** (config, CLAUDE.md, comments folder)
-- Wires the plugin into your build config (Vite or Next.js, auto-detected)
+### Server mode (collaboration)
 
-In a monorepo, run `init` once per app you want margo on — each gets its own inbox under that app's directory. A git repo is required (margo syncs comments via git in local mode; in server mode the repo just needs to exist so git origin can be detected).
-
-### Server mode (optional)
-
-Skip git history for comments by pointing at a self-hostable host:
+Point at a self-hostable host instead:
 
 ```sh
 # 1. Start a host (one container, anywhere your team can reach it)
@@ -38,7 +35,13 @@ npx margo init --server http://<host>:7331 --project <slug>
 npm run dev
 ```
 
-The overlay's blue **Sign in to margo** pill drives a browser-based device flow; the token saves to `~/.margo/credentials.json` (gitignored, per-user). Prefer a terminal? `npx margo login <host>` does the same dance. CI / Docker dev containers can set `MARGO_TOKEN=mgo_…` directly. Sign out from the avatar popover in the overlay or `npx margo logout <host>` from a shell.
+The overlay's blue **Sign in to margo** pill drives a browser-based device flow; the token saves to `~/.margo/credentials.json` (mode 0600, per-user, never in the repo). Prefer a terminal? `npx margo login <host>` does the same dance. CI / Docker dev containers can set `MARGO_TOKEN=mgo_…` directly. Sign out from the avatar popover in the overlay or `npx margo logout <host>` from a shell.
+
+For solo onboarding without learning Docker: `npx margo host start` prints the Docker one-liner pinned to `~/.margo/hosts/default/data/`.
+
+### Offline-first (server mode)
+
+Server-mode writes go to a local outbox first, then to the host. When the host is unreachable (laptop closed, network blip, host restart), your pins still land instantly — the overlay shows an amber "syncing…" pill while the queue's non-empty. A background drainer retries every 30 seconds. Nothing to configure; the outbox lives under `~/.margo/cache/<host>/<project>/.outbox/`.
 
 ### Claude Code integration (optional)
 

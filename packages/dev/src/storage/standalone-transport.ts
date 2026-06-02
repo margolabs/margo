@@ -1,28 +1,31 @@
-// Local storage backend — comments persist as `.md` files in the user's
-// repo, history via the existing git queue + remote-poller machinery.
-// Wraps the previously-inlined fs/git calls in handlers.ts behind the
-// Transport interface so a future RemoteTransport can swap in without
-// touching handler code.
+// Standalone storage backend — comments as `.md` files in the user's
+// home directory, NOT in the project repo. Persists under
+// `~/.margo/standalone/<workspace-id>/comments/` so a workspace's
+// comment state isn't entangled with its git history.
+//
+// Two reasons this lives in $HOME instead of the project:
+//   1. Users disliked the original local-mode behavior of auto-
+//      committing margo edits into the project repo's git history.
+//      Moving to $HOME makes the repo trivially clean.
+//   2. Two repos opened from different paths but sharing the same
+//      workspace id resolve to the same data dir — moving or cloning
+//      the repo doesn't lose history.
+//
+// Standalone mode is for "me + AI, no collaboration." For team
+// collaboration, use the server mode (RemoteTransport against a
+// self-hostable margo-host).
 
 import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import { parseComment } from '../shared/frontmatter.js'
 import {
-  backgroundPull,
-  commitAndPush,
-  getAheadBehind as _gitAheadBehind,
   getAuthor,
-  getCurrentBranch as _gitCurrentBranch,
-  getCurrentCommit as _gitCurrentCommit,
   getDeclaredRole,
-  getDirtyState as _gitDirtyState,
-  removeAndCommit,
   setAuthor,
-  type GitOptions,
 } from '../server/git.js'
 import { CommentWatcher, type WatcherEvent } from '../server/watcher.js'
-import { RemotePoller, type RemoteChangesPayload } from '../server/remote-poller.js'
-import type { Comment, MargoConfig } from '../shared/types.js'
+import type { Comment } from '../shared/types.js'
 import type {
   ChangeEvent,
   Identity,
@@ -31,43 +34,40 @@ import type {
   Transport,
 } from './transport.js'
 
-export interface LocalTransportOptions {
-  /** Repo root — used for git operations and as the base for `.margo/`. */
+export interface StandaloneTransportOptions {
+  /** Repo root — used for git-config author lookup only (no git writes). */
   rootDir: string
-  /** Path to the comments directory. Usually `<rootDir>/.margo/comments`. */
-  commentsDir: string
-  /** Workspace config — drives autoCommit/autoPush/etc. behavior. */
-  config: MargoConfig
+  /** Workspace id from margo.config.json. Resolves to
+   *  `~/.margo/standalone/<id>/`. Required and stable across machine
+   *  moves so two repos can share workspace data deliberately by sharing
+   *  the same id. */
+  workspaceId: string
+  /** Overrides the resolved data dir. Tests use this to point at a
+   *  tmpdir; production code never sets it. */
+  dataDirOverride?: string
 }
 
-// Background git queue. Mirrors the prior module-scoped queue in handlers.ts:
-// writes flush to disk first, then the commit/push runs serialized via this
-// promise chain. Keep it module-scoped (not per-instance) — one queue per
-// process is correct since git ops on the same repo can't run in parallel
-// without lock contention.
-let gitQueue: Promise<unknown> = Promise.resolve()
-
-function enqueueGitOp(label: string, op: () => Promise<unknown>): void {
-  gitQueue = gitQueue
-    .catch(() => undefined)
-    .then(() => op().catch((err) => {
-      console.error(`[margo] background git op failed (${label}):`, (err as Error).message)
-    }))
+/** Resolve a workspace id to its on-disk data dir. Exported so callers
+ *  (init, the AI skill template generator) can show the user where
+ *  their comments actually live. */
+export function standaloneDataDir(workspaceId: string): string {
+  const home = process.env.HOME || os.homedir()
+  return path.join(home, '.margo', 'standalone', workspaceId)
 }
 
-export class LocalTransport implements Transport {
+export class StandaloneTransport implements Transport {
   private readonly commentsDir: string
+  private readonly decisionsFile: string
+  private readonly dataDir: string
   private readonly rootDir: string
-  private readonly config: MargoConfig
   private watcher?: CommentWatcher
-  private poller?: RemotePoller
   private readonly changeListeners = new Set<(ev: ChangeEvent) => void>()
-  private readonly remoteListeners = new Set<RemoteChangesListener>()
 
-  constructor(opts: LocalTransportOptions) {
+  constructor(opts: StandaloneTransportOptions) {
     this.rootDir = opts.rootDir
-    this.commentsDir = opts.commentsDir
-    this.config = opts.config
+    this.dataDir = opts.dataDirOverride ?? standaloneDataDir(opts.workspaceId)
+    this.commentsDir = path.join(this.dataDir, 'comments')
+    this.decisionsFile = path.join(this.dataDir, 'decisions.md')
   }
 
   // ─── Comment CRUD ───────────────────────────────────────────────────────
@@ -102,41 +102,35 @@ export class LocalTransport implements Transport {
     }
   }
 
-  async write(id: string, raw: string, commitMessage: string): Promise<void> {
+  async write(id: string, raw: string, _commitMessage: string): Promise<void> {
     const file = path.join(this.commentsDir, `${id}.md`)
     await fs.mkdir(this.commentsDir, { recursive: true })
     await fs.writeFile(file, raw, 'utf8')
-    enqueueGitOp(`write ${id}`, () =>
-      commitAndPush([file], commitMessage, this.gitOpts()),
-    )
+    // commitMessage is part of the Transport contract (RemoteTransport
+    // ignores it, the host generates its own) — standalone mode also
+    // ignores it because nothing here commits to git.
   }
 
-  async remove(id: string, commitMessage: string): Promise<void> {
+  async remove(id: string, _commitMessage: string): Promise<void> {
     const file = path.join(this.commentsDir, `${id}.md`)
     await fs.unlink(file).catch(() => { /* already gone is fine */ })
-    enqueueGitOp(`remove ${id}`, () =>
-      removeAndCommit([file], commitMessage, this.gitOpts()),
-    )
   }
 
   // ─── Decisions log ──────────────────────────────────────────────────────
 
-  async appendDecision(entry: string, commitMessage: string): Promise<void> {
-    // .margo/decisions.md lives next to the comments dir.
-    const file = path.join(path.dirname(this.commentsDir), 'decisions.md')
+  async appendDecision(entry: string, _commitMessage: string): Promise<void> {
+    await fs.mkdir(this.dataDir, { recursive: true })
     let content: string
     try {
-      content = await fs.readFile(file, 'utf8')
+      content = await fs.readFile(this.decisionsFile, 'utf8')
     } catch {
       content = [
         '# Decisions log',
         '',
         'Resolved comments distilled to one-line decisions. Newest first.',
-        'Each entry references the source comment in `.margo/comments/<id>.md`.',
         '',
       ].join('\n')
     }
-    // Insert before the first existing list item (newest-first ordering).
     const lines = content.split('\n')
     let insertAt = lines.length
     for (let i = 0; i < lines.length; i++) {
@@ -145,16 +139,15 @@ export class LocalTransport implements Transport {
     lines.splice(insertAt, 0, entry)
     let next = lines.join('\n')
     if (!next.endsWith('\n')) next += '\n'
-
-    await fs.writeFile(file, next, 'utf8')
-    enqueueGitOp('decisions log', () =>
-      commitAndPush([file], commitMessage, this.gitOpts()),
-    )
+    await fs.writeFile(this.decisionsFile, next, 'utf8')
   }
 
   // ─── Identity ───────────────────────────────────────────────────────────
 
   async getIdentity(): Promise<Identity | null> {
+    // Standalone mode reads author from the user's git config (same as
+    // before). The dialog in the overlay prompts when name/email aren't
+    // set; setIdentity persists via `git config --global`.
     try {
       const author = await getAuthor(this.rootDir)
       return { email: author.email, name: author.name }
@@ -168,9 +161,6 @@ export class LocalTransport implements Transport {
   }
 
   async getDeclaredRole(_email: string): Promise<string | null> {
-    // Local mode reads from git config — the email parameter is unused
-    // here (git config is per-checkout, not per-email). Kept in the
-    // signature for parity with the remote transport's roster lookup.
     const role = await getDeclaredRole(this.rootDir)
     return role ?? null
   }
@@ -178,7 +168,8 @@ export class LocalTransport implements Transport {
   // ─── Sync ───────────────────────────────────────────────────────────────
 
   async sync(): Promise<void> {
-    await backgroundPull(this.rootDir)
+    // No-op in standalone mode — there's no remote to sync against.
+    // Kept for Transport-contract parity with RemoteTransport.
   }
 
   // ─── Subscriptions ──────────────────────────────────────────────────────
@@ -192,32 +183,24 @@ export class LocalTransport implements Transport {
   }
 
   subscribeRemoteChanges(listener: RemoteChangesListener): () => void {
-    this.remoteListeners.add(listener)
-    this.ensurePoller()
-    // Replay the most recent payload so late joiners see the banner.
-    const last = this.poller?.getLastPayload() ?? null
-    listener(last ? toRemoteChanges(last) : null)
-    return () => {
-      this.remoteListeners.delete(listener)
-    }
+    // No remote in standalone mode — fire null once so the overlay's
+    // banner state clears, then never call again.
+    listener(null)
+    return () => { /* noop */ }
   }
 
   getLastRemoteChanges(): RemoteChanges | null {
-    const last = this.poller?.getLastPayload() ?? null
-    return last ? toRemoteChanges(last) : null
+    return null
   }
 
   resetRemoteChanges(): void {
-    this.poller?.reset()
+    // noop — see subscribeRemoteChanges.
   }
 
   async close(): Promise<void> {
     await this.watcher?.stop()
-    this.poller?.stop()
     this.watcher = undefined
-    this.poller = undefined
     this.changeListeners.clear()
-    this.remoteListeners.clear()
   }
 
   // ─── Internals ──────────────────────────────────────────────────────────
@@ -230,35 +213,5 @@ export class LocalTransport implements Transport {
     })
     w.start()
     this.watcher = w
-  }
-
-  private ensurePoller(): void {
-    if (this.poller) return
-    const p = new RemotePoller(this.rootDir, this.config.git.remotePollIntervalMs)
-    p.on('event', (payload: RemoteChangesPayload) => {
-      const snapshot = toRemoteChanges(payload)
-      for (const fn of this.remoteListeners) fn(snapshot)
-    })
-    p.start()
-    this.poller = p
-  }
-
-  private gitOpts(): GitOptions {
-    return {
-      cwd: this.rootDir,
-      commitPrefix: this.config.git.commitPrefix,
-      autoCommit: this.config.git.autoCommit,
-      autoPush: this.config.git.autoPush,
-      pullBeforePush: this.config.git.pullBeforePush,
-    }
-  }
-}
-
-function toRemoteChanges(payload: RemoteChangesPayload): RemoteChanges {
-  return {
-    added: payload.added,
-    modified: payload.modified,
-    deleted: payload.deleted,
-    total: payload.total,
   }
 }

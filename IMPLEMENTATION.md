@@ -1,6 +1,6 @@
 # margo — implementation status
 
-The v0 spec from [README.md](./README.md) is shipped. Margo is published on npm as `margo-dev` and exercised end-to-end by five demos in this repo. Verify any demo with `node scripts/verify-demo.mjs <dir> <url>` — boots the dev server, opens it in headless Chromium, asserts the overlay mounts + `/__margo/me` round-trips.
+Margo is published on npm as `margo-dev` and on Docker Hub as `margolabs/margo-host`. Two storage modes: **standalone** (solo, comments under `~/.margo/standalone/<id>/`, no host needed) and **server** (team, comments on a self-hostable host, plugin caches under `~/.margo/cache/<host>/<project>/`). Neither mode touches the project repo's git history — comments never leave `~/.margo/` on the user's machine.
 
 ## Build status
 
@@ -8,24 +8,29 @@ The v0 spec from [README.md](./README.md) is shipped. Margo is published on npm 
 | --- | --- | --- |
 | Shared types + frontmatter parser | ✅ shipped | YAML round-trip; reply append helper |
 | Comment ID generation | ✅ shipped | 6-hex-char IDs via `crypto.randomBytes` |
-| Local server endpoints | ✅ shipped | GET/POST/PATCH/DELETE/SSE/sync; transport-agnostic handlers |
-| Git CLI wrapper | ✅ shipped | shell-out, host-agnostic; background-queued commit/push |
-| FS watcher | ✅ shipped | chokidar over `.margo/comments/*.md` → SSE broadcast |
-| Remote poller | ✅ shipped | periodic `git fetch` + diff-listing, surfaces incoming-comments banner |
-| Vite plugin | ✅ shipped | mounts middleware via `configureServer`, injects bootstrap |
+| Transport abstraction | ✅ shipped | StandaloneTransport (files in `~/.margo/standalone/<id>/`) and RemoteTransport (HTTP against margo-host). Handlers don't care which backend. |
+| Standalone mode | ✅ shipped | UUID-keyed workspace data dir under `~/.margo/standalone/<id>/comments/`. No git operations, no host required. |
+| Server mode + auth | ✅ shipped | RemoteTransport against margo-host. Bearer-token auth via `~/.margo/credentials.json` (populated by `margo login`). Browser device-flow + paste-a-token paths both supported. |
+| Offline-first sync (server mode) | ✅ shipped | RemoteTransport.write/remove fall through to a local outbox under `<cache>/.outbox/` when the host is unreachable. A 30s drainer retries; overlay shows a "syncing" banner via `/__margo/sync-status`. |
+| Live mirror (server mode) | ✅ shipped | Plugin subscribes to host SSE and mirrors writes/deletes into the local cache so AI sees fresh state without a dev-server restart. |
+| FS watcher (standalone mode) | ✅ shipped | chokidar over `~/.margo/standalone/<id>/comments/*.md` → SSE broadcast |
+| Vite plugin | ✅ shipped | mounts middleware via `configureServer`, injects bootstrap; live mirror + outbox drainer both run from here |
 | Next.js plugin (App Router) | ✅ shipped | catch-all Route Handler + `<MargoScript />` + `withMargo` config wrapper. Public URL stays `/__margo/*` via a rewrite to `/margo-runtime/*` because Next.js treats `_`-prefixed folders as private. |
 | Sidecar (`margo serve`) | ✅ shipped | Standalone http server reusing the same handlers. Unlocks Angular, raw webpack, CRA, Vue CLI, SvelteKit-non-Vite, anything that proxies. Wires via `proxyConfig` + a one-line `<script src="/__margo/bootstrap.js">`. |
-| Identity setup prompt | ✅ shipped | Boot-time modal when `git config user.name` / `user.email` missing; persists via `git config --global` so a one-time setup carries everywhere. |
-| Init / install-skill / update / uninstall CLI | ✅ shipped | idempotent; auto-patches `vite.config.*` and `next.config.*`; per-app `.margo/` in monorepos |
+| Identity setup prompt | ✅ shipped | Standalone mode only — overlay prompts when `git config user.name`/`user.email` is missing, persists via `git config --global`. Server mode pulls identity from the bearer token, never needs the prompt. |
+| Init / install-skill / update / uninstall CLI | ✅ shipped | `margo init` defaults to standalone mode, `--server URL --project SLUG` opts into server mode. Writes only `margo.config.json` at the repo root — no `.margo/` directory in the project tree. |
+| margo login / logout | ✅ shipped | Device-flow browser auth + `--token` paste-path. Credentials at `~/.margo/credentials.json` (mode 0600). |
+| margo host start | ✅ shipped | Solo-onboarding shortcut: prints the one-line Docker command to run a personal margo-host at localhost:7331. |
 | Overlay: pin capture | ✅ shipped | selector + text + role + coords + viewContext (tab/dialog/region + active-state markers) |
 | Overlay: gap + box anchors | ✅ shipped | paired-element gap (the space between two elements) and box selection in addition to point pins |
 | Overlay: pin resolver | ✅ shipped | priority: text+role → selector → coords → viewContext-aware → orphan |
 | Overlay: SPA route tracker | ✅ shipped | patches `pushState`/`replaceState`, listens to `popstate` |
 | Overlay: SSE sync client | ✅ shipped | snapshot + delta refetch |
-| Overlay UI | ✅ shipped | grid-based inbox panel (scroll fix), letter-avatar list, reply UX, status changes, filter chips (Open/All/Mine/This page), search, bulk-resolve, orphan popup beside inbox, outside-click close, FABs above all panels, pin tracking during scroll |
+| Overlay UI | ✅ shipped | grid-based inbox panel, letter-avatar list, reply UX, status changes, filter chips, search, bulk-resolve, FAB with account popover, sign-in pill (server mode without credentials), syncing banner (offline outbox) |
 | Overlay bundle for browser | ✅ shipped | esbuild → `dist/overlay.bundle.js`, served by all three adapters |
-| Conflict-resolution UI | ⬜ TODO | overlay banner when `git pull --rebase` fails; endpoints throw but the overlay still lacks a recovery affordance |
-| Tests | ⬜ partial | no vitest specs; Playwright probes (`scripts/verify-demo.mjs`, `demo-nextjs/scripts/debug-inbox-scroll.mjs`) exist as smoke/regression checks |
+| Conflict-resolution UI (outbox drain) | ⬜ TODO | When drain hits 412/409 on retry, entry stays in outbox and gets logged; overlay shows the stuck count but no recovery affordance yet. |
+| margo-host (server-mode backend) | ✅ shipped | Docker image at `margolabs/margo-host`. Self-hostable; first signup at `/setup` claims superuser. Per-project member roster + ACLs. CLI device-login endpoints. |
+| Tests | ✅ vitest | 65 specs across handlers/storage/overlay/install paths; offline-first smoke covered via manual probe (host stop/start cycle). |
 
 ## Package layout
 

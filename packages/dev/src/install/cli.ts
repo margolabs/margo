@@ -13,11 +13,13 @@
 
 import * as os from 'node:os';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import * as url from 'node:url';
 import { promisify } from 'node:util';
+import { hostStart } from '../cli/host.js';
 import { login } from '../cli/login.js';
 import { logout } from '../cli/logout.js';
 import { serve } from '../cli/serve.js';
@@ -38,19 +40,34 @@ const TEMPLATE_CANDIDATES = [
 const MARGO_BLOCK_START = '<!-- margo:start -->';
 const MARGO_BLOCK_END = '<!-- margo:end -->';
 const ROOT_CLAUDE_BLOCK = `${MARGO_BLOCK_START}
-This project uses margo for live-app feedback. See \`.margo/CLAUDE.md\` for how AI should engage with the comment inbox. The \`/margo\` skill triages and processes the open inbox.
+This project uses **margo** — a live-app feedback layer where teammates pin comments on the running UI.
+
+## Where to look
+- Comment files live in \`~/.margo/standalone/<id>/comments/*.md\` (standalone mode) or \`~/.margo/cache/<host>/<project>/comments/*.md\` (server mode). The active path depends on \`margo.config.json\` at the repo root.
+- Each file's YAML frontmatter has \`id\`, \`type\` (task/question/discussion/decision), \`status\` (open/ready-for-review/blocked/resolved/wontfix), \`author\`, \`target\` (pin anchor).
+- Full processing protocol lives at \`.claude/skills/margo/SKILL.md\`. Invoke via the \`/margo\` slash command.
+
+## Engagement rules
+- **Proactively at session start**: count open \`type: task\` comments and surface the count to the user.
+- \`type: task\` → AI may modify code in response.
+- \`type: discussion\` → humans only; never modify code.
+- \`type: question\` → answer in-thread; never modify code.
+- \`status: resolved\` / \`wontfix\` → never re-open or process; read-only context.
+- Terminal AI states: \`ready-for-review\` or \`blocked\` — never set \`resolved\` (humans only).
 ${MARGO_BLOCK_END}`;
 
 const USAGE = `usage: margo <command> [flags]
 
 Commands:
-  init                  scaffold .margo/ in the current project
-                          + server mode: --server URL --project SLUG [--token-env NAME]
+  init                  scaffold margo.config.json in the current project
+                          default: standalone mode (solo, comments under ~/.margo/standalone/)
+                          server mode: --server URL --project SLUG [--token-env NAME]
   install-skill         install the /margo skill into Claude Code
-  update                update the .margo/ scaffold to the latest templates
-  uninstall             remove the .margo/ scaffold
+  update                update the /margo skill to the latest template
+  uninstall             remove margo.config.json + /margo skill
   serve                 run the sidecar (proxy-mountable dev-time backend)
-  pull                  [server mode] download host comments to .margo/comments/
+  host start            start a local margo-host process (solo onboarding shortcut)
+  pull                  [server mode] download host comments to local cache
                           [--force removes local files not on host]
   push                  [server mode] upload local comments to host
                           [--id ID to push just one]
@@ -59,9 +76,9 @@ Commands:
                           --token mgo_… : skip browser; save a pre-minted token
   logout [URL]          remove saved credentials (one host, or all if URL omitted)
 
-Common flags: --port N, --cwd DIR, --user|--project
+Common flags: --port N, --cwd DIR
 
-The server-side host binary moved to its own package:
+Server-side host binary lives in its own package:
   Docker:  docker pull margolabs/margo-host:latest
   Source:  margo-host CLI in packages/host`;
 
@@ -120,7 +137,21 @@ async function main(): Promise<void> {
       await logout({ host });
       break;
     }
-    case 'host':
+    case 'host': {
+      // `npx margo host start` — solo-onboarding wrapper that prints
+      // the one-shot Docker command. The subcommand is required so we
+      // can grow this later (host stop, host logs, host status) without
+      // breaking the dispatcher.
+      const sub = process.argv[3];
+      if (sub === 'start') {
+        await hostStart({ port: flags.port, dataDir: flags.dataDir });
+        break;
+      }
+      console.error('[margo host] usage: margo host start');
+      console.error('             prints a Docker command to run a personal margo-host on localhost.');
+      process.exit(1);
+      break;
+    }
     case 'host:create-user':
     case 'host:create-token':
     case 'host:list-users':
@@ -133,9 +164,7 @@ async function main(): Promise<void> {
     case 'host:add-member':
     case 'host:remove-member':
     case 'host:list-members':
-      console.error(`[margo] '${cmd}' moved out of margo-dev. The host CLI is now \`margo-host ${cmd.replace(/^host:?/, '') || 'run'}\``);
-      console.error(`        Docker:  docker pull margolabs/margo-host:latest`);
-      console.error(`        Source:  packages/host (margo-host binary)`);
+      console.error(`[margo] '${cmd}' moved out of margo-dev. Use \`docker exec margo-host-local margo-host ${cmd.replace(/^host:?/, '')}\` (or the host's web dashboard).`);
       process.exit(1);
       break;
     default:
@@ -243,16 +272,17 @@ export async function resolveGitRoot(cwd: string): Promise<string> {
 }
 
 /**
- * Walk up from `cwd` to find the nearest ancestor containing a `.margo/`
- * directory. Returns the *parent* (the project root where margo lives), or
- * `null` if none found. Used by `install-skill`, `update`, and `uninstall`
- * so they can be run from any subdirectory of a margo-enabled project.
+ * Walk up from `cwd` to find the nearest ancestor containing a
+ * `margo.config.json` file. Returns the *directory* of that config (the
+ * project root where margo is installed), or `null` if none found. Used
+ * by `install-skill`, `update`, and `uninstall` so they can be run from
+ * any subdirectory of a margo-enabled project.
  */
 export async function findMargoDir(cwd: string): Promise<string | null> {
   let dir = path.resolve(cwd);
   // Stop at filesystem root: when dirname(dir) === dir we've walked past `/`.
   while (true) {
-    if (await pathExists(path.join(dir, '.margo'))) return dir;
+    if (await pathExists(path.join(dir, 'margo.config.json'))) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -273,8 +303,10 @@ async function init(
   cwd: string,
   opts: {
     overwriteTemplates?: boolean;
-    /** Host URL for server mode. When set, scaffolds margo.config.json
-     *  at the repo root and skips local comments dir / git automation. */
+    /** Host URL for server mode. When set, scaffolds a server-mode
+     *  margo.config.json at the repo root. When unset, scaffolds a
+     *  standalone-mode config (a fresh UUID points the plugin at
+     *  `~/.margo/standalone/<id>/` for comment storage). */
     server?: string;
     /** Project slug on the host. Required when `server` is set. */
     project?: string;
@@ -282,7 +314,10 @@ async function init(
     tokenEnv?: string;
   } = {},
 ): Promise<void> {
-  // Verify a git repo exists above CWD; abort otherwise.
+  // Verify a git repo exists above CWD. Standalone mode doesn't strictly
+  // need git, but `getAuthor` reads `git config user.name/email` for
+  // comment attribution, so a missing repo would surface as a confusing
+  // "missing identity" prompt later. Abort up front.
   await resolveGitRoot(cwd);
 
   const serverMode = !!opts.server;
@@ -292,51 +327,18 @@ async function init(
   }
   const tokenEnv = opts.tokenEnv ?? 'MARGO_TOKEN';
 
-  // Warn (but proceed) if there's an existing `.margo/` higher up — the
-  // user might have init'd at git root earlier and now be confused about
-  // why a new init at the app level creates a separate inbox. They asked
-  // for it; explain what they're getting.
-  const existing = await findMargoDir(cwd);
-  if (existing && path.resolve(existing) !== path.resolve(cwd)) {
-    console.log(`[margo] note: existing .margo/ found at ${existing}`);
-    console.log(`        this new inbox at ${cwd} will be separate (per-app).`);
-    console.log(`        cd to ${existing} if you wanted to use the existing one.`);
-  }
-
-  const margoDir = path.join(cwd, '.margo');
-  // In server mode the comments directory isn't used (storage is remote);
-  // skip creating it so `git status` doesn't show an empty tracked dir.
-  // .margo/CLAUDE.md and config.json are still helpful for AI/UI
-  // metadata that's workspace-shaped regardless of storage backend.
+  // Single committed artifact per repo: margo.config.json at the root.
+  // No more `.margo/` directory in the project tree — both modes store
+  // their comments under `~/.margo/` so the repo stays untouched.
   if (serverMode) {
-    await fs.mkdir(margoDir, { recursive: true });
-  } else {
-    await fs.mkdir(path.join(margoDir, 'comments'), { recursive: true });
-    await ensureGitkeep(path.join(margoDir, 'comments'));
-  }
-
-  await copyTemplate('config.json', path.join(margoDir, 'config.json'), opts.overwriteTemplates);
-  await copyTemplate('CLAUDE.md', path.join(margoDir, 'CLAUDE.md'), opts.overwriteTemplates);
-
-  if (serverMode) {
-    // In server mode autoCommit/autoPush are noise — no local comments
-    // to commit. Patch the freshly-copied config.json to reflect that
-    // before the dev server reads it.
-    await patchServerWorkspaceConfig(path.join(margoDir, 'config.json'));
-    await writeMargoConfigJson(cwd, opts.server!, opts.project!, tokenEnv);
-    // Gitignore the AI-side cache directory. `margo pull` writes host
-    // comments here so AI can read them; the host is the source of truth,
-    // so the cache must never end up in the repo's git history.
-    await ensureGitignoreEntry(cwd, '.margo/comments/');
+    await writeServerConfig(cwd, opts.server!, opts.project!, tokenEnv);
     await verifyHostReachable(opts.server!);
-    // Tokens live in ~/.margo/credentials.json (populated by `margo
-    // login`), not in the project tree. Look one up via the same chain
-    // the plugin uses; if found, verify it; if not, leave the next-steps
-    // message to nudge the user toward `margo login`.
     const existingToken = await resolveToken(tokenEnv, opts.server!);
     if (existingToken) {
       await verifyTokenWorks(opts.server!, opts.project!, existingToken);
     }
+  } else {
+    await writeStandaloneConfig(cwd);
   }
 
   // Pick the first integration that matches the project. We don't try both —
@@ -359,44 +361,58 @@ async function init(
       console.log(`       (opens a browser; token is saved to ~/.margo/credentials.json)`);
       console.log('');
     }
-    console.log('       Then `npm run dev` and pin away — the host is the source of truth.');
+    console.log('       Then `npm run dev` and click "Sign in to margo" in the overlay.');
   } else {
-    console.log('       Review .margo/config.json (especially the roster) and run `npm run dev`.');
+    console.log(`       Standalone mode: comments live under ~/.margo/standalone/<id>/.`);
+    console.log(`       Run \`npm run dev\` and pin away — solo only; no host needed.`);
+    console.log(`       To collaborate later, run \`margo host start\` and re-init with --server.`);
   }
   await printSkillHint(cwd);
 }
 
-/** Write `margo.config.json` at the repo root with the server connection
- *  details. JSON (not TS/JS) so the loader works with zero module
- *  resolution — the user can convert to TS later for IntelliSense. */
-async function writeMargoConfigJson(
+/** Write a standalone-mode `margo.config.json` at the repo root. The
+ *  workspace UUID stays stable across the repo's lifetime so the data
+ *  dir at `~/.margo/standalone/<id>/` doesn't change when the repo is
+ *  cloned or moved between directories. */
+async function writeStandaloneConfig(cwd: string): Promise<void> {
+  const file = path.join(cwd, 'margo.config.json');
+  try {
+    await fs.access(file);
+    console.log(`[margo] margo.config.json already exists at ${file}; leaving it alone.`);
+    return;
+  } catch { /* doesn't exist, write it */ }
+  const body = {
+    storage: 'standalone' as const,
+    id: `wsp-${randomUUID()}`,
+  };
+  await fs.writeFile(file, JSON.stringify(body, null, 2) + '\n', 'utf8');
+  console.log(`[margo] wrote ${file} (storage: standalone)`);
+}
+
+/** Write a server-mode `margo.config.json` at the repo root with the
+ *  resolved host URL + project slug. Auth defaults to bearer-from-
+ *  credentials-file; only spelled out when the user overrides tokenEnv. */
+async function writeServerConfig(
   cwd: string,
-  serverUrl: string,
+  host: string,
   project: string,
   tokenEnv: string,
 ): Promise<void> {
   const file = path.join(cwd, 'margo.config.json');
   try {
     await fs.access(file);
-    // Don't clobber an existing config — the user may have customized it.
     console.log(`[margo] margo.config.json already exists at ${file}; leaving it alone.`);
     return;
   } catch { /* doesn't exist, write it */ }
-  // Keep the committed config small. Only spell out auth.tokenEnv when
-  // the user overrode the default 'MARGO_TOKEN'. No repoBinding is
-  // written — the plugin auto-derives `git remote get-url origin` at
-  // runtime when present, and workspaces without a git remote get no
-  // binding protection (intentional: prototype/local-only dirs have no
-  // team to protect from typo'd configs).
-  const server: Record<string, unknown> = { url: serverUrl, project };
+  const body: Record<string, unknown> = {
+    storage: 'server',
+    host,
+    project,
+  };
   if (tokenEnv !== 'MARGO_TOKEN') {
-    server.auth = { tokenEnv };
+    body.auth = { tokenEnv };
   }
-  const body = { storage: 'server', server };
   await fs.writeFile(file, JSON.stringify(body, null, 2) + '\n', 'utf8');
-  // Surface the binding state so a fresh init makes its protection
-  // story visible — operators see whether their workspace got bound or
-  // chose the no-protection path.
   const origin = await detectGitOrigin(cwd);
   if (origin) {
     console.log(`[margo] wrote ${file} (will bind to git origin: ${origin})`);
@@ -417,36 +433,6 @@ async function detectGitOrigin(cwd: string): Promise<string | null> {
   } catch {
     return null;
   }
-}
-
-/** Flip autoCommit/autoPush off in a freshly-scaffolded .margo/config.json
- *  for server mode — leaving them on would be a noop (no local files to
- *  commit) but confusing in the file. */
-async function patchServerWorkspaceConfig(file: string): Promise<void> {
-  try {
-    const raw = await fs.readFile(file, 'utf8');
-    const cfg = JSON.parse(raw) as { git?: Record<string, unknown> };
-    cfg.git = { ...(cfg.git ?? {}), autoCommit: false, autoPush: false };
-    await fs.writeFile(file, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
-  } catch (err) {
-    console.warn(`[margo] could not adjust workspace config for server mode: ${(err as Error).message}`);
-  }
-}
-
-/** Append an entry to the repo's .gitignore (creating the file if needed)
- *  unless it's already present. Used by server-mode init to keep the
- *  AI-cache directory out of git. */
-async function ensureGitignoreEntry(cwd: string, entry: string): Promise<void> {
-  const file = path.join(cwd, '.gitignore');
-  let existing = '';
-  try {
-    existing = await fs.readFile(file, 'utf8');
-  } catch { /* doesn't exist yet */ }
-  const lines = existing.split('\n').map((l) => l.trim());
-  if (lines.includes(entry) || lines.includes(`/${entry}`)) return;
-  const next = existing.length > 0 && !existing.endsWith('\n') ? existing + '\n' : existing;
-  await fs.writeFile(file, `${next}${entry}\n`, 'utf8');
-  console.log(`[margo] added ${entry} to .gitignore`);
 }
 
 async function verifyHostReachable(url: string): Promise<void> {
@@ -520,13 +506,13 @@ async function verifyTokenWorks(url: string, project: string, token: string): Pr
  * `.margo/CLAUDE.md` for *this* repo, regardless of where the skill lives.
  */
 async function installSkill(cwd: string, opts: { scope: 'project' | 'user' }): Promise<void> {
-  // Find the project this skill belongs to: walk up to the nearest `.margo/`.
-  // We don't accept "install the skill but there's no inbox to point at" —
-  // the skill would error on every `/margo` invocation. Cheaper to surface
-  // the ordering error here.
+  // Find the project this skill belongs to: walk up to the nearest
+  // `margo.config.json`. We don't accept "install the skill but there's
+  // no project to point at" — the skill would error on every `/margo`
+  // invocation. Cheaper to surface the ordering error here.
   const projectDir = await findMargoDir(cwd);
   if (!projectDir) {
-    console.error('[margo] no .margo/ found in this directory or any parent — run `npx margo init` first.');
+    console.error('[margo] no margo.config.json found in this directory or any parent — run `npx margo init` first.');
     process.exit(1);
   }
 
@@ -559,10 +545,11 @@ async function installSkill(cwd: string, opts: { scope: 'project' | 'user' }): P
 }
 
 /**
- * Idempotent refresh of whichever artifacts already exist. We don't want
- * `update` to silently install new things — that turns it into a hidden
- * `init`. If only `.margo/` is installed, only `.margo/` gets refreshed;
- * the user runs `install-skill` separately when they want it.
+ * Refresh the `/margo` skill template from the installed package — the
+ * only artifact we actively maintain on the user's disk. (margo.config.json
+ * stays exactly as the user wrote it; we don't overwrite their host /
+ * project / id.) If no skill is installed yet, prompts the user to run
+ * `install-skill` rather than silently installing one.
  */
 async function update(cwd: string): Promise<void> {
   const projectDir = await findMargoDir(cwd);
@@ -570,11 +557,6 @@ async function update(cwd: string): Promise<void> {
     console.error('[margo] nothing installed in this directory or any parent — run `npx margo init` first.');
     process.exit(1);
   }
-  await init(projectDir, { overwriteTemplates: true });
-
-  // Refresh the skill only if it was already installed somewhere. We don't
-  // want `update` to silently install new things — that turns it into a
-  // hidden `install-skill`.
   const gitRoot = await resolveGitRoot(cwd);
   const projectSkill = path.join(gitRoot, '.claude', 'skills', 'margo', 'SKILL.md');
   const userSkill = path.join(os.homedir(), '.claude', 'skills', 'margo', 'SKILL.md');
@@ -582,13 +564,21 @@ async function update(cwd: string): Promise<void> {
     await installSkill(cwd, { scope: 'project' });
   } else if (await pathExists(userSkill)) {
     await installSkill(cwd, { scope: 'user' });
+  } else {
+    console.log('[margo] no Claude Code skill installed — run `npx margo install-skill` if you want one.');
   }
+  console.log('       To upgrade the package itself: `npm install -D margo-dev@latest`.');
 }
 
 async function uninstall(cwd: string): Promise<void> {
   const projectDir = await findMargoDir(cwd);
   if (projectDir) {
     await removeRootClaudeBlock(projectDir);
+    const configPath = path.join(projectDir, 'margo.config.json');
+    if (await pathExists(configPath)) {
+      await fs.unlink(configPath);
+      console.log(`[margo] removed ${path.relative(cwd, configPath) || 'margo.config.json'}`);
+    }
   }
   // Remove the project-scope skill if present. We intentionally do NOT
   // touch the user-scope skill (`~/.claude/skills/margo/`) — it's shared
@@ -600,10 +590,9 @@ async function uninstall(cwd: string): Promise<void> {
     await fs.rm(projectSkill, { recursive: true, force: true });
     console.log(`[margo] removed ${path.relative(cwd, projectSkill) || '.claude/skills/margo'}/`);
   }
-  // We deliberately do NOT delete .margo/ — comment history may still be wanted.
-  const margoRel = projectDir ? path.relative(cwd, path.join(projectDir, '.margo')) || '.margo' : '.margo';
-  console.log(`[margo] removed CLAUDE.md block. ${margoRel}/ left in place.`);
-  console.log(`       To remove fully: \`rm -r ${margoRel}\` and uninstall the package.`);
+  console.log(`[margo] CLAUDE.md margo block removed.`);
+  console.log(`       Standalone-mode comment files at ~/.margo/standalone/<id>/ are left in place.`);
+  console.log(`       To remove fully: \`rm -r ~/.margo\` and \`npm uninstall margo-dev\`.`);
 }
 
 /**
@@ -666,11 +655,6 @@ async function copyTemplate(name: string, dest: string, overwrite = false): Prom
     }
   }
   await fs.copyFile(src, dest);
-}
-
-async function ensureGitkeep(dir: string): Promise<void> {
-  const f = path.join(dir, '.gitkeep');
-  try { await fs.access(f); } catch { await fs.writeFile(f, ''); }
 }
 
 async function ensureRootClaudeBlock(cwd: string): Promise<void> {

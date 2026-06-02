@@ -1,7 +1,5 @@
 {
   "storage": "server",
-  "server": {
-    "url": "http://localhost:7331",
-    "project": "acme-pricing"
-  }
+  "host": "http://localhost:7331",
+  "project": "acme-pricing"
 }

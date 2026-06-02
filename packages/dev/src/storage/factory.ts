@@ -1,19 +1,18 @@
 // Picks the right Transport implementation based on margo.config. Used
 // by all three plugin entry points (Vite, Next, CLI sidecar) so the
-// "local vs server" decision lives in exactly one place.
+// "standalone vs server" decision lives in exactly one place.
 
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { findCredential } from '../auth/credentials-store.js'
 import { loadMargoConfig } from '../config/load.js'
 import type { MargoClientConfig } from '../config/types.js'
-import { LocalTransport } from './local-transport.js'
 import { RemoteTransport } from './remote-transport.js'
+import { StandaloneTransport, standaloneDataDir } from './standalone-transport.js'
 import type { Transport } from './transport.js'
-import type { MargoConfig } from '../shared/types.js'
 
 export interface CreateTransportOptions {
   rootDir: string
-  commentsDir: string
-  config: MargoConfig
   /** When true, a server-mode workspace with no resolvable token returns
    *  `{ transport: null, needsAuth: true }` instead of throwing. The dev
    *  plugin sets this so the overlay can offer an in-browser login flow.
@@ -23,105 +22,151 @@ export interface CreateTransportOptions {
 }
 
 export interface CreateTransportResult {
-  /** Null only when `needsAuth === true`. Otherwise non-null in server
-   *  mode (resolved token) or LocalTransport in local mode. */
+  /** Null only when `needsAuth === true`. Otherwise non-null. */
   transport: Transport | null
-  /** Which backend was selected. Surfaced so plugins can log it on boot
-   *  and so future ops dashboards can tell at a glance. */
-  mode: 'local' | 'server'
+  /** Which backend was selected. */
+  mode: 'standalone' | 'server'
   /** Path to the loaded margo.config, or null if none was found. */
   configPath: string | null
-  /** Server connection info — populated when `mode === 'server'`. The
-   *  bearer token is intentionally omitted; only url + project flow
-   *  through to consumers (e.g. surfaced to the overlay UI). */
-  serverInfo?: { url: string; project: string }
+  /** Where comments land on this machine. Standalone:
+   *  `~/.margo/standalone/<id>/comments/`. Server: the host's per-
+   *  project cache mirror at `~/.margo/cache/<host>/<project>/comments/`.
+   *  Surfaced so plugins can wire SSE-driven mirroring + log it on boot. */
+  commentsDir: string
+  /** Server connection info — populated when `mode === 'server'`. */
+  serverInfo?: { host: string; project: string }
   /** True iff server mode but no resolvable token AND the caller passed
-   *  `allowMissingAuth`. Plugins use this to start in a "sign in to
-   *  margo" state and drive the device flow from the overlay. */
+   *  `allowMissingAuth`. */
   needsAuth?: boolean
 }
 
 /**
- * Construct a Transport for the given workspace. Reads margo.config.* from
- * rootDir; absent/local → LocalTransport, server → RemoteTransport. Throws
- * with a clear error if server mode is selected but its config is invalid
- * or the bearer token env var is missing — better to fail loudly at boot
- * than silently fall back to local and create files in a repo that's been
- * configured to keep them out.
+ * Construct a Transport for the given workspace.
+ *
+ * Standalone mode (no infra, solo + AI): comments live under
+ * `~/.margo/standalone/<id>/`. The plugin keeps the project repo
+ * completely untouched.
+ *
+ * Server mode (team collaboration): the plugin proxies HTTP to a
+ * self-hostable margo-host. Comments mirror to
+ * `~/.margo/cache/<host>/<project>/` for AI to read off disk.
+ *
+ * The choice is entirely driven by `storage` in margo.config.json.
+ * Missing or invalid config throws — better to fail loudly at boot
+ * than silently fall into the wrong mode.
  */
 export async function createTransport(
   opts: CreateTransportOptions,
 ): Promise<CreateTransportResult> {
   const loaded = await loadMargoConfig(opts.rootDir)
-  const clientCfg = loaded?.config ?? {}
-  const mode: 'local' | 'server' = clientCfg.storage === 'server' ? 'server' : 'local'
-
-  if (mode === 'server') {
-    const transport = await createRemote(clientCfg, opts.allowMissingAuth === true)
-    return {
-      transport,
-      mode: 'server',
-      configPath: loaded?.path ?? null,
-      serverInfo: {
-        url: clientCfg.server!.url,
-        project: clientCfg.server!.project,
-      },
-      needsAuth: transport === null,
-    }
+  if (!loaded) {
+    throw new Error(
+      '[margo] no margo.config.json in this workspace. ' +
+        'Run `npx margo init` (or `npx margo init --server <url> --project <slug>`) to scaffold one.',
+    )
   }
+  const cfg = loaded.config
+  if (cfg.storage === 'standalone') return await createStandalone(opts.rootDir, cfg, loaded.path)
+  if (cfg.storage === 'server') return await createServer(opts.rootDir, cfg, loaded.path, opts.allowMissingAuth === true)
+  throw new Error(
+    `[margo] unknown storage mode: ${JSON.stringify(cfg.storage)}. ` +
+      'Expected "standalone" or "server" in margo.config.json.',
+  )
+}
+
+async function createStandalone(
+  rootDir: string,
+  cfg: MargoClientConfig,
+  configPath: string,
+): Promise<CreateTransportResult> {
+  if (!cfg.id) {
+    throw new Error(
+      '[margo] standalone-mode config requires an `id` (UUID generated by `margo init`). ' +
+        'Without it the workspace can\'t locate its comments dir under ~/.margo/standalone/.',
+    )
+  }
+  const dataDir = standaloneDataDir(cfg.id)
   return {
-    transport: new LocalTransport({
-      rootDir: opts.rootDir,
-      commentsDir: opts.commentsDir,
-      config: opts.config,
-    }),
-    mode: 'local',
-    configPath: loaded?.path ?? null,
+    transport: new StandaloneTransport({ rootDir, workspaceId: cfg.id }),
+    mode: 'standalone',
+    configPath,
+    commentsDir: path.join(dataDir, 'comments'),
   }
 }
 
-async function createRemote(
+async function createServer(
+  rootDir: string,
   cfg: MargoClientConfig,
+  configPath: string,
   allowMissingAuth: boolean,
-): Promise<RemoteTransport | null> {
-  const s = cfg.server
-  if (!s) throw new Error("[margo] storage: 'server' requires a `server: {...}` block in margo.config")
-  if (!s.url) throw new Error('[margo] server.url is required')
-  if (!s.project) throw new Error('[margo] server.project is required')
-  // Defaults applied here so margo.config.json doesn't need to spell out
-  // the auth block in the common case. Only `bearer` is supported; if the
-  // user spells out something else, fail loudly so they know it's wrong.
-  const authType = s.auth?.type ?? 'bearer'
+): Promise<CreateTransportResult> {
+  if (!cfg.host) throw new Error('[margo] server-mode config requires `host`')
+  if (!cfg.project) throw new Error('[margo] server-mode config requires `project`')
+  const authType = cfg.auth?.type ?? 'bearer'
   if (authType !== 'bearer') {
     throw new Error('[margo] only auth.type "bearer" is supported in this version')
   }
-  const tokenEnv = s.auth?.tokenEnv ?? 'MARGO_TOKEN'
-  const token = await resolveToken(tokenEnv, s.url)
+  const tokenEnv = cfg.auth?.tokenEnv ?? 'MARGO_TOKEN'
+  const token = await resolveToken(tokenEnv, cfg.host)
+  const commentsDir = serverCacheCommentsDir(cfg.host, cfg.project)
   if (!token) {
     if (allowMissingAuth) {
-      // Plugins drop into "needs sign-in" mode. The overlay drives the
-      // device-login flow via /__margo/auth/start and re-instantiates the
-      // transport after the user authorizes.
-      return null
+      return {
+        transport: null,
+        mode: 'server',
+        configPath,
+        commentsDir,
+        serverInfo: { host: cfg.host, project: cfg.project },
+        needsAuth: true,
+      }
     }
     throw new Error(
-      `[margo] no saved credentials for ${s.url} and ${tokenEnv} is unset — ` +
-        `run \`npx margo login ${s.url}\` to authorize this device.`,
+      `[margo] no saved credentials for ${cfg.host} and ${tokenEnv} is unset — ` +
+        `run \`npx margo login ${cfg.host}\` to authorize this device.`,
     )
   }
-  return new RemoteTransport({ serverUrl: s.url, project: s.project, token })
+  return {
+    transport: new RemoteTransport({
+      serverUrl: cfg.host,
+      project: cfg.project,
+      token,
+      // Pass the cache root (parent of comments/) so RemoteTransport
+      // can write the cache file directly + maintain its outbox under
+      // .outbox/ at the same level. Path math: commentsDir ends with
+      // /comments — strip that to get the cache root.
+      cacheDir: path.dirname(commentsDir),
+    }),
+    mode: 'server',
+    configPath,
+    commentsDir,
+    serverInfo: { host: cfg.host, project: cfg.project },
+  }
 }
 
-/** Token-lookup chain shared by the dev plugin (here) and the
- *  margo pull/push/watch CLIs. Order: process.env (for CI / Docker dev
- *  containers / shell-exported tokens) → ~/.margo/credentials.json
- *  (populated by `margo login`). Returns the resolved string, or null
- *  when neither source has one.
- *
- *  Does NOT mutate process.env on a credentials-file hit: that would
- *  outlive a logout (the file gets removed but the env var lingers),
- *  causing the next transport-recreate to keep finding the stale token
- *  and the user appears to "stay signed in" after clicking sign-out. */
+/** Where the plugin mirrors a server-mode workspace's comments. Lives
+ *  under `~/.margo/cache/<host-fingerprint>/<project>/comments/` so
+ *  switching projects in margo.config doesn't mix files with the
+ *  previous project, and so the project repo stays clean. */
+export function serverCacheCommentsDir(host: string, project: string): string {
+  const home = process.env.HOME || os.homedir()
+  return path.join(home, '.margo', 'cache', hostFingerprint(host), project, 'comments')
+}
+
+/** Stable, filesystem-safe label for a host URL. Strips scheme, replaces
+ *  characters that don't belong in directory names. Collisions are
+ *  theoretically possible (two hosts that differ only by stripped chars)
+ *  but vanishingly unlikely in practice. */
+function hostFingerprint(host: string): string {
+  return host
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .toLowerCase()
+}
+
+/** Token-lookup chain: process.env (for CI / Docker dev containers /
+ *  shell-exported tokens) → ~/.margo/credentials.json (populated by
+ *  `margo login`). Returns the resolved string, or null. */
 export async function resolveToken(
   tokenEnv: string,
   serverUrl: string,

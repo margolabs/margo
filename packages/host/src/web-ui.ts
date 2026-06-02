@@ -812,10 +812,8 @@ export function renderProject(data: ProjectPageData): string {
               <button type="button" class="connect-copy" data-copy="cfg-json">Copy</button>
 <pre id="cfg-json"><code>{
   "storage": "server",
-  "server": {
-    "url": "<span class="connect-host">…</span>",
-    "project": "${escapeHtml(data.project.slug)}"
-  }
+  "host": "<span class="connect-host">…</span>",
+  "project": "${escapeHtml(data.project.slug)}"
 }</code></pre>
             </div>
           </div>

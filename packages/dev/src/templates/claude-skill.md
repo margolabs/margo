@@ -5,12 +5,23 @@ description: Triage and resolve open comments left by the team on the live app. 
 
 # margo — comment inbox
 
-margo is a feedback layer where designers, PMs, and devs leave comments on the live app. Each comment is a file at `.margo/comments/<id>.md` with YAML frontmatter and a markdown body. Your job: process the open `type: task` comments, replying and updating status as you go.
+margo is a feedback layer where designers, PMs, and devs leave comments on the live app. Each comment is a markdown file with YAML frontmatter and a body. Your job: process the open `type: task` comments, replying and updating status as you go.
+
+## Where the files actually live
+
+Comments NEVER live in the project repo — `margo.config.json` at the repo root points at the real data directory under `~/.margo/`. Resolve the path before reading:
+
+1. Read `margo.config.json` at the repo root.
+2. If `storage: "standalone"` → comments at `~/.margo/standalone/<id>/comments/*.md` (use the `id` from the config).
+3. If `storage: "server"` → comments at `~/.margo/cache/<host-fingerprint>/<project>/comments/*.md` where `<host-fingerprint>` is the `host` URL with `https?://` stripped, trailing slash removed, non-`[a-zA-Z0-9._-]` chars replaced with `_`, all lowercase. The dev plugin keeps this directory in sync with the host via SSE — read it as-is, no `margo pull` needed.
+
+Resolved-path examples:
+- `{"storage":"standalone","id":"wsp-abc123"}` → `~/.margo/standalone/wsp-abc123/comments/`
+- `{"storage":"server","host":"http://localhost:7331","project":"acme"}` → `~/.margo/cache/localhost_7331/acme/comments/`
 
 ## How to read the inbox
 
-1. Check for `margo.config.json` (or `.ts`/`.mjs`/`.js`) at the repo root. If it has `"storage": "server"`, the comments live on a host rather than in this checkout — run `npx margo pull` once before reading so `.margo/comments/` mirrors the host. After making any edits, run `npx margo push` (or `npx margo push --id <id>` for a single comment) so your replies / status changes propagate. In local mode there's no margo.config and the files are already on disk; skip the pull/push steps.
-2. Read `.margo/comments/*.md` (one file per comment). Comments are anchored to a DOM element by default, but some are anchored to a captured network request instead — see **Request pins** below.
+1. Read every `<file>.md` in the resolved comments directory.
 3. Filter: `status` ∈ {`open`, `in-progress`} AND `type: task`. Skip `resolved`, `wontfix`, `ready-for-review`, and `blocked` — those are terminal or already-acted-on states. `wontfix` is the "Dismiss" verdict and is reversible only by humans clicking Reopen; do not re-process it.
 4. Sort by `created` ascending (oldest first), but bump anything with `@ai` in the body to the top.
 5. Skip `type: discussion` (humans only — never modify code in response to these). For `type: question`, answer in-thread but do not modify code.

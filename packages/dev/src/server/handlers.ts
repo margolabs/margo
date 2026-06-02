@@ -37,15 +37,16 @@ export interface HandlerContext {
    *  always describes the user's code repo regardless of where comments are
    *  stored. */
   rootDir: string;
-  /** Storage backend — LocalTransport (current default) or RemoteTransport. */
+  /** Storage backend — StandaloneTransport (solo, files in $HOME) or
+   *  RemoteTransport (team, HTTP against margo-host). */
   transport: Transport;
   /** Which backend is wired up. Surfaced to the overlay via /__margo/me so
    *  the UI can show "connected to server" indicators when relevant. */
-  storageMode: 'local' | 'server';
+  storageMode: 'standalone' | 'server';
   /** Server connection info — only populated when storageMode === 'server'.
    *  The overlay shows the project + host (not the token) in its identity
    *  panel so teammates can tell which workspace they're connected to. */
-  serverInfo?: { url: string; project: string };
+  serverInfo?: { host: string; project: string };
   config: MargoConfig;
   sseClients: Set<SseClient>;
   // Called after a new SSE client is registered, so plugins can replay any
@@ -76,8 +77,8 @@ export async function getMe(
   name: string;
   role?: 'read' | 'write' | 'admin' | null;
   projectExists?: boolean;
-  mode: 'local' | 'server';
-  server?: { url: string; project: string };
+  mode: 'standalone' | 'server';
+  server?: { host: string; project: string };
 } | null> {
   // Return null on missing identity so the overlay can prompt for setup
   // instead of treating the request as a 5xx and surfacing a cryptic

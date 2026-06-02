@@ -73,27 +73,15 @@ export interface ServeOptions {
 
 export async function serve(opts: ServeOptions): Promise<void> {
   const rootDir = path.resolve(opts.cwd);
-  const margoDir = path.join(rootDir, '.margo');
-  const commentsDir = path.join(margoDir, 'comments');
-  const cfgPath = path.join(margoDir, 'config.json');
-
-  let config: MargoConfig = DEFAULTS;
-  try {
-    const raw = await fsp.readFile(cfgPath, 'utf8');
-    config = { ...DEFAULTS, ...JSON.parse(raw) };
-  } catch {
-    console.warn(
-      `[margo] no ${cfgPath} found — running with defaults. Run \`margo init\` in this directory to scaffold one.`,
-    );
-  }
-
+  const config: MargoConfig = DEFAULTS;
   const sseClients = new Set<SseClient>();
-  const created = await createTransport({ rootDir, commentsDir, config });
+  const created = await createTransport({ rootDir });
   // Sidecar `margo serve` doesn't opt into allowMissingAuth — createTransport
   // already threw with a clear "run `margo login`" message if there's no
   // credential. Narrow here so TS knows transport is non-null below.
   if (!created.transport) throw new Error('[margo] unreachable: transport unexpectedly null');
   const transport = created.transport;
+  const commentsDir = created.commentsDir;
   console.log(`[margo] storage mode: ${created.mode}${created.configPath ? ` (from ${created.configPath})` : ''}`);
 
   const ctx = (): EndpointContext => ({

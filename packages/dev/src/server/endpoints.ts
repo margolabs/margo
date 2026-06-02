@@ -25,7 +25,7 @@ import { AuthError } from '../storage/transport.js';
 // of the package keeps the existing import path.
 export type EndpointContext = HandlerContext;
 
-const ENDPOINTS = ['/__margo/comment', '/__margo/list', '/__margo/events', '/__margo/sync', '/__margo/me', '/__margo/git-state'] as const;
+const ENDPOINTS = ['/__margo/comment', '/__margo/list', '/__margo/events', '/__margo/sync', '/__margo/sync-status', '/__margo/me', '/__margo/git-state'] as const;
 
 export function isMargoEndpoint(url: string | undefined): boolean {
   if (!url) return false;
@@ -69,6 +69,18 @@ export async function handleEndpoint(
     }
     if (url === '/__margo/sync' && req.method === 'POST') {
       return sendJson(res, 200, await syncFromRemote(ctx));
+    }
+    if (url === '/__margo/sync-status' && req.method === 'GET') {
+      // Server mode only: the RemoteTransport carries the outbox state.
+      // Standalone transport returns a default "all synced" payload so
+      // the overlay's banner logic doesn't need to branch on mode.
+      const transport = ctx.transport as unknown as {
+        getSyncStatus?: () => Promise<{ pending: number; lastSyncAt: string | null; lastError: string | null }>;
+      };
+      if (typeof transport.getSyncStatus === 'function') {
+        return sendJson(res, 200, await transport.getSyncStatus());
+      }
+      return sendJson(res, 200, { pending: 0, lastSyncAt: null, lastError: null });
     }
     res.writeHead(404).end('not found');
   } catch (err) {

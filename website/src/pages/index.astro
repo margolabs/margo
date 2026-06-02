@@ -19,9 +19,8 @@ import HeroDemo from '../components/HeroDemo.astro';
     <h1>Pin comments on your live app.<br /><span class="hero-em">AI implements them.</span></h1>
     <p class="lead">
       A shared annotation layer for AI-coding teams. PMs, designers, and devs leave comments on the
-      running UI. Claude Code reads those comments as live context and makes the change.
-      Pick your storage: git-synced files in your repo, or a self-hostable server with no git
-      history. Either way, no SaaS, no extension to install.
+      running UI. Claude Code reads those comments as live context and makes the change. Solo or
+      team — both modes self-hosted, no SaaS, no extension to install, your project repo stays clean.
     </p>
 
     <div class="cta-row">
@@ -48,7 +47,7 @@ npm run dev</code></pre>
     <article>
       <h3>2. AI works it</h3>
       <p>
-        Each comment is a markdown file in <code>.margo/comments/</code>. Claude Code reads them
+        Each comment is a markdown file under <code>~/.margo/</code>. Claude Code reads them
         via the <code>/margo</code> skill, makes the code change, replies in-thread, bumps status
         to <code>ready-for-review</code>.
       </p>
@@ -56,8 +55,8 @@ npm run dev</code></pre>
     <article>
       <h3>3. Humans review</h3>
       <p>
-        Humans approve, reply, or mark resolved — through the same overlay UI. Resolved comments
-        stay in place at <code>.margo/comments/&lt;id&gt;.md</code> so git blame works.
+        Humans approve, reply, or mark resolved — through the same overlay UI. The project repo's
+        git history stays untouched; comments live in <code>~/.margo/</code> on each machine.
       </p>
     </article>
   </section>
@@ -65,30 +64,30 @@ npm run dev</code></pre>
   <section class="storage">
     <h2>Two storage modes</h2>
     <p class="lead">
-      Choose where comments live. Switch modes by editing one file.
+      Solo? Standalone. Team? Server. Switch by editing one line in <code>margo.config.json</code>.
     </p>
     <div class="storage-grid">
       <div class="storage-card">
         <div class="storage-tag">Default · zero infra</div>
-        <h3>Local</h3>
-        <p class="storage-pitch">Comments as files in your repo, synced over <code>git pull/push</code>.</p>
+        <h3>Standalone</h3>
+        <p class="storage-pitch">Solo workspace — "me + AI on my machine." No host, no sign-in.</p>
         <ul class="storage-list">
-          <li>No backend, no separate user system — your repo permissions ARE the access control.</li>
-          <li>Each pin is a markdown file in <code>.margo/comments/</code>. Git blame, diff, and history just work.</li>
-          <li>Solo + Claude Code gets value before you ever invite a second human.</li>
+          <li>Each workspace has its own UUID. Comments land under <code>~/.margo/standalone/&lt;id&gt;/comments/</code> — not in the project tree, not in git.</li>
+          <li>Identity comes from <code>git config user.name/email</code>; no separate account.</li>
+          <li>One person + Claude Code gets value in under a minute.</li>
         </ul>
 <pre class="storage-snippet"><code>npm install -D margo-dev
 npx margo init
 npm run dev</code></pre>
       </div>
       <div class="storage-card storage-card-server">
-        <div class="storage-tag">Self-hostable · keeps git clean</div>
+        <div class="storage-tag">Self-hostable · team collab</div>
         <h3>Server</h3>
-        <p class="storage-pitch">Comments live on a self-hostable host. Your repo never sees them.</p>
+        <p class="storage-pitch">Team collaboration via a self-hostable host. Offline-first by default.</p>
         <ul class="storage-list">
           <li>Drop-in Docker image: <code>margolabs/margo-host</code>. First signup at <code>/setup</code> becomes superuser.</li>
-          <li>Per-project member roster (read / write / admin). Multiple projects per host.</li>
-          <li>One-click sign-in from the overlay — token saves to <code>~/.margo/credentials.json</code>, never to your repo.</li>
+          <li>Per-project member roster (read / write / admin). Plugin caches to <code>~/.margo/cache/&lt;host&gt;/&lt;project&gt;/</code>.</li>
+          <li>Pins work even when the host's unreachable — writes queue locally and drain when the host's back. Overlay shows a "syncing" pill while pending.</li>
         </ul>
 <pre class="storage-snippet"><code>docker run -d -p 7331:7331 margolabs/margo-host
 npx margo init --server http://&lt;host&gt;:7331 --project &lt;slug&gt;

@@ -15,7 +15,7 @@ import * as crypto from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { loadMargoConfig } from '../config/load.js'
-import { resolveToken } from '../storage/factory.js'
+import { resolveToken, serverCacheCommentsDir } from '../storage/factory.js'
 import { RemoteTransport } from '../storage/remote-transport.js'
 import { ConflictError } from '../storage/transport.js'
 
@@ -30,27 +30,29 @@ export async function watch(opts: WatchOptions): Promise<void> {
     console.error('        Run `margo init --server <url> --project <slug>` first.')
     process.exit(1)
   }
-  const server = loaded.config.server
-  if (!server) {
-    console.error('[margo watch] margo.config has storage: server but no server block.')
+  const cfg = loaded.config
+  if (!cfg.host || !cfg.project) {
+    console.error('[margo watch] server-mode margo.config is missing host or project.')
     process.exit(1)
   }
   // resolveToken consults process.env first, then
   // ~/.margo/credentials.json — so `margo login` is enough to start
   // watching without also exporting MARGO_TOKEN.
-  const tokenEnv = server.auth?.tokenEnv ?? 'MARGO_TOKEN'
-  const token = await resolveToken(tokenEnv, server.url)
+  const tokenEnv = cfg.auth?.tokenEnv ?? 'MARGO_TOKEN'
+  const token = await resolveToken(tokenEnv, cfg.host)
   if (!token) {
-    console.error(`[margo watch] no saved credentials for ${server.url} and ${tokenEnv} is unset.`)
-    console.error(`        Run \`npx margo login ${server.url}\` to authorize this device.`)
+    console.error(`[margo watch] no saved credentials for ${cfg.host} and ${tokenEnv} is unset.`)
+    console.error(`        Run \`npx margo login ${cfg.host}\` to authorize this device.`)
     process.exit(1)
   }
-  const commentsDir = path.join(opts.cwd, '.margo', 'comments')
+  // Mirror lives at ~/.margo/cache/<host>/<project>/comments/ — same
+  // path the dev plugin uses, so watch + plugin are interchangeable.
+  const commentsDir = serverCacheCommentsDir(cfg.host, cfg.project)
   await fs.mkdir(commentsDir, { recursive: true })
 
   const transport = new RemoteTransport({
-    serverUrl: server.url,
-    project: server.project,
+    serverUrl: cfg.host,
+    project: cfg.project,
     token,
   })
 
@@ -180,7 +182,7 @@ export async function watch(opts: WatchOptions): Promise<void> {
   watcher.on('change', (f) => void onLocalChange(f))
   watcher.on('unlink', (f) => void onLocalDelete(f))
 
-  console.log(`[margo watch] watching ${commentsDir} ↔ ${server.url}/${server.project}. Ctrl-C to stop.`)
+  console.log(`[margo watch] watching ${commentsDir} ↔ ${cfg.host}/${cfg.project}. Ctrl-C to stop.`)
 
   const shutdown = async (): Promise<void> => {
     unsubscribe()

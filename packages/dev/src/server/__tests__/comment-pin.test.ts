@@ -25,7 +25,7 @@ import {
   type HandlerContext,
   type SseClient,
 } from '../handlers.js';
-import { LocalTransport } from '../../storage/local-transport.js';
+import { StandaloneTransport } from '../../storage/standalone-transport.js';
 import { parseComment } from '../../shared/frontmatter.js';
 import type { CreateCommentRequest, MargoConfig, Target } from '../../shared/types.js';
 
@@ -66,10 +66,8 @@ describe('comment-pin handlers — happy path', () => {
 
   beforeEach(async () => {
     // Fresh temp git repo per test — isolation matters since the handlers
-    // touch a process-global background git queue, and we don't want one
-    // test's queued op to race into another's working tree.
+    // read git config for the author identity.
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'margo-test-'));
-    commentsDir = path.join(rootDir, '.margo', 'comments');
     execSync('git init -q -b main', { cwd: rootDir });
     execSync(`git config user.email ${TEST_AUTHOR_EMAIL}`, { cwd: rootDir });
     execSync(`git config user.name "${TEST_AUTHOR_NAME}"`, { cwd: rootDir });
@@ -78,14 +76,25 @@ describe('comment-pin handlers — happy path', () => {
     await fs.writeFile(path.join(rootDir, 'README.md'), '# test\n', 'utf8');
     execSync('git add README.md && git commit -q -m initial', { cwd: rootDir });
 
+    // Standalone-mode data dir — separate from the repo root so the test
+    // exercises the new "comments live in $HOME, not in the project tree"
+    // architecture. dataDirOverride bypasses the ~/.margo/standalone/<id>/
+    // resolution so we don't pollute the user's home during testing.
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'margo-test-data-'));
+    commentsDir = path.join(dataDir, 'comments');
+
     sseEvents = [];
     const sseClients = new Set<SseClient>();
     sseClients.add({ write: (payload) => sseEvents.push(payload) });
-    const transport = new LocalTransport({ rootDir, commentsDir, config: DEFAULT_CONFIG });
+    const transport = new StandaloneTransport({
+      rootDir,
+      workspaceId: 'test-workspace',
+      dataDirOverride: dataDir,
+    });
     ctx = {
       rootDir,
       transport,
-      storageMode: 'local',
+      storageMode: 'standalone',
       config: DEFAULT_CONFIG,
       sseClients,
     };

@@ -73,23 +73,16 @@ let cachedTransport: Transport | null = null;
 async function ensureCtx(): Promise<HandlerContext> {
   if (cachedCtx) return cachedCtx;
   const rootDir = process.cwd();
-  const margoDir = path.join(rootDir, '.margo');
-  const commentsDir = path.join(margoDir, 'comments');
-  let config: MargoConfig = DEFAULTS;
-  try {
-    const raw = await fsp.readFile(path.join(margoDir, 'config.json'), 'utf8');
-    config = { ...DEFAULTS, ...JSON.parse(raw) };
-  } catch {
-    // .margo/config.json doesn't exist — handlers still work, just with defaults.
-  }
+  const config: MargoConfig = DEFAULTS;
   const sseClients = new Set<SseClient>();
-  const created = await createTransport({ rootDir, commentsDir, config });
+  const created = await createTransport({ rootDir });
   // Next.js plugin doesn't opt into allowMissingAuth yet — createTransport
   // already threw with a clear "run `margo login`" message if no credential
   // is present. Narrow so TS knows transport is non-null below.
   // TODO: extend the same in-overlay device flow as the Vite plugin.
   if (!created.transport) throw new Error('[margo] unreachable: transport unexpectedly null');
   const transport = created.transport;
+  const commentsDir = created.commentsDir;
   cachedTransport = transport;
   console.log(`[margo] storage mode: ${created.mode}${created.configPath ? ` (from ${created.configPath})` : ''}`);
   cachedCtx = {
@@ -114,7 +107,7 @@ async function ensureCtx(): Promise<HandlerContext> {
   // AI agents have fresh disk state without needing manual `margo pull`.
   if (created.mode === 'server') {
     void mirrorTransportToDir(transport, commentsDir)
-      .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI`))
+      .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI at ${commentsDir}`))
       .catch((err) => console.warn('[margo] initial pull failed (AI cache may be stale):', (err as Error).message));
   }
   // Bridge transport events into the SSE stream. Subscribing once is fine —
@@ -163,6 +156,19 @@ function isDev(): boolean {
   return process.env.NODE_ENV !== 'production';
 }
 
+const ROUTES: ReadonlyArray<{ route: string; methods: ReadonlyArray<string> }> = [
+  { route: 'list', methods: ['GET'] },
+  { route: 'me', methods: ['GET', 'POST'] },
+  { route: 'git-state', methods: ['GET'] },
+  { route: 'comment', methods: ['POST', 'PATCH', 'DELETE'] },
+  { route: 'events', methods: ['GET'] },
+  { route: 'sync', methods: ['POST'] },
+];
+
+function isKnownRoute(route: string, method: string): boolean {
+  return ROUTES.some((r) => r.route === route && r.methods.includes(method));
+}
+
 // Matches Next.js 15+'s App Router route-handler signature: the second
 // parameter is required (not optional), and `params` is a Promise. Next's
 // generated route-type validation in `.next/types/...` checks our exported
@@ -189,6 +195,13 @@ async function dispatch(request: Request, ctx: RouteContext): Promise<Response> 
   // Static-asset short-circuit: serve the overlay bundle from the package.
   if (request.method === 'GET' && (route === 'overlay.js' || route === 'overlay.js.map')) {
     return serveOverlay(route);
+  }
+
+  // Unknown routes return 404 BEFORE we try to instantiate a transport —
+  // otherwise a workspace without margo.config.json (e.g. test harness,
+  // or a user who hasn't run `margo init` yet) would 500 on every probe.
+  if (!isKnownRoute(route, request.method)) {
+    return new Response('not found', { status: 404 });
   }
 
   const handlerCtx = await ensureCtx();

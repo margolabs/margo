@@ -18,27 +18,37 @@ In your app directory (where `package.json` lives, inside a git repo):
 
 ```sh
 npm install -D margo-dev
-npx margo init                  # scaffolds .margo/, wires the plugin into vite.config / next.config
+npx margo init                  # scaffolds margo.config.json, wires the plugin into vite.config / next.config
 npm run dev                     # margo overlay loads automatically
 ```
 
 Open the app, click the **📌 Pin** button at bottom-right, click any element, type a comment.
 
+The repo footprint is one file: `margo.config.json` at the root. Comments never live in the project tree — they're under `~/.margo/` on each user's machine.
+
 ### Two storage modes
 
-| | Where comments live | Setup |
-|---|---|---|
-| **Local** (default) | `.margo/comments/*.md` in your repo, synced over `git pull/push` | `npx margo init` |
-| **Server** (optional) | A self-hostable [margo-host](https://hub.docker.com/r/margolabs/margo-host) Docker container | `npx margo init --server <url> --project <slug>` |
+| | Purpose | Where comments live | Setup |
+|---|---|---|---|
+| **Standalone** (default) | Solo — "me + AI on my machine" | `~/.margo/standalone/<id>/comments/` | `npx margo init` |
+| **Server** (collab) | Team collaboration | A self-hostable [margo-host](https://hub.docker.com/r/margolabs/margo-host); plugin caches to `~/.margo/cache/<host>/<project>/` | `npx margo init --server <url> --project <slug>` |
 
-Server mode keeps your git history clean, adds a per-project member roster (read / write / admin), and lets multiple repos share one host. Spin up a host with one command:
+**Standalone** gives you a private inbox shared between you and AI with zero infra. **Server** runs a host (Docker) that your teammates also point at — per-project member rosters, browser sign-in from the overlay, full audit trail on the host. Both modes keep your project repo's git history untouched.
+
+To stand up a server for the team:
 
 ```sh
 docker run -d -p 7331:7331 -v margo-data:/data margolabs/margo-host:latest
-# open http://<host>:7331/setup — first-signup-wins admin
+# open http://<host>:7331/setup — first signup becomes superuser
 ```
 
-Then `npx margo init --server …` in your app's repo, run your dev server, and click the blue **Sign in to margo** pill in the overlay to authorize this device. Token saves to `~/.margo/credentials.json` — gitignored, per-user. See [packages/host](./packages/host) for source / `docker-compose.yml`.
+Then `npx margo init --server …` in each app's repo, run the dev server, and click the blue **Sign in to margo** pill in the overlay. Token saves to `~/.margo/credentials.json` (mode 0600, per-user). See [packages/host](./packages/host) for source + `docker-compose.yml`.
+
+For solo onboarding without learning Docker, `npx margo host start` prints the Docker one-liner pinned to `~/.margo/hosts/default/data/`.
+
+### Offline-first (server mode)
+
+Server-mode writes go to a local outbox first, then to the host. If the host is down (laptop closed, network blip, host restart), your pins still land — they appear instantly in the overlay and on disk under `~/.margo/cache/<host>/<project>/`. A background drainer retries every 30 seconds; the overlay shows an amber "syncing…" pill while the queue's non-empty. Resilient by default; nothing to configure.
 
 ### Claude Code integration (optional)
 
@@ -123,17 +133,17 @@ Now `npm run dev` boots both. The overlay loads at your app's URL just like the 
 
 ## How it works (sketch)
 
-1. A developer asks Claude Code: `add margo to this project`. Claude installs `margo-dev` as a dev dependency, wires it into the build config (Vite / Next.js plugin, or a sidecar + proxy for everything else), and creates `.margo/` in the repo with a config file.
-2. Every team member who wants to comment clones the repo and runs `npm run dev` themselves. The dev server boots with the margo overlay automatically active.
+1. A developer asks Claude Code: `add margo to this project`. Claude installs `margo-dev` as a dev dependency, wires it into the build config (Vite / Next.js plugin, or a sidecar + proxy for everything else), and writes `margo.config.json` at the repo root.
+2. Every team member runs `npm run dev` themselves. The dev server boots with the margo overlay automatically active.
 3. A commenter clicks an element in the running UI, types a comment, hits enter. The overlay POSTs to a tiny local endpoint (`/__margo/comment`) exposed by the dev plugin.
-4. The plugin writes the comment as a file under `.margo/comments/<id>.md`, then runs local `git` to auto-commit (`margo: comment by jane on /pricing`) and auto-push to the repo's existing remote.
-5. Teammates `git pull` → their local plugin sees the new file → renders the pin back into their overlay.
-6. Claude Code reads `.margo/comments/*.md` as part of normal repo context. AI works through the inbox: resolves, replies, or flags blockers — by editing the same comment files.
-7. Humans review, reply, or mark resolved — also by editing the comment files (typically through the same overlay UI).
+4. The plugin writes the comment as a file under `~/.margo/standalone/<id>/comments/<id>.md` (standalone mode) or `~/.margo/cache/<host>/<project>/comments/<id>.md` (server mode). In server mode the plugin also PUTs the comment to the host, which broadcasts via SSE to every other connected teammate.
+5. Teammates' plugins receive the SSE event and update their cache → the overlay renders the new pin instantly.
+6. Claude Code reads the comment files via the `/margo` skill. AI works through the inbox: resolves, replies, or flags blockers — by editing the same files.
+7. Humans review, reply, or mark resolved — also through the overlay UI.
 
 ## Comment file format
 
-Each comment is one file at `.margo/comments/<id>.md`. YAML frontmatter captures the pin and status; markdown body is the comment text and reply thread.
+Each comment is one markdown file. YAML frontmatter captures the pin and status; the body holds the comment text and reply thread.
 
 ```yaml
 ---
@@ -189,10 +199,12 @@ End-to-end verification: `node scripts/verify-demo.mjs <dir> <url>` boots the de
 - **Humans never code.** They only annotate.
 - **AI is a first-class participant** in the shared layer — reads *and* writes.
 - **Anchored to the live app, not to code or static artifacts.** Comments pin to the running UI — what users actually see — not to `file.ts:42`, not to a Figma frame, not to a PNG.
-- **Git-native storage.** Comments live as files in the repo (`.margo/comments/*.md`), synced by `git pull/push`. No SaaS backend, no separate user system, no realtime infra. The premise: every role on the team — PM, designer, dev — already runs an AI coding tool against the repo, so the repo *is* the shared workspace.
-- **Single-user value on day one.** A solo founder with one local app and a Claude Code session should get value before any second user joins.
+- **Self-hosted, never SaaS.** Two modes: standalone (solo, comments under `~/.margo/standalone/<id>/` on the user's machine) or server (team, on a self-hostable Docker container, plugin caches to `~/.margo/cache/<host>/<project>/`). Either way the project repo's git history stays untouched.
+- **Single-user value on day one.** A solo founder with one local app and a Claude Code session gets value before any second user joins — standalone mode is the default for exactly this reason.
 
 ## Decided
+
+> **Note (v0.4):** The bullets below were the v0 decisions when comments lived in the repo's git history. v0.4 collapsed to two modes — standalone (`~/.margo/standalone/<id>/`) and server (`~/.margo/cache/<host>/<project>/`). Auto-commit / auto-push from the plugin is gone, replaced by direct host writes in server mode and direct disk writes in standalone mode. Many bullets below reference the older shape; treat this section as historical context unless explicitly updated.
 
 - **First user: small product team.** Implies role hints (PM / designer / dev) for AI inbox triage. Real-time multiplayer is *not* required for v0 — git sync is the propagation mechanism.
 - **Attach mechanism: dev-time package.** Installed as a dev dependency by Claude Code itself (`npm install -D margo-dev`). Two integration modes (see **Framework support** above): a native plugin for Vite and Next.js, or a `margo serve` sidecar + proxy for anything else (Angular, raw webpack, CRA, etc.). Overlay activates automatically when the dev server launches. Production builds do not include it.

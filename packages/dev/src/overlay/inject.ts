@@ -99,7 +99,7 @@ export function start(opts: StartOptions): void {
     name?: string;
     role?: 'read' | 'write' | 'admin' | null;
     projectExists?: boolean;
-    mode?: 'local' | 'server';
+    mode?: 'standalone' | 'server';
     server?: { url: string; project: string };
     /** Server mode but no credential saved yet — overlay shows the
      *  "Sign in to margo" pill that drives the in-browser device flow. */
@@ -244,6 +244,39 @@ export function start(opts: StartOptions): void {
     }
   };
 
+  // Outbox sync indicator — server mode only. Polls /__margo/sync-status
+  // and shows a small banner when writes are queued for retry (host
+  // unreachable). Hidden when pending = 0. Sits above the FAB pill,
+  // unobtrusive: the user's pin still landed locally; we're just
+  // telling them it hasn't synced.
+  let syncBanner: HTMLDivElement | null = null;
+  const renderSyncBanner = (pending: number, error: string | null): void => {
+    if (opts.mode !== "dev") return;
+    if (pending === 0) {
+      if (syncBanner) {
+        syncBanner.remove();
+        syncBanner = null;
+      }
+      return;
+    }
+    if (!syncBanner) {
+      syncBanner = document.createElement("div");
+      syncBanner.className = "margo-sync-banner";
+      root.appendChild(syncBanner);
+    }
+    syncBanner.innerHTML = `<span class="margo-sync-dot" aria-hidden="true"></span>${pending} comment${pending === 1 ? '' : 's'} syncing…${error ? `<span class="margo-sync-error" title="${escapeHtml(error)}">⚠</span>` : ''}`;
+  };
+  if (opts.mode === "dev") {
+    // Initial probe, then poll every 5s. Quiet failures — the banner
+    // just stays whatever state it was last in.
+    const pollSyncStatus = async (): Promise<void> => {
+      const status = await sync.getSyncStatus();
+      if (status) renderSyncBanner(status.pending, status.lastError);
+    };
+    void pollSyncStatus();
+    setInterval(() => void pollSyncStatus(), 5_000);
+  }
+
   const renderRemoteBanner = () => {
     // Preview mode never sees this banner — there's nothing to "pull" into.
     if (opts.mode !== "dev") return;
@@ -314,7 +347,7 @@ export function start(opts: StartOptions): void {
     try {
       const el = document.querySelector('script[data-margo-storage]') as HTMLElement | null;
       const v = el?.dataset.margoStorage;
-      return v === 'local' || v === 'server' ? v : null;
+      return v === 'standalone' || v === 'server' ? v : null;
     } catch { return null; }
   })();
 
@@ -526,7 +559,7 @@ export function start(opts: StartOptions): void {
     let projectSection = '';
     if (me.mode === 'server' && me.server) {
       const projectName = escapeHtml(me.server.project);
-      const hostName = escapeHtml(me.server.url);
+      const hostName = escapeHtml(me.server.host);
       let roleChip: string;
       if (me.role) {
         roleChip = `<span class="margo-account-chip">${escapeHtml(me.role)}</span>`;
@@ -595,7 +628,7 @@ export function start(opts: StartOptions): void {
     root.toggleAttribute("data-margo-mode-server", me?.mode === 'server' && !me?.needsAuth);
     if (me?.needsAuth) {
       fabMain.innerHTML = `<span class="margo-fab-signin">${icon('pin', 14)}<span class="margo-fab-signin-label">Sign in to margo</span></span>`;
-      const host = me.server?.url ? ` at ${me.server.url}` : '';
+      const host = me.server?.host ? ` at ${me.server.host}` : '';
       fabMain.title = `Click to authorize this device${host} (opens a new tab).`;
       return;
     }
@@ -641,14 +674,14 @@ export function start(opts: StartOptions): void {
         const projectMissing = me.projectExists === false;
         if (projectMissing) {
           projectSpan = `<span class="margo-fab-project margo-fab-project-denied">project not found · ${escapeHtml(me.server.project)}</span>`;
-          triggerTitle = `Signed in as ${me.email} · no project '${me.server.project}' exists on ${me.server.url}. Likely typo in margo.config.json.`;
+          triggerTitle = `Signed in as ${me.email} · no project '${me.server.project}' exists on ${me.server.host}. Likely typo in margo.config.json.`;
         } else {
           projectSpan = `<span class="margo-fab-project margo-fab-project-denied">no access · ${escapeHtml(me.server.project)}</span>`;
-          triggerTitle = `Signed in as ${me.email} · NOT a member of ${me.server.project} on ${me.server.url}`;
+          triggerTitle = `Signed in as ${me.email} · NOT a member of ${me.server.project} on ${me.server.host}`;
         }
       } else {
         projectSpan = `<span class="margo-fab-project">${escapeHtml(me.server.project)}</span>`;
-        triggerTitle = `Signed in as ${me.email} · ${me.server.project} on ${me.server.url} (${me.role ?? 'access'})`;
+        triggerTitle = `Signed in as ${me.email} · ${me.server.project} on ${me.server.host} (${me.role ?? 'access'})`;
       }
     } else {
       triggerTitle = `Signed in as ${me.email} · local mode`;
@@ -990,7 +1023,7 @@ export function renderInboxPanel(
   statusFilter: import("./inbox-view.js").StatusFilter,
   orphanIds: Set<string>,
   pinIds: Set<string>,
-  me: { email: string; mode?: 'local' | 'server'; server?: { url: string; project: string } } | null,
+  me: { email: string; mode?: 'standalone' | 'server'; server?: { host: string; project: string } } | null,
   gitState: GitState | null,
   filters: InboxFilterState,
   suppressEntranceAnim: boolean,
@@ -3980,6 +4013,36 @@ function injectStyles(): void {
        the user clicks the avatar chip. Holds identity recap + sign-out.
        Right-aligned to the pill so it hangs above-right where the
        avatar lives. */
+    /* ——— sync-pending banner — server mode only, appears when the
+       outbox has queued writes that haven't reached the host. Sits at
+       the top of the FAB stack so it's visible without expanding the
+       tray. Unobtrusive amber to convey "soft warning, not error" —
+       the user's pin landed locally, it just hasn't reached the host. */
+    .margo-sync-banner {
+      position: fixed; bottom: 64px; right: 16px;
+      z-index: 1000001;
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 12px; border-radius: 9999px;
+      background: hsl(38 92% 95%);
+      color: hsl(28 80% 30%);
+      border: 1px solid hsl(38 92% 80%);
+      font: inherit; font-size: 11.5px; line-height: 1;
+      box-shadow: 0 2px 6px rgb(0 0 0 / .06);
+      pointer-events: none;
+    }
+    .margo-sync-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: hsl(28 90% 50%);
+      animation: margo-sync-pulse 1.4s ease-in-out infinite;
+    }
+    .margo-sync-error { margin-left: 4px; cursor: help; pointer-events: auto; }
+    @keyframes margo-sync-pulse {
+      0%, 100% { opacity: 0.5; }
+      50% { opacity: 1; }
+    }
+    /* When the tray is open, the banner needs to step up out of the way
+       so it doesn't collide with the +pin / +gap / etc. buttons. */
+    [data-margo-fab-open] .margo-sync-banner { bottom: 256px; }
     .margo-account-popover {
       position: fixed; bottom: 60px; right: 16px;
       z-index: 1000002;

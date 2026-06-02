@@ -24,8 +24,6 @@ const OVERLAY_BUNDLE_PATH = path.join(PLUGIN_DIR, '..', 'overlay.bundle.js');
 const OVERLAY_MAP_PATH = path.join(PLUGIN_DIR, '..', 'overlay.bundle.js.map');
 
 export interface MargoPluginOptions {
-  /** Override `.margo` directory location. Defaults to `<viteRoot>/.margo`. */
-  margoDir?: string;
   /** Disable the overlay even when in dev mode (useful for tests). */
   disabled?: boolean;
 }
@@ -45,7 +43,10 @@ const DEFAULTS: MargoConfig = {
 
 export default function margo(opts: MargoPluginOptions = {}): Plugin {
   let viteRoot = process.cwd();
-  let margoDir = '';
+  // commentsDir is now provided by createTransport — standalone resolves
+  // to `~/.margo/standalone/<id>/comments/`, server resolves to the
+  // per-(host, project) cache mirror under `~/.margo/cache/`. We hold
+  // it so the SSE-driven mirror writer knows where to land.
   let commentsDir = '';
   let config: MargoConfig = DEFAULTS;
   const sseClients = new Set<SseClient>();
@@ -53,8 +54,8 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
   // After the overlay drives the device-login flow, recreateTransport()
   // swaps in a real RemoteTransport without restarting the dev server.
   let transport: Transport | null = null;
-  let storageMode: 'local' | 'server' = 'local';
-  let serverInfo: { url: string; project: string } | undefined;
+  let storageMode: 'standalone' | 'server' = 'standalone';
+  let serverInfo: { host: string; project: string } | undefined;
   let needsAuth = false;
 
   const ctx = (): EndpointContext => {
@@ -84,17 +85,11 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
 
     async configResolved(resolved) {
       viteRoot = resolved.root;
-      margoDir = opts.margoDir ?? path.join(viteRoot, '.margo');
-      commentsDir = path.join(margoDir, 'comments');
-      const cfgPath = path.join(margoDir, 'config.json');
-      try {
-        const raw = await fsp.readFile(cfgPath, 'utf8');
-        config = { ...DEFAULTS, ...JSON.parse(raw) };
-      } catch {
-        // `.margo/config.json` doesn't exist yet — user hasn't run init.
-        // Plugin still loads but in a "not initialized" state; first request
-        // returns a 412 with instructions.
-      }
+      // No more `.margo/config.json` to load — all workspace config now
+      // lives at the repo root in `margo.config.json` (storage mode +
+      // standalone id OR server host/project). `config` keeps its
+      // defaults (overlay-side behavior flags) until we strip the type
+      // entirely.
     },
 
     async configureServer(server) {
@@ -114,8 +109,6 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
         }
         const created = await createTransport({
           rootDir: viteRoot,
-          commentsDir,
-          config,
           // Plugins recover from missing credentials via the in-overlay
           // device flow; we don't want createTransport to throw and crash
           // the dev server when a teammate hasn't run `margo login` yet.
@@ -124,6 +117,7 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
         transport = created.transport;
         storageMode = created.mode;
         serverInfo = created.serverInfo;
+        commentsDir = created.commentsDir;
         needsAuth = created.needsAuth === true;
         if (logTransition) {
           if (needsAuth) {
@@ -133,14 +127,14 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
           }
         }
         // Server mode: pull all comments into the local cache once after
-        // (re)-boot so AI agents (which read .margo/comments/*.md off
-        // disk) see fresh state without anyone running `npx margo pull`.
-        // Fire and forget — boot succeeds even if the host is briefly
+        // (re)-boot so AI agents (which read the cached files off disk)
+        // see fresh state without anyone running `npx margo pull`. Fire
+        // and forget — boot succeeds even if the host is briefly
         // unreachable; a partial cache is better than a crashed plugin.
         if (transport && created.mode === 'server') {
           const captured = transport;
           void mirrorTransportToDir(captured, commentsDir)
-            .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI`))
+            .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI at ${commentsDir}`))
             .catch((err) => console.warn('[margo] initial pull failed (AI cache may be stale):', (err as Error).message));
         }
         // Bridge transport events into the SSE stream so connected
@@ -187,8 +181,33 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
 
       await recreateTransport(true);
 
+      // Offline-first drainer for server mode. Periodically attempts to
+      // push any queued ops to the host. Light-weight no-op when the
+      // transport is non-Remote or the outbox is empty.
+      let drainTimer: NodeJS.Timeout | null = null;
+      const startDrainer = (): void => {
+        if (drainTimer) return;
+        const tick = async (): Promise<void> => {
+          if (!transport) return;
+          const remote = transport as unknown as { drain?: () => Promise<{ pushed: number; pending: number; error?: string }> };
+          if (typeof remote.drain !== 'function') return;
+          try {
+            const { pushed, pending } = await remote.drain();
+            if (pushed > 0) console.log(`[margo] drained ${pushed} offline op(s); ${pending} still pending`);
+          } catch (err) {
+            // Drain errors are non-fatal; log once at warning level.
+            console.warn('[margo] outbox drain failed:', (err as Error).message);
+          }
+        };
+        // First tick after 5s so a host that boots a couple seconds late
+        // gets caught quickly; then every 30s while running.
+        setTimeout(() => void tick(), 5_000);
+        drainTimer = setInterval(() => void tick(), 30_000);
+      };
+      startDrainer();
+
       const authCtx = () => ({
-        hostUrl: serverInfo?.url,
+        hostUrl: serverInfo?.host,
         project: serverInfo?.project,
         // After login/logout, swap the transport without restarting the
         // dev server. The overlay will reload itself; this just makes
@@ -254,6 +273,10 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
       });
 
       server.httpServer?.once('close', () => {
+        if (drainTimer) {
+          clearInterval(drainTimer);
+          drainTimer = null;
+        }
         void transport?.close();
         transport = null;
       });
