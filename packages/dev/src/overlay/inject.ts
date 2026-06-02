@@ -407,11 +407,13 @@ export function start(opts: StartOptions): void {
       updateFabIdentity();
       return;
     }
-    // Avatar chip → account popover. Account actions (sign out, identity
-    // recap, project + role) live there instead of in the tray, matching
-    // the avatar-dropdown convention from GitHub / Slack / Figma.
-    const avatarEl = (e.target as HTMLElement | null)?.closest('.margo-fab-avatar');
-    if (avatarEl) {
+    // Identity cluster (avatar + project name) → account popover. Whole
+    // cluster is the hit target so either segment opens the popover.
+    // Account actions (sign out, identity recap, project + role) live
+    // there instead of in the tray, matching the avatar-dropdown
+    // convention from GitHub / Slack / Figma.
+    const acctTriggerEl = (e.target as HTMLElement | null)?.closest('.margo-fab-acct-trigger');
+    if (acctTriggerEl) {
       setAccountOpen(!accountOpen);
       setFabOpen(false); // close the action tray if it was open — same surface
       return;
@@ -609,10 +611,13 @@ export function start(opts: StartOptions): void {
     // a confusing "click → error" flow. Detected via CSS attribute on
     // root; updated here so it tracks /__margo/me refreshes.
     root.toggleAttribute("data-margo-no-access", noAccess);
-    // Avatar is now interactive: opens the account popover. role="button"
-    // + title make the affordance discoverable without expanding the
-    // markup; the click is handled via delegation in fabMain.
-    let identityChunk = eyeChunk + `<span class="margo-fab-avatar${noAccess ? " margo-fab-avatar-denied" : ""}" role="button" tabindex="-1" title="${escapeHtml(me.email ?? '')} — click for account" aria-label="account">${escapeHtml(initial)}</span>`;
+    // Identity cluster — avatar + (optional) project name wrapped in one
+    // clickable element. Whole cluster opens the account popover, so
+    // either segment is a valid hit target. The eye toggle and the Pin
+    // button stay outside the cluster and behave independently.
+    const avatarSpan = `<span class="margo-fab-avatar${noAccess ? " margo-fab-avatar-denied" : ""}" aria-hidden="true">${escapeHtml(initial)}</span>`;
+    let projectSpan = '';
+    let triggerTitle = `Signed in as ${me.email ?? ''} — click for account`;
     if (me.mode === "server" && me.server) {
       if (noAccess) {
         // Two distinct failure modes worth separating in the UI:
@@ -623,22 +628,27 @@ export function start(opts: StartOptions): void {
         // is missing (older host or local mode), fall back to "no access".
         const projectMissing = me.projectExists === false;
         if (projectMissing) {
-          identityChunk += `<span class="margo-fab-project margo-fab-project-denied" title="No project '${escapeHtml(me.server.project)}' on ${escapeHtml(me.server.url)}. Check the spelling in margo.config.json, or ask an admin to create it.">project not found · ${escapeHtml(me.server.project)}</span><span class="margo-fab-sep" aria-hidden="true"></span>`;
-          fabMain.title = `Signed in as ${me.email} · no project '${me.server.project}' exists on ${me.server.url}. Likely typo in margo.config.json.`;
+          projectSpan = `<span class="margo-fab-project margo-fab-project-denied">project not found · ${escapeHtml(me.server.project)}</span>`;
+          triggerTitle = `Signed in as ${me.email} · no project '${me.server.project}' exists on ${me.server.url}. Likely typo in margo.config.json.`;
         } else {
-          identityChunk += `<span class="margo-fab-project margo-fab-project-denied" title="${escapeHtml(me.email)} has no access to ${escapeHtml(me.server.project)}. Ask a project admin to invite you at ${escapeHtml(me.server.url)}/projects/${escapeHtml(me.server.project)}">no access · ${escapeHtml(me.server.project)}</span><span class="margo-fab-sep" aria-hidden="true"></span>`;
-          fabMain.title = `Signed in as ${me.email} · NOT a member of ${me.server.project} on ${me.server.url}`;
+          projectSpan = `<span class="margo-fab-project margo-fab-project-denied">no access · ${escapeHtml(me.server.project)}</span>`;
+          triggerTitle = `Signed in as ${me.email} · NOT a member of ${me.server.project} on ${me.server.url}`;
         }
       } else {
-        identityChunk += `<span class="margo-fab-project" title="${escapeHtml(me.server.project)} on ${escapeHtml(me.server.url)} · ${escapeHtml(me.role ?? 'access')}">${escapeHtml(me.server.project)}</span><span class="margo-fab-sep" aria-hidden="true"></span>`;
-        fabMain.title = `Signed in as ${me.email} · ${me.server.project} on ${me.server.url} (${me.role ?? 'access'})`;
+        projectSpan = `<span class="margo-fab-project">${escapeHtml(me.server.project)}</span>`;
+        triggerTitle = `Signed in as ${me.email} · ${me.server.project} on ${me.server.url} (${me.role ?? 'access'})`;
       }
     } else {
-      identityChunk += `<span class="margo-fab-sep" aria-hidden="true"></span>`;
-      fabMain.title = `Signed in as ${me.email} · local mode`;
+      triggerTitle = `Signed in as ${me.email} · local mode`;
     }
+    const identityChunk = eyeChunk
+      + `<span class="margo-fab-acct-trigger" role="button" tabindex="-1" aria-label="account" title="${escapeHtml(triggerTitle)}">${avatarSpan}${projectSpan}</span>`
+      + `<span class="margo-fab-sep" aria-hidden="true"></span>`;
+    fabMain.title = triggerTitle;
     fabMain.innerHTML = identityChunk + baseLabel;
   };
+
+
   // Initial render before /me resolves: just the bare Pin button.
   updateFabIdentity();
 
@@ -3753,19 +3763,22 @@ function injectStyles(): void {
       background: hsl(0 84% 94%); border-color: hsl(0 84% 70%);
     }
     .margo-inbox-bulk.margo-inbox-bulk-danger .margo-bulk-warn { color: hsl(0 70% 42%); }
-    /* ——— inbox toggle (sits above hide-pins) ——— */
+    /* ——— inbox toggle — visual weight matches +gap / +request so the
+       three browsing/auxiliary actions read as peers, not "inbox is a
+       lesser thing." Position set later alongside the rest of the tray
+       stack so the order lives in one place. */
     .margo-inbox-toggle {
-      position: fixed; bottom: 104px; right: 16px; z-index: 1000002;
+      position: fixed; right: 16px; z-index: 1000002;
       display: inline-flex; align-items: center; gap: 6px;
       height: 32px; padding: 0 12px;
-      background: var(--margo-bg); color: var(--margo-muted-fg);
+      background: var(--margo-bg); color: var(--margo-fg);
       border: 1px solid var(--margo-border); border-radius: 9999px;
       font: inherit; font-size: 12px; font-weight: 500;
       cursor: pointer;
       box-shadow: 0 2px 6px rgb(0 0 0 / .08);
-      transition: color .12s, background-color .12s, border-color .12s;
+      transition: background-color .12s, border-color .12s;
     }
-    .margo-inbox-toggle:hover { background: var(--margo-muted); color: var(--margo-fg); }
+    .margo-inbox-toggle:hover { background: var(--margo-muted); }
     .margo-inbox-toggle:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
     /* Eye toggle embedded into the FAB pill (handled via click delegation
        on fabMain). Styled as a discrete clickable segment that doesn't
@@ -3944,9 +3957,13 @@ function injectStyles(): void {
     /* Stack from the bottom up. Eye lives inside the FAB pill itself
        (see updateFabIdentity); only pin-creating launchers + inbox
        toggle live in the expandable tray. */
+    /* Tray stack from bottom up — semantic order: pin/gap create
+       location-anchored comments, +request creates a network-call-
+       anchored comment, inbox surfaces the existing thread list. Inbox
+       sits at the top so it reads as "review" sitting above "create." */
     .margo-launcher       { bottom: 64px;  right: 16px; }
     .margo-launcher-gap   { bottom: 112px; right: 16px; }
-    .margo-inbox-toggle   { bottom: 160px; right: 16px; }
+    .margo-inbox-toggle   { bottom: 208px; right: 16px; }
     /* ——— account popover — anchored above the FAB pill, opens when
        the user clicks the avatar chip. Holds identity recap + sign-out.
        Right-aligned to the pill so it hangs above-right where the
@@ -4008,14 +4025,24 @@ function injectStyles(): void {
     .margo-account-action:focus-visible {
       outline: 2px solid var(--margo-ring); outline-offset: -2px;
     }
-    /* Avatar chip in the FAB pill — clickable, with a hover hint that
-       hints at the affordance. The popover handles the actual surface. */
-    .margo-fab-avatar { cursor: pointer; }
-    .margo-fab-avatar:hover {
-      box-shadow: 0 0 0 2px var(--margo-ring) inset;
+    /* Identity cluster (avatar + project name) — single hit target for
+       the account popover. Wraps the avatar + project span so a click
+       anywhere on either segment opens the same surface. Subtle hover
+       background hints that this is one cohesive control, distinct
+       from the eye toggle and the Pin button on either side. */
+    .margo-fab-acct-trigger {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 3px 8px 3px 3px;
+      border-radius: 9999px;
+      cursor: pointer;
+      transition: background .14s ease;
     }
-    [data-margo-account-open] .margo-fab-avatar {
-      box-shadow: 0 0 0 2px var(--margo-ring) inset;
+    .margo-fab-acct-trigger:hover { background: hsl(0 0% 100% / .08); }
+    [data-margo-account-open] .margo-fab-acct-trigger {
+      background: hsl(0 0% 100% / .12);
+    }
+    .margo-fab-acct-trigger:focus-visible {
+      outline: 2px solid var(--margo-ring); outline-offset: 1px;
     }
     /* ——— sign-in FAB (needs-auth state) ———
        Replaces the normal pill contents; same shape so the click target

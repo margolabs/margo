@@ -300,8 +300,13 @@ function statusClass(status: number): string {
 // #margo-overlay-root for scoping, so we author bare selectors here.
 export const REQUEST_PINS_CSS = `
 .margo-launcher-request {
+  /* Sits between +gap and inbox in the tray stack — same "third action"
+     slot it always had; only the relative position vs. inbox moved
+     (inbox now sits above it so review-style actions are higher than
+     create-style ones). Keep this in sync with the .margo-launcher-*
+     positions in inject.ts. */
   position: fixed;
-  bottom: 208px;
+  bottom: 160px;
   right: 16px;
   height: 32px;
   padding: 0 12px;
