@@ -78,16 +78,29 @@ export class SyncClient extends EventTarget {
     projectExists?: boolean;
     mode?: 'local' | 'server';
     server?: { url: string; project: string };
+    needsAuth?: boolean;
   } | null> {
     try {
       const res = await fetch('/__margo/me');
       if (!res.ok) return null;
       const body = await res.json();
-      // Server may return null (both unset) or a partial { email, name: '' }
-      // when only one half of the config is missing. Either way, return
-      // exactly what we know so the boot flow can decide whether to prompt
-      // and pre-fill the half that's already set.
       if (!body) return null;
+      // Server-mode but no credential yet — the overlay drives the
+      // in-browser device flow. Return a sparse identity so the boot
+      // path can short-circuit to the login UI without falling into
+      // the "missing git config" prompt branch (which doesn't apply
+      // when the plugin itself isn't logged in to the host).
+      if (body.needsAuth === true) {
+        return {
+          email: '',
+          name: '',
+          mode: body.mode === 'server' || body.mode === 'local' ? body.mode : 'server',
+          server: body.server && typeof body.server === 'object'
+            ? { url: String(body.server.url ?? ''), project: String(body.server.project ?? '') }
+            : undefined,
+          needsAuth: true,
+        };
+      }
       const role = body.role;
       return {
         email: typeof body.email === 'string' ? body.email : '',
@@ -104,6 +117,63 @@ export class SyncClient extends EventTarget {
           : undefined,
       };
     } catch { return null; }
+  }
+
+  /** Trigger the in-browser device-login flow via the plugin proxy.
+   *  Opens the host's confirmation page in a new tab and polls the
+   *  plugin until the user authorizes — the plugin saves the credential
+   *  on success. Resolves on success, throws with a user-readable
+   *  message on failure / expiry. */
+  async signIn(opts: { onPrompt?: (verifyUrl: string) => void; pollEveryMs?: number } = {}): Promise<{ email: string; name: string }> {
+    const startRes = await fetch('/__margo/auth/start', { method: 'POST' });
+    if (!startRes.ok) {
+      const body = await safeJson(startRes);
+      throw new Error(body?.error ?? `could not start sign-in (HTTP ${startRes.status})`);
+    }
+    const { deviceCode, verifyUrl, pollInterval, expiresAt } = (await startRes.json()) as {
+      deviceCode: string;
+      verifyUrl: string;
+      pollInterval: number;
+      expiresAt: string;
+    };
+    opts.onPrompt?.(verifyUrl);
+    // Try to pop the host confirmation page in a fresh tab so the user
+    // doesn't have to copy/paste. Modern browsers will allow this only
+    // when called synchronously from a user gesture; the caller must
+    // invoke signIn() from a click handler for the window.open to land.
+    try { window.open(verifyUrl, '_blank', 'noopener'); } catch { /* popup blocked; user can still click the printed URL */ }
+    const intervalMs = Math.max(1000, (opts.pollEveryMs ?? pollInterval ?? 2) * 1000);
+    const deadlineMs = Date.parse(expiresAt) || (Date.now() + 10 * 60_000);
+    while (Date.now() < deadlineMs) {
+      await new Promise((r) => setTimeout(r, intervalMs));
+      const r = await fetch('/__margo/auth/poll', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deviceCode }),
+      });
+      if (r.status === 202) continue; // pending
+      if (r.status === 200) {
+        const body = (await r.json()) as { status?: string; user?: { email: string; name: string } };
+        if (body.status === 'authorized' && body.user) return body.user;
+        continue; // odd shape; keep polling
+      }
+      if (r.status === 410) throw new Error('sign-in expired — please try again');
+      if (r.status === 404) throw new Error('sign-in session not found — please try again');
+      // 4xx / 5xx — surface and keep polling so a transient host hiccup
+      // doesn't kill the whole flow. We'll bail when the deadline passes.
+    }
+    throw new Error('sign-in timed out — please try again');
+  }
+
+  /** Forget the credential for the host this plugin is configured
+   *  against. The bearer token remains valid server-side until revoked
+   *  in the host dashboard; this just removes it from local storage. */
+  async signOut(): Promise<void> {
+    const res = await fetch('/__margo/auth/logout', { method: 'POST' });
+    if (!res.ok) {
+      const body = await safeJson(res);
+      throw new Error(body?.error ?? `could not sign out (HTTP ${res.status})`);
+    }
   }
 
   /** Persist git user.name / user.email so subsequent operations succeed. */
@@ -164,4 +234,8 @@ export class SyncClient extends EventTarget {
       // Plugin may not be ready yet during first render.
     }
   }
+}
+
+async function safeJson(res: Response): Promise<{ error?: string } | null> {
+  try { return await res.json() as { error?: string }; } catch { return null; }
 }

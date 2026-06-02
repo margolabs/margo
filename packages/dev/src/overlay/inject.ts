@@ -95,12 +95,15 @@ export function start(opts: StartOptions): void {
   // configured project (or null when authenticated-but-not-a-member, so
   // the UI can render a clear "no access" state).
   let me: {
-    email: string;
+    email?: string;
     name?: string;
     role?: 'read' | 'write' | 'admin' | null;
     projectExists?: boolean;
     mode?: 'local' | 'server';
     server?: { url: string; project: string };
+    /** Server mode but no credential saved yet — overlay shows the
+     *  "Sign in to margo" pill that drives the in-browser device flow. */
+    needsAuth?: boolean;
   } | null = null;
   // Local repo state — drives the divergence diagnostics in expanded
   // orphan rows of the inbox.
@@ -305,6 +308,16 @@ export function start(opts: StartOptions): void {
   if (opts.mode === "dev") {
     void (async () => {
       let u = await sync.getMe();
+      // Server-mode but no credential saved — short-circuit the boot UI
+      // straight to the "Sign in to margo" affordance. Skip the git-
+      // identity prompt: the plugin can't talk to the host yet anyway,
+      // and prompting for git user.name/email would mislead the user
+      // about what's actually missing.
+      if (u?.needsAuth) {
+        me = u;
+        updateFabIdentity();
+        return;
+      }
       // Missing git config user.name / user.email is the most common cause of
       // "author api failed" surfacing later when the user clicks Pin. Catch
       // it now, prompt for setup, persist via `git config --global`, then
@@ -379,6 +392,13 @@ export function start(opts: StartOptions): void {
       updateFabIdentity();
       return;
     }
+    // Needs-sign-in short-circuit: clicking the pill IS the sign-in
+    // affordance. Must happen synchronously from this user gesture so
+    // the popup-blocker accepts the window.open inside signIn().
+    if (me?.needsAuth) {
+      void triggerSignIn();
+      return;
+    }
     // No-access short-circuit: every tray action would either 403 or
     // surface an empty inbox, so don't expand at all. The closed-FAB
     // identity strip already conveys the state, and the title tooltip
@@ -386,7 +406,65 @@ export function start(opts: StartOptions): void {
     if (root.hasAttribute("data-margo-no-access")) return;
     setFabOpen(!fabOpen);
   });
+
+  // Drive the device-login flow from a click. Disables the FAB to
+  // prevent double-clicks while the polling is in flight, then reloads
+  // the page on success so every margo component re-fetches /me cleanly
+  // and the plugin's freshly-recreated transport gets exercised end-to-
+  // end. On failure the FAB returns to its sign-in state with the error
+  // surfaced via the title tooltip.
+  let signInInflight = false;
+  const triggerSignIn = async (): Promise<void> => {
+    if (signInInflight) return;
+    signInInflight = true;
+    fabMain.classList.add('margo-fab-signing-in');
+    const previousLabel = fabMain.innerHTML;
+    fabMain.innerHTML = `<span class="margo-fab-signin-label">Waiting for browser…</span>`;
+    fabMain.title = 'Waiting for you to authorize this device in the new tab';
+    try {
+      await sync.signIn({});
+      fabMain.innerHTML = `<span class="margo-fab-signin-label">Signed in! Reloading…</span>`;
+      // Brief delay so the success state is visible — feels less abrupt
+      // than an instant reload.
+      setTimeout(() => window.location.reload(), 350);
+    } catch (err) {
+      signInInflight = false;
+      fabMain.classList.remove('margo-fab-signing-in');
+      fabMain.innerHTML = previousLabel;
+      fabMain.title = `Sign-in failed: ${(err as Error).message}`;
+      console.warn('[margo] sign-in failed:', err);
+    }
+  };
+
+  // Sign-out from the tray. Logs out locally (the bearer token stays
+  // valid server-side until the user revokes it from the dashboard).
+  // Reload after success so the FAB renders the sign-in state again
+  // without having to thread the state change through every component.
+  const triggerSignOut = async (): Promise<void> => {
+    try {
+      await sync.signOut();
+      window.location.reload();
+    } catch (err) {
+      console.warn('[margo] sign-out failed:', err);
+    }
+  };
   root.appendChild(fabMain);
+
+  // Sign-out tray item. Only meaningful in server mode after a
+  // successful sign-in; CSS keeps it hidden in local mode + the
+  // needs-auth state. Visible inside the expanded tray only — same
+  // pattern as +pin / +gap. Click logs out and reloads the page so
+  // every component re-fetches from a clean state.
+  const signOutBtn = document.createElement("button");
+  signOutBtn.type = "button";
+  signOutBtn.className = "margo-signout";
+  signOutBtn.textContent = "Sign out";
+  signOutBtn.title = "Forget the saved credential on this device. The token stays valid on the host until you revoke it in the dashboard.";
+  signOutBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void triggerSignOut();
+  });
+  root.appendChild(signOutBtn);
 
   // Re-renders the Pin FAB's innerHTML to embed the user's avatar + project
   // (server mode) or just the avatar (local mode) into the always-visible
@@ -394,6 +472,22 @@ export function start(opts: StartOptions): void {
   // me-binding code path. In preview mode we omit identity entirely — the
   // overlay is read-only there and "who's writing" doesn't apply.
   const updateFabIdentity = (): void => {
+    // Server-mode needs-auth state: the whole FAB collapses to a single
+    // "Sign in" action that triggers the in-browser device flow on
+    // click. Skip the eye toggle / tray plumbing — there are no pins
+    // to render until the plugin has a transport, and the tray would
+    // expand to empty actions anyway. We also flip a root attribute so
+    // CSS can hide the tray launchers and inbox toggle in this state.
+    root.toggleAttribute("data-margo-needs-auth", me?.needsAuth === true);
+    // Drives sign-out visibility — only meaningful in server mode with
+    // a saved credential.
+    root.toggleAttribute("data-margo-mode-server", me?.mode === 'server' && !me?.needsAuth);
+    if (me?.needsAuth) {
+      fabMain.innerHTML = `<span class="margo-fab-signin">${icon('pin', 14)}<span class="margo-fab-signin-label">Sign in to margo</span></span>`;
+      const host = me.server?.url ? ` at ${me.server.url}` : '';
+      fabMain.title = `Click to authorize this device${host} (opens a new tab).`;
+      return;
+    }
     // Eye toggle embedded in the FAB pill itself — leftmost segment, always
     // visible. Pin-creating affordances stay in the expandable tray; this
     // is the one toggle that's worth a single click. Icon swaps on state.
@@ -3746,6 +3840,59 @@ function injectStyles(): void {
     .margo-launcher       { bottom: 64px;  right: 16px; }
     .margo-launcher-gap   { bottom: 112px; right: 16px; }
     .margo-inbox-toggle   { bottom: 160px; right: 16px; }
+    /* ——— sign-out tray item — sits at the top of the tray stack,
+       styled subdued so it doesn't compete with the action buttons.
+       Hidden by default; tray-open + server-mode + authenticated
+       reveals it via the same visibility transition the launchers use. */
+    .margo-signout {
+      position: fixed; bottom: 264px; right: 16px;
+      z-index: 1000001;
+      padding: 0 12px; height: 28px;
+      border: 1px solid var(--margo-border); border-radius: 9999px;
+      background: var(--margo-bg); color: var(--margo-muted-fg);
+      font: inherit; font-size: 11px; line-height: 1;
+      cursor: pointer; white-space: nowrap;
+      visibility: hidden; opacity: 0; pointer-events: none;
+      transition: opacity .14s ease, visibility 0s linear .14s;
+    }
+    .margo-signout:hover { background: var(--margo-muted); color: var(--margo-fg); }
+    .margo-signout:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
+    [data-margo-fab-open] .margo-signout {
+      visibility: visible; opacity: 1; pointer-events: auto;
+      transition: opacity .14s ease, visibility 0s linear 0s;
+    }
+    /* Sign-out is only meaningful in server mode + signed-in. The
+       data-margo-mode-server attribute is set on root by
+       updateFabIdentity when both conditions hold. Local mode + needs-
+       auth state both leave the attribute off, which hides the button. */
+    .margo-signout { display: none; }
+    [data-margo-mode-server] .margo-signout { display: inline-flex; }
+    [data-margo-needs-auth] .margo-signout { display: none; }
+    /* ——— sign-in FAB (needs-auth state) ———
+       Replaces the normal pill contents; same shape so the click target
+       stays familiar. Slightly more saturated background to draw the
+       eye — this is the call to action. */
+    .margo-fab-signin {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-weight: 600;
+    }
+    .margo-fab-signin-label { line-height: 1; }
+    [data-margo-needs-auth] .margo-fab-main {
+      background: hsl(220 80% 56%);
+      color: white;
+      border-color: hsl(220 80% 56%);
+    }
+    [data-margo-needs-auth] .margo-fab-main:hover {
+      background: hsl(220 80% 50%);
+    }
+    /* Tray launchers + inbox toggle have no meaning in needs-auth state.
+       Belt-and-suspenders to the click handler short-circuit. */
+    [data-margo-needs-auth] .margo-launcher,
+    [data-margo-needs-auth] .margo-launcher-gap,
+    [data-margo-needs-auth] .margo-launcher-request,
+    [data-margo-needs-auth] .margo-inbox-toggle {
+      display: none;
+    }
     /* ——— inbox panel (slides in from the right) ——— */
     .margo-inbox {
       position: fixed; top: 16px; right: 16px; bottom: 16px;

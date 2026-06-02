@@ -89,6 +89,10 @@ export async function serve(opts: ServeOptions): Promise<void> {
 
   const sseClients = new Set<SseClient>();
   const created = await createTransport({ rootDir, commentsDir, config });
+  // Sidecar `margo serve` doesn't opt into allowMissingAuth — createTransport
+  // already threw with a clear "run `margo login`" message if there's no
+  // credential. Narrow here so TS knows transport is non-null below.
+  if (!created.transport) throw new Error('[margo] unreachable: transport unexpectedly null');
   const transport = created.transport;
   console.log(`[margo] storage mode: ${created.mode}${created.configPath ? ` (from ${created.configPath})` : ''}`);
 

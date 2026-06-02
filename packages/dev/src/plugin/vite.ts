@@ -13,6 +13,7 @@ import type { ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
 import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } from '../server/endpoints.js';
 import type { SseClient } from '../server/handlers.js';
+import { handleAuthLogout, handleAuthPoll, handleAuthStart, isAuthEndpoint } from '../server/auth-endpoints.js';
 import { mirrorTransportToDir } from '../storage/cache-mirror.js';
 import { createTransport } from '../storage/factory.js';
 import type { Transport } from '../storage/transport.js';
@@ -48,9 +49,13 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
   let commentsDir = '';
   let config: MargoConfig = DEFAULTS;
   const sseClients = new Set<SseClient>();
-  let transport: Transport | undefined;
+  // Mutable: starts null in server mode when no credentials are saved.
+  // After the overlay drives the device-login flow, recreateTransport()
+  // swaps in a real RemoteTransport without restarting the dev server.
+  let transport: Transport | null = null;
   let storageMode: 'local' | 'server' = 'local';
   let serverInfo: { url: string; project: string } | undefined;
+  let needsAuth = false;
 
   const ctx = (): EndpointContext => {
     if (!transport) throw new Error('[margo] transport not initialized');
@@ -94,29 +99,69 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
 
     async configureServer(server) {
       if (opts.disabled) return;
-      // Read margo.config.* and pick the right backend. Local stays the
-      // default — workspaces with no margo.config see no behavior change.
-      const created = await createTransport({ rootDir: viteRoot, commentsDir, config });
-      transport = created.transport;
-      storageMode = created.mode;
-      serverInfo = created.serverInfo;
-      console.log(`[margo] storage mode: ${created.mode}${created.configPath ? ` (from ${created.configPath})` : ''}`);
-      // Server mode: pull all comments into the local cache once on boot
-      // so AI agents (which read .margo/comments/*.md off disk) see fresh
-      // state without anyone running `npx margo pull` first. Fire and
-      // forget — the dev server boots immediately even if the host is
-      // unreachable, and a partial cache is better than a crashed plugin.
-      if (created.mode === 'server' && transport) {
-        const captured = transport;
-        void mirrorTransportToDir(captured, commentsDir)
-          .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI`))
-          .catch((err) => console.warn('[margo] initial pull failed (AI cache may be stale):', (err as Error).message));
-      }
-      // Bridge transport events into the SSE stream so connected overlays
-      // re-render on file changes / upstream divergence.
-      transport.subscribe((e) => broadcastSse(ctx(), e));
-      transport.subscribeRemoteChanges((payload) => {
-        if (payload) broadcastSse(ctx(), { type: 'remote-changes', ...payload });
+
+      // Re-runnable boot for the storage backend. Called once at startup
+      // and again whenever the overlay drives a login/logout, so the
+      // transport reflects the current credentials state without a dev-
+      // server restart.
+      const recreateTransport = async (logTransition: boolean): Promise<void> => {
+        // Tear down the old transport (if any) — drops its SSE
+        // subscription and any in-flight remote polls. New one takes
+        // over below.
+        if (transport) {
+          try { await transport.close(); } catch { /* best-effort */ }
+          transport = null;
+        }
+        const created = await createTransport({
+          rootDir: viteRoot,
+          commentsDir,
+          config,
+          // Plugins recover from missing credentials via the in-overlay
+          // device flow; we don't want createTransport to throw and crash
+          // the dev server when a teammate hasn't run `margo login` yet.
+          allowMissingAuth: true,
+        });
+        transport = created.transport;
+        storageMode = created.mode;
+        serverInfo = created.serverInfo;
+        needsAuth = created.needsAuth === true;
+        if (logTransition) {
+          if (needsAuth) {
+            console.log(`[margo] storage mode: server (needs sign-in — open the dev server in a browser to authorize)`);
+          } else {
+            console.log(`[margo] storage mode: ${created.mode}${created.configPath ? ` (from ${created.configPath})` : ''}`);
+          }
+        }
+        // Server mode: pull all comments into the local cache once after
+        // (re)-boot so AI agents (which read .margo/comments/*.md off
+        // disk) see fresh state without anyone running `npx margo pull`.
+        // Fire and forget — boot succeeds even if the host is briefly
+        // unreachable; a partial cache is better than a crashed plugin.
+        if (transport && created.mode === 'server') {
+          const captured = transport;
+          void mirrorTransportToDir(captured, commentsDir)
+            .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI`))
+            .catch((err) => console.warn('[margo] initial pull failed (AI cache may be stale):', (err as Error).message));
+        }
+        // Bridge transport events into the SSE stream so connected
+        // overlays re-render on file changes / upstream divergence.
+        if (transport) {
+          transport.subscribe((e) => broadcastSse(ctx(), e));
+          transport.subscribeRemoteChanges((payload) => {
+            if (payload) broadcastSse(ctx(), { type: 'remote-changes', ...payload });
+          });
+        }
+      };
+
+      await recreateTransport(true);
+
+      const authCtx = () => ({
+        hostUrl: serverInfo?.url,
+        project: serverInfo?.project,
+        // After login/logout, swap the transport without restarting the
+        // dev server. The overlay will reload itself; this just makes
+        // sure the new fetch lands in a working state.
+        onAuthChange: () => recreateTransport(false),
       });
 
       server.middlewares.use(async (req, res, next) => {
@@ -124,13 +169,40 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
         if (u === '/__margo/overlay.js' || u === '/__margo/overlay.js.map') {
           return serveOverlay(u, res);
         }
+        // Plugin-side device-login proxy. Always available regardless of
+        // transport state — that's the whole point: the user hits these
+        // PRECISELY when they don't have a transport yet.
+        if (isAuthEndpoint(u)) {
+          if (u === '/__margo/auth/start' && req.method === 'POST') return handleAuthStart(authCtx(), req, res);
+          if (u === '/__margo/auth/poll' && req.method === 'POST') return handleAuthPoll(authCtx(), req, res);
+          if (u === '/__margo/auth/logout' && req.method === 'POST') return handleAuthLogout(authCtx(), req, res);
+          res.writeHead(405).end('method not allowed');
+          return;
+        }
         if (!isMargoEndpoint(u)) return next();
+        // No transport yet — overlay learns from /me that it needs to
+        // sign in, and every other endpoint reports the same so the UI
+        // can render an explanatory state instead of a generic 5xx.
+        if (!transport) {
+          if (u === '/__margo/me' && req.method === 'GET') {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({
+              mode: storageMode,
+              needsAuth: true,
+              server: serverInfo,
+            }));
+            return;
+          }
+          res.writeHead(503, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'authentication required', needsAuth: true }));
+          return;
+        }
         await handleEndpoint(ctx(), req, res);
       });
 
       server.httpServer?.once('close', () => {
         void transport?.close();
-        transport = undefined;
+        transport = null;
       });
     },
 

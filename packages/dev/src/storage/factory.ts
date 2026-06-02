@@ -14,10 +14,18 @@ export interface CreateTransportOptions {
   rootDir: string
   commentsDir: string
   config: MargoConfig
+  /** When true, a server-mode workspace with no resolvable token returns
+   *  `{ transport: null, needsAuth: true }` instead of throwing. The dev
+   *  plugin sets this so the overlay can offer an in-browser login flow.
+   *  CLIs (pull/push/watch) leave it unset — they have no GUI to recover
+   *  via, so a missing token is a hard failure. */
+  allowMissingAuth?: boolean
 }
 
 export interface CreateTransportResult {
-  transport: Transport
+  /** Null only when `needsAuth === true`. Otherwise non-null in server
+   *  mode (resolved token) or LocalTransport in local mode. */
+  transport: Transport | null
   /** Which backend was selected. Surfaced so plugins can log it on boot
    *  and so future ops dashboards can tell at a glance. */
   mode: 'local' | 'server'
@@ -27,6 +35,10 @@ export interface CreateTransportResult {
    *  bearer token is intentionally omitted; only url + project flow
    *  through to consumers (e.g. surfaced to the overlay UI). */
   serverInfo?: { url: string; project: string }
+  /** True iff server mode but no resolvable token AND the caller passed
+   *  `allowMissingAuth`. Plugins use this to start in a "sign in to
+   *  margo" state and drive the device flow from the overlay. */
+  needsAuth?: boolean
 }
 
 /**
@@ -45,7 +57,7 @@ export async function createTransport(
   const mode: 'local' | 'server' = clientCfg.storage === 'server' ? 'server' : 'local'
 
   if (mode === 'server') {
-    const transport = await createRemote(clientCfg)
+    const transport = await createRemote(clientCfg, opts.allowMissingAuth === true)
     return {
       transport,
       mode: 'server',
@@ -54,6 +66,7 @@ export async function createTransport(
         url: clientCfg.server!.url,
         project: clientCfg.server!.project,
       },
+      needsAuth: transport === null,
     }
   }
   return {
@@ -67,7 +80,10 @@ export async function createTransport(
   }
 }
 
-async function createRemote(cfg: MargoClientConfig): Promise<RemoteTransport> {
+async function createRemote(
+  cfg: MargoClientConfig,
+  allowMissingAuth: boolean,
+): Promise<RemoteTransport | null> {
   const s = cfg.server
   if (!s) throw new Error("[margo] storage: 'server' requires a `server: {...}` block in margo.config")
   if (!s.url) throw new Error('[margo] server.url is required')
@@ -82,6 +98,12 @@ async function createRemote(cfg: MargoClientConfig): Promise<RemoteTransport> {
   const tokenEnv = s.auth?.tokenEnv ?? 'MARGO_TOKEN'
   const token = await resolveToken(tokenEnv, s.url)
   if (!token) {
+    if (allowMissingAuth) {
+      // Plugins drop into "needs sign-in" mode. The overlay drives the
+      // device-login flow via /__margo/auth/start and re-instantiates the
+      // transport after the user authorizes.
+      return null
+    }
     throw new Error(
       `[margo] no saved credentials for ${s.url} and ${tokenEnv} is unset — ` +
         `run \`npx margo login ${s.url}\` to authorize this device.`,
@@ -93,9 +115,13 @@ async function createRemote(cfg: MargoClientConfig): Promise<RemoteTransport> {
 /** Token-lookup chain shared by the dev plugin (here) and the
  *  margo pull/push/watch CLIs. Order: process.env (for CI / Docker dev
  *  containers / shell-exported tokens) → ~/.margo/credentials.json
- *  (populated by `margo login`). On a credentials-file hit we also push
- *  the value into process.env so downstream code paths that read
- *  env-vars directly (e.g. host verification in `margo init`) see it. */
+ *  (populated by `margo login`). Returns the resolved string, or null
+ *  when neither source has one.
+ *
+ *  Does NOT mutate process.env on a credentials-file hit: that would
+ *  outlive a logout (the file gets removed but the env var lingers),
+ *  causing the next transport-recreate to keep finding the stale token
+ *  and the user appears to "stay signed in" after clicking sign-out. */
 export async function resolveToken(
   tokenEnv: string,
   serverUrl: string,
@@ -103,9 +129,6 @@ export async function resolveToken(
   const fromEnv = process.env[tokenEnv]
   if (fromEnv) return fromEnv
   const cred = await findCredential(serverUrl)
-  if (cred && cred.token) {
-    process.env[tokenEnv] = cred.token
-    return cred.token
-  }
+  if (cred && cred.token) return cred.token
   return null
 }

@@ -84,6 +84,11 @@ async function ensureCtx(): Promise<HandlerContext> {
   }
   const sseClients = new Set<SseClient>();
   const created = await createTransport({ rootDir, commentsDir, config });
+  // Next.js plugin doesn't opt into allowMissingAuth yet — createTransport
+  // already threw with a clear "run `margo login`" message if no credential
+  // is present. Narrow so TS knows transport is non-null below.
+  // TODO: extend the same in-overlay device flow as the Vite plugin.
+  if (!created.transport) throw new Error('[margo] unreachable: transport unexpectedly null');
   const transport = created.transport;
   cachedTransport = transport;
   console.log(`[margo] storage mode: ${created.mode}${created.configPath ? ` (from ${created.configPath})` : ''}`);
