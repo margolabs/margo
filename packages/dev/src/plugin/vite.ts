@@ -241,6 +241,15 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
               type: 'module',
               'data-margo': '',
               'data-margo-mode': isDev ? 'dev' : 'preview',
+              // Surfaces the resolved storage backend to the overlay
+              // BEFORE any fetch happens. The overlay uses this to pick
+              // the right boot screen (sign-in pill vs git-identity
+              // dialog) even when /__margo/me fails entirely — a
+              // network blip or plugin hiccup must not degrade a
+              // server-mode workspace into local-mode UX. Always
+              // emitted; never sensitive (it's just 'local' or
+              // 'server').
+              'data-margo-storage': storageMode,
             },
             // The overlay bundle is built separately and copied to the package.
             // Path is relative because in dev it is served by the plugin

@@ -304,41 +304,53 @@ export function start(opts: StartOptions): void {
     }
   });
 
+  // Storage mode declared by the plugin via the bootstrap script tag —
+  // available BEFORE any fetch, so a /__margo/me failure can't degrade
+  // a server-mode workspace into the local-mode git-identity prompt.
+  // The plugin always emits this attribute in dev mode; older plugins
+  // (< 0.3.2) won't, in which case we fall through to /me-based
+  // detection (the previous behavior).
+  const declaredStorage = (() => {
+    try {
+      const el = document.querySelector('script[data-margo-storage]') as HTMLElement | null;
+      const v = el?.dataset.margoStorage;
+      return v === 'local' || v === 'server' ? v : null;
+    } catch { return null; }
+  })();
+
   sync.start();
   if (opts.mode === "dev") {
     void (async () => {
       let u = await sync.getMe();
-      // Server-mode but no credential saved — short-circuit the boot UI
-      // straight to the "Sign in to margo" affordance. Skip the git-
-      // identity prompt: the plugin can't talk to the host yet anyway,
-      // and prompting for git user.name/email would mislead the user
-      // about what's actually missing.
-      if (u?.needsAuth) {
-        me = u;
+      // Server-mode is sticky: once we know the workspace is server-
+      // configured, the only two valid boot states are "show sign-in
+      // pill" (no creds yet) and "show signed-in FAB" (have creds).
+      // The git-identity dialog only makes sense in local mode, where
+      // author identity comes from `git config user.name/email`.
+      const isServerMode = declaredStorage === 'server' || u?.mode === 'server';
+      if (isServerMode) {
+        // If /me didn't return a server-shaped payload at all (network
+        // blip, plugin not booted yet, host briefly unreachable), keep
+        // the configured server mode visible to the FAB and force the
+        // needsAuth pill — the user can always retry the sign-in. The
+        // worst alternative — silently falling into local-mode UX —
+        // would have the user reaching for `git config` to fix a
+        // problem that actually wants a token.
+        me = u && u.mode === 'server'
+          ? u
+          : { mode: 'server', needsAuth: true };
+        if (u?.needsAuth) {
+          // Optional: surface a one-line hint on first-time setup. The
+          // FAB pill already says "Sign in to margo" so the user has
+          // the affordance regardless; no banner needed.
+        }
         updateFabIdentity();
         return;
       }
-      // The git-identity dialog only makes sense in local mode — that's
-      // where the author of every comment is read from `git config
-      // user.name/email` and writing the dialog's values back uses
-      // `git config --global`. In server mode the identity is bound to
-      // the bearer token; if the host's /me returned an empty shape it
-      // means the credential's gone bad (revoked, deleted, host issue),
-      // and prompting for git config would mislead the user about
-      // what's actually wrong. Stay silent and let the FAB render the
-      // best identity it has — the next host call will either succeed
-      // or trip AuthError and flip back to the sign-in pill.
-      if (u?.mode === 'server') {
-        me = u;
-        updateFabIdentity();
-        return;
-      }
-      // Missing git config user.name / user.email is the most common cause of
-      // "author api failed" surfacing later when the user clicks Pin. Catch
-      // it now, prompt for setup, persist via `git config --global`, then
-      // continue normally. We prompt when either half is missing — the
-      // overlay attributes comments by both name and email, so a half-set
-      // identity still produces a broken-looking comment.
+      // Local mode (declared OR detected). Missing git config user.name
+      // / user.email is the most common cause of "author api failed"
+      // surfacing later when the user clicks Pin. Catch it now, prompt
+      // for setup, persist via `git config --global`, then continue.
       const incomplete = !u || !u.name || !u.email;
       if (incomplete) {
         const set = await openIdentitySetup(sync, {

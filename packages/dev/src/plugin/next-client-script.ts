@@ -37,20 +37,32 @@ function isDev(): boolean {
 // is fine for apps that don't set a strict CSP (the historical behavior).
 export interface MargoScriptProps {
   nonce?: string;
+  /** Storage backend for the workspace. When set, the overlay can pick
+   *  the right boot screen (sign-in pill vs git-identity dialog) even
+   *  when `/__margo/me` fails — a network blip or plugin restart must
+   *  not degrade a server-mode workspace into local-mode UX.
+   *  Optional only because <MargoScript /> renders in user space and
+   *  the user may not want to thread the value through. If omitted,
+   *  the overlay falls back to detecting mode from /__margo/me. */
+  storage?: 'local' | 'server';
 }
 
-export function MargoScript({ nonce }: MargoScriptProps = {}): ReactElement | null {
+export function MargoScript({ nonce, storage }: MargoScriptProps = {}): ReactElement | null {
   if (!isDev() && process.env.MARGO_ENABLED !== '1') return null;
   const mode = isDev() ? 'dev' : 'preview';
   const bootstrap = `(async () => {
     const mod = await import('/__margo/overlay.js');
     mod.start({ mode: ${JSON.stringify(mode)} });
   })().catch((err) => console.warn('[margo] failed to start overlay', err));`;
-  return createElement('script', {
+  const attrs: Record<string, unknown> = {
     type: 'module',
     nonce,
     'data-margo': '',
     'data-margo-mode': mode,
     dangerouslySetInnerHTML: { __html: bootstrap },
-  });
+  };
+  if (storage === 'local' || storage === 'server') {
+    attrs['data-margo-storage'] = storage;
+  }
+  return createElement('script', attrs);
 }
