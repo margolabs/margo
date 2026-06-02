@@ -1,6 +1,9 @@
 # margo-dev
 
-Live-app feedback layer for AI-coding teams. Designers, PMs, and devs leave comments on the running app; AI works through them. Comments live as files in your repo, synced over git — no SaaS, no separate user system, no extension to install.
+Live-app feedback layer for AI-coding teams. Designers, PMs, and devs leave comments on the running app; AI works through them. Two storage modes — both self-hosted, no SaaS:
+
+- **Local (default)** — comments as files in your repo, synced over git.
+- **Server (optional)** — comments on a self-hostable [margo-host](https://hub.docker.com/r/margolabs/margo-host) Docker container; your repo stays clean. Per-project member roster, browser sign-in from the overlay.
 
 ## Install
 
@@ -16,7 +19,26 @@ The `init` command scaffolds the runtime state — non-negotiable, this is what 
 - Creates `.margo/` **in the current directory** (config, CLAUDE.md, comments folder)
 - Wires the plugin into your build config (Vite or Next.js, auto-detected)
 
-In a monorepo, run `init` once per app you want margo on — each gets its own inbox under that app's directory. A git repo is required (margo syncs comments via git).
+In a monorepo, run `init` once per app you want margo on — each gets its own inbox under that app's directory. A git repo is required (margo syncs comments via git in local mode; in server mode the repo just needs to exist so git origin can be detected).
+
+### Server mode (optional)
+
+Skip git history for comments by pointing at a self-hostable host:
+
+```sh
+# 1. Start a host (one container, anywhere your team can reach it)
+docker run -d -p 7331:7331 -v margo-data:/data margolabs/margo-host:latest
+#    open http://<host>:7331/setup to claim first-signup-wins admin,
+#    then create your project on the dashboard.
+
+# 2. In your app's repo
+npx margo init --server http://<host>:7331 --project <slug>
+
+# 3. Run your dev server, then click "Sign in to margo" in the overlay
+npm run dev
+```
+
+The overlay's blue **Sign in to margo** pill drives a browser-based device flow; the token saves to `~/.margo/credentials.json` (gitignored, per-user). Prefer a terminal? `npx margo login <host>` does the same dance. CI / Docker dev containers can set `MARGO_TOKEN=mgo_…` directly. Sign out from the avatar popover in the overlay or `npx margo logout <host>` from a shell.
 
 ### Claude Code integration (optional)
 

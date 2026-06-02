@@ -24,6 +24,22 @@ npm run dev                     # margo overlay loads automatically
 
 Open the app, click the **📌 Pin** button at bottom-right, click any element, type a comment.
 
+### Two storage modes
+
+| | Where comments live | Setup |
+|---|---|---|
+| **Local** (default) | `.margo/comments/*.md` in your repo, synced over `git pull/push` | `npx margo init` |
+| **Server** (optional) | A self-hostable [margo-host](https://hub.docker.com/r/margolabs/margo-host) Docker container | `npx margo init --server <url> --project <slug>` |
+
+Server mode keeps your git history clean, adds a per-project member roster (read / write / admin), and lets multiple repos share one host. Spin up a host with one command:
+
+```sh
+docker run -d -p 7331:7331 -v margo-data:/data margolabs/margo-host:latest
+# open http://<host>:7331/setup — first-signup-wins admin
+```
+
+Then `npx margo init --server …` in your app's repo, run your dev server, and click the blue **Sign in to margo** pill in the overlay to authorize this device. Token saves to `~/.margo/credentials.json` — gitignored, per-user. See [packages/host](./packages/host) for source / `docker-compose.yml`.
+
 ### Claude Code integration (optional)
 
 If your team uses Claude Code, install the `/margo` skill so AI can triage and process the inbox via a slash command:
