@@ -3,8 +3,9 @@
 // case and the rest of the system treats it as `storage: 'local'`.
 //
 // TypeScript and ESM-syntax JS configs are transpiled on the fly with
-// esbuild (already a package dep) so authors get full IntelliSense via
-// the `defineConfig` helper. JSON is read directly.
+// esbuild (declared as an optional peer dependency). JSON configs need
+// nothing extra and are read directly — that's the recommended path
+// unless the user genuinely wants TS IntelliSense via defineConfig.
 
 import * as fs from 'node:fs/promises'
 import * as fsSync from 'node:fs'
@@ -14,12 +15,38 @@ import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import type { MargoClientConfig } from './types.js'
 
-// esbuild is only needed to transpile TS/ESM-js config files on the fly.
-// Lazy-imported so margo-host (which doesn't load workspace config) can run
-// without esbuild installed — keeps the runtime container ~20 MB smaller.
+// Static analyzers (Turbopack, webpack's module-resolution pre-pass,
+// some Vite plugins) walk every `import('literal')` call at build time
+// and bail if the module isn't resolvable — even when the call sits
+// behind a branch that never executes for the user's actual config.
+//
+// We can't declare esbuild as a hard runtime dep (it's ~20 MB and only
+// needed for the TS/JS config path; JSON users would pay the cost for
+// nothing). And declaring it as an optional peer doesn't help static
+// analysis — Turbopack still sees the bare import('esbuild') and 500s.
+//
+// The Function constructor takes a STRING that runtime evaluates, so
+// bundlers / static analyzers have no way to see the module name
+// inside. The cost is one extra Function compile per loader bootstrap,
+// which is invisible.
+const dynamicImport = new Function('m', 'return import(m)') as <T = unknown>(m: string) => Promise<T>
+
 async function loadEsbuildBuild(): Promise<typeof import('esbuild').build> {
-  const mod = await import('esbuild')
-  return mod.build
+  try {
+    const mod = await dynamicImport<typeof import('esbuild')>('esbuild')
+    return mod.build
+  } catch (err) {
+    const isModuleNotFound = (err as { code?: string })?.code === 'ERR_MODULE_NOT_FOUND'
+      || /Cannot find package 'esbuild'/i.test((err as Error).message ?? '')
+    if (isModuleNotFound) {
+      throw new Error(
+        '[margo] margo.config.ts / .mts / .mjs / .js / .cjs requires the optional `esbuild` peer dependency.\n'
+          + '        Install it with: npm install -D esbuild\n'
+          + '        Or switch to margo.config.json (no transpiler needed).',
+      )
+    }
+    throw err
+  }
 }
 
 const CANDIDATES = [
