@@ -15,6 +15,7 @@
 import { parseComment } from '../shared/frontmatter.js'
 import type { Comment } from '../shared/types.js'
 import {
+  AuthError,
   ConflictError,
   type ChangeEvent,
   type Identity,
@@ -146,6 +147,11 @@ export class RemoteTransport implements Transport {
 
   async getIdentity(): Promise<Identity | null> {
     const res = await this.fetch(`${this.base}/me`)
+    // 401/403 already surfaced as AuthError via the private fetch wrapper —
+    // any non-ok status here means the project endpoint reported something
+    // other than auth failure (host down, 5xx). Treat as "no identity"
+    // rather than throwing, matching how local mode handles a missing git
+    // config: returns null and lets the caller decide how to surface.
     if (!res.ok) return null
     return (await res.json()) as Identity
   }
@@ -207,10 +213,20 @@ export class RemoteTransport implements Transport {
 
   // ─── Internals ──────────────────────────────────────────────────────────
 
-  private fetch(input: string, init: RequestInit = {}): Promise<Response> {
+  private async fetch(input: string, init: RequestInit = {}): Promise<Response> {
     const headers = new Headers(init.headers ?? undefined)
     headers.set('authorization', `Bearer ${this.token}`)
-    return fetch(input, { ...init, headers })
+    const res = await fetch(input, { ...init, headers })
+    // 401/403 means the bearer token is dead — most commonly because the
+    // user revoked it from the host dashboard, or an admin booted them
+    // from the project. Surface it as a typed error so the plugin can
+    // null the transport and flip the overlay to the sign-in pill,
+    // instead of every caller silently returning empty data and the UI
+    // misreading it as "missing git config / no comments yet."
+    if (res.status === 401 || res.status === 403) {
+      throw new AuthError(res.status, `${init.method ?? 'GET'} ${stripBase(input, this.base)}`)
+    }
+    return res
   }
 
   /** Open a long-lived SSE stream against the host's events endpoint and
@@ -318,6 +334,10 @@ function isChangeEvent(v: unknown): v is ChangeEvent {
     (o.type === 'created' || o.type === 'updated' || o.type === 'deleted') &&
     typeof o.id === 'string'
   )
+}
+
+function stripBase(input: string, base: string): string {
+  return input.startsWith(base) ? input.slice(base.length) || '/' : input
 }
 
 async function asError(res: Response, op: string): Promise<Error> {

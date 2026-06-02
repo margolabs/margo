@@ -773,54 +773,144 @@ export interface CliLoginPageData {
 
 export function renderCliLogin(data: CliLoginPageData): string {
   if (!data.session) {
-    return shell('CLI authorization', `
+    return shell('Device authorization', `
       <div class="container narrow">
         <div class="brand"><span class="dot"></span> margo host</div>
-        <div class="panel">
-          <div class="cli-eyebrow">CLI authorization</div>
+        <div class="panel cli-panel">
+          <div class="cli-glyph cli-glyph-error">${svgInfo()}</div>
           <h1>Can't confirm this device</h1>
-          <p class="muted">${escapeHtml(data.errorMessage ?? 'This CLI login code is no longer valid.')}</p>
-          <div class="actions">
+          <p class="muted">${escapeHtml(data.errorMessage ?? 'This sign-in code is no longer valid.')}</p>
+          <div class="actions actions-centered">
             <a href="/dashboard" class="alt">← Back to dashboard</a>
           </div>
         </div>
       </div>
-      <style>
-        .cli-eyebrow {
-          font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
-          color: var(--accent); font-weight: 600; margin-bottom: 8px;
-        }
-      </style>
+      ${cliLoginStyles()}
     `)
   }
   const session = data.session
-  return shell('CLI authorization', `
+  return shell('Device authorization', `
     <div class="container narrow">
       <div class="brand"><span class="dot"></span> margo host</div>
-      <div class="panel">
-        <div class="cli-eyebrow">CLI authorization</div>
-        <h1>Authorize this device?</h1>
-        <p class="muted">
-          A CLI on <strong>${escapeHtml(session.label)}</strong> is
-          requesting a bearer token for your account
-          (<code>${escapeHtml(data.user.email)}</code>). Approving will
-          mint a new token tied to you — the CLI will see it once and
-          you can revoke it any time from the dashboard.
-        </p>
-        <div class="cli-code-box">
-          <div class="cli-code-label">Verification code</div>
-          <div class="cli-code-value">${escapeHtml(session.userCode)}</div>
-          <div class="cli-code-meta">Confirm this matches the code shown in your terminal.</div>
+      <div class="panel cli-panel">
+
+        <!-- Pending: the default state. Replaced wholesale (not greyed
+             out + appended-callout) on Authorize / Cancel so the page
+             always has exactly one focal point. -->
+        <div class="cli-state" id="state-pending">
+          <div class="cli-eyebrow">Device authorization</div>
+          <h1>Authorize this device?</h1>
+          <p class="muted">
+            Sign in request from <strong>${escapeHtml(session.label)}</strong>
+            on behalf of <code>${escapeHtml(data.user.email)}</code>.
+            Approving issues a new bearer token tied to your account —
+            the device sees it once and you can revoke it any time from
+            the dashboard.
+          </p>
+          <div class="cli-code-box">
+            <div class="cli-code-label">Verification code</div>
+            <div class="cli-code-value">${escapeHtml(session.userCode)}</div>
+            <div class="cli-code-meta">Confirm this matches the code shown by the requesting device.</div>
+          </div>
+          <div class="actions">
+            <button type="button" class="primary" id="authorize">Authorize device</button>
+            <button type="button" class="subtle" id="cancel">Cancel</button>
+          </div>
+          <div id="error" class="error" hidden></div>
         </div>
-        <div class="actions">
-          <button type="button" class="primary" id="authorize">Authorize device</button>
-          <button type="button" class="subtle" id="cancel">Cancel</button>
+
+        <!-- Success: the form is gone; only the confirmation remains.
+             Keeps the verification code visible so the user has a record
+             of what they approved. -->
+        <div class="cli-state cli-state-centered" id="state-success" hidden>
+          <div class="cli-glyph cli-glyph-ok">${svgCheck()}</div>
+          <h1>You're signed in</h1>
+          <p class="cli-line">
+            Signed in as <strong id="success-name">${escapeHtml(data.user.name || data.user.email)}</strong>
+            · <code>${escapeHtml(data.user.email)}</code>
+          </p>
+          <p class="muted cli-line">
+            Verified code <code class="cli-inline-code">${escapeHtml(session.userCode)}</code>.
+            You can close this tab — the requesting device will pick up the new credential automatically.
+          </p>
+          <div class="actions actions-centered">
+            <a href="/dashboard" class="alt">Open dashboard</a>
+          </div>
         </div>
-        <div id="error" class="error" style="display:none"></div>
-        <div id="ok" class="ok-banner" style="display:none"></div>
+
+        <!-- Cancelled: same shape as success but neutral, with a retry
+             affordance so a misclick isn't a dead-end. -->
+        <div class="cli-state cli-state-centered" id="state-cancelled" hidden>
+          <div class="cli-glyph cli-glyph-neutral">${svgX()}</div>
+          <h1>Cancelled</h1>
+          <p class="muted cli-line">
+            No token was issued. The requesting device's sign-in will
+            time out on its own — you can close this tab, or
+            <a href="javascript:location.reload()">try again</a>.
+          </p>
+        </div>
+
       </div>
     </div>
+    ${cliLoginStyles()}
+    <script>
+      const USER_CODE = ${JSON.stringify(session.userCode)};
+      const states = {
+        pending: document.getElementById('state-pending'),
+        success: document.getElementById('state-success'),
+        cancelled: document.getElementById('state-cancelled'),
+      };
+      const authorizeBtn = document.getElementById('authorize');
+      const cancelBtn = document.getElementById('cancel');
+      const errorBox = document.getElementById('error');
+
+      function show(which) {
+        for (const [name, el] of Object.entries(states)) {
+          el.hidden = name !== which;
+        }
+      }
+
+      authorizeBtn.addEventListener('click', async () => {
+        errorBox.hidden = true;
+        authorizeBtn.disabled = true;
+        cancelBtn.disabled = true;
+        try {
+          const res = await fetch('/api/auth/cli-login/authorize', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ userCode: USER_CODE }),
+          });
+          if (res.ok) {
+            show('success');
+            return;
+          }
+          const data = await res.json().catch(() => ({}));
+          errorBox.textContent = data.error || ('Authorize failed (' + res.status + ').');
+          errorBox.hidden = false;
+          authorizeBtn.disabled = false;
+          cancelBtn.disabled = false;
+        } catch (err) {
+          errorBox.textContent = 'Could not reach the host. Check your network and try again.';
+          errorBox.hidden = false;
+          authorizeBtn.disabled = false;
+          cancelBtn.disabled = false;
+        }
+      });
+
+      cancelBtn.addEventListener('click', () => {
+        show('cancelled');
+      });
+    </script>
+  `)
+}
+
+function cliLoginStyles(): string {
+  return `
     <style>
+      .cli-panel { padding-top: 32px; }
+      .cli-state[hidden] { display: none; }
+      .cli-state-centered { text-align: center; }
+      .cli-state-centered h1 { margin-top: 4px; }
       .cli-eyebrow {
         font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
         color: var(--accent); font-weight: 600; margin-bottom: 8px;
@@ -842,43 +932,53 @@ export function renderCliLogin(data: CliLoginPageData): string {
       .cli-code-meta {
         margin-top: 10px; font-size: 12px; color: var(--muted);
       }
+      /* Status glyph — single round badge holding an icon. Same shape
+         across success / cancelled / error so the page reads as
+         consistent state transitions, not three different layouts. */
+      .cli-glyph {
+        margin: 0 auto 18px;
+        width: 56px; height: 56px;
+        border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .cli-glyph svg { width: 28px; height: 28px; }
+      .cli-glyph-ok {
+        background: hsl(142 72% 94%);
+        color: hsl(142 72% 32%);
+      }
+      .cli-glyph-neutral {
+        background: hsl(220 14% 94%);
+        color: hsl(220 9% 42%);
+      }
+      .cli-glyph-error {
+        background: hsl(0 80% 95%);
+        color: hsl(0 70% 42%);
+      }
+      .cli-line { margin: 6px 0; }
+      .cli-line code {
+        font-family: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
+      }
+      .cli-inline-code {
+        font-family: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
+        background: var(--code-bg);
+        padding: 1px 6px; border-radius: 4px;
+        font-size: 0.92em;
+      }
+      .actions-centered { justify-content: center; }
     </style>
-    <script>
-      const USER_CODE = ${JSON.stringify(session.userCode)};
-      const authorizeBtn = document.getElementById('authorize');
-      const cancelBtn = document.getElementById('cancel');
-      const errorBox = document.getElementById('error');
-      const okBox = document.getElementById('ok');
+  `
+}
 
-      authorizeBtn.addEventListener('click', async () => {
-        errorBox.style.display = 'none';
-        authorizeBtn.disabled = true;
-        cancelBtn.disabled = true;
-        const res = await fetch('/api/auth/cli-login/authorize', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ userCode: USER_CODE }),
-        });
-        if (res.ok) {
-          okBox.textContent = 'Device authorized! You can close this tab — your CLI will complete the login.';
-          okBox.style.display = 'block';
-          return;
-        }
-        const data = await res.json().catch(() => ({}));
-        errorBox.textContent = data.error || ('Authorize failed (' + res.status + ').');
-        errorBox.style.display = 'block';
-        authorizeBtn.disabled = false;
-        cancelBtn.disabled = false;
-      });
+function svgCheck(): string {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>`
+}
 
-      cancelBtn.addEventListener('click', () => {
-        authorizeBtn.disabled = true;
-        cancelBtn.disabled = true;
-        okBox.textContent = 'Cancelled. You can close this tab — the CLI request will time out on its own.';
-        okBox.style.display = 'block';
-      });
-    </script>
-  `)
+function svgX(): string {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`
+}
+
+function svgInfo(): string {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>`
 }
 
 function formatDate(iso: string): string {

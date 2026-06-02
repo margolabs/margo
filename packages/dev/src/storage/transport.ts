@@ -27,6 +27,19 @@ export class ConflictError extends Error {
   }
 }
 
+/** Thrown by the RemoteTransport when the host rejects the bearer token
+ *  (401/403). The plugin treats it as a one-way "this credential is
+ *  dead" signal — drops the in-memory transport and flips the overlay
+ *  back to the sign-in pill so the user can re-authorize. The most
+ *  common trigger is the user revoking their token from the dashboard;
+ *  without this signal the overlay's /me request returns an empty
+ *  identity and the boot path misreads it as "missing git config." */
+export class AuthError extends Error {
+  constructor(public readonly status: 401 | 403, public readonly op: string) {
+    super(`margo remote ${op} rejected by host (HTTP ${status})`)
+  }
+}
+
 /** Identity of the current user — the author recorded on new comments and
  *  replies. Source depends on transport (git config locally, auth token
  *  remotely). `role` is only populated in server mode and reflects the

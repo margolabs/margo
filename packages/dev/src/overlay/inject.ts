@@ -318,6 +318,21 @@ export function start(opts: StartOptions): void {
         updateFabIdentity();
         return;
       }
+      // The git-identity dialog only makes sense in local mode — that's
+      // where the author of every comment is read from `git config
+      // user.name/email` and writing the dialog's values back uses
+      // `git config --global`. In server mode the identity is bound to
+      // the bearer token; if the host's /me returned an empty shape it
+      // means the credential's gone bad (revoked, deleted, host issue),
+      // and prompting for git config would mislead the user about
+      // what's actually wrong. Stay silent and let the FAB render the
+      // best identity it has — the next host call will either succeed
+      // or trip AuthError and flip back to the sign-in pill.
+      if (u?.mode === 'server') {
+        me = u;
+        updateFabIdentity();
+        return;
+      }
       // Missing git config user.name / user.email is the most common cause of
       // "author api failed" surfacing later when the user clicks Pin. Catch
       // it now, prompt for setup, persist via `git config --global`, then
@@ -392,6 +407,15 @@ export function start(opts: StartOptions): void {
       updateFabIdentity();
       return;
     }
+    // Avatar chip → account popover. Account actions (sign out, identity
+    // recap, project + role) live there instead of in the tray, matching
+    // the avatar-dropdown convention from GitHub / Slack / Figma.
+    const avatarEl = (e.target as HTMLElement | null)?.closest('.margo-fab-avatar');
+    if (avatarEl) {
+      setAccountOpen(!accountOpen);
+      setFabOpen(false); // close the action tray if it was open — same surface
+      return;
+    }
     // Needs-sign-in short-circuit: clicking the pill IS the sign-in
     // affordance. Must happen synchronously from this user gesture so
     // the popup-blocker accepts the window.open inside signIn().
@@ -405,6 +429,7 @@ export function start(opts: StartOptions): void {
     // tells the user what to do (ask a project admin to invite them).
     if (root.hasAttribute("data-margo-no-access")) return;
     setFabOpen(!fabOpen);
+    setAccountOpen(false); // mutually exclusive surfaces — only one open at a time
   });
 
   // Drive the device-login flow from a click. Disables the FAB to
@@ -450,21 +475,93 @@ export function start(opts: StartOptions): void {
   };
   root.appendChild(fabMain);
 
-  // Sign-out tray item. Only meaningful in server mode after a
-  // successful sign-in; CSS keeps it hidden in local mode + the
-  // needs-auth state. Visible inside the expanded tray only — same
-  // pattern as +pin / +gap. Click logs out and reloads the page so
-  // every component re-fetches from a clean state.
-  const signOutBtn = document.createElement("button");
-  signOutBtn.type = "button";
-  signOutBtn.className = "margo-signout";
-  signOutBtn.textContent = "Sign out";
-  signOutBtn.title = "Forget the saved credential on this device. The token stays valid on the host until you revoke it in the dashboard.";
-  signOutBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    void triggerSignOut();
+  // Account popover — anchored above the FAB pill, opens when the user
+  // clicks their avatar chip inside the pill. Holds identity (who am I,
+  // which project, what role) and account actions (sign out for now).
+  // Lives here instead of in the tray because account actions are a
+  // *different intent* from the tray's pin/gap/inbox/request stack —
+  // mixing them made the tray feel like a wall of unrelated pills.
+  // Same pattern as GitHub / Slack / Figma's avatar dropdowns.
+  const accountPopover = document.createElement("div");
+  accountPopover.className = "margo-account-popover";
+  accountPopover.setAttribute("role", "menu");
+  accountPopover.hidden = true;
+  root.appendChild(accountPopover);
+
+  let accountOpen = false;
+  const setAccountOpen = (next: boolean): void => {
+    if (next === accountOpen) return;
+    accountOpen = next;
+    accountPopover.hidden = !next;
+    root.toggleAttribute("data-margo-account-open", next);
+    if (next) renderAccountPopover();
+  };
+
+  // Re-rendered each time the popover opens so it picks up the latest
+  // me snapshot without us needing to subscribe to identity changes.
+  const renderAccountPopover = (): void => {
+    if (!me?.email) {
+      accountPopover.innerHTML = `
+        <div class="margo-account-section">
+          <div class="margo-account-line margo-account-muted">Not signed in</div>
+        </div>`;
+      return;
+    }
+    const nameLine = escapeHtml(me.name?.trim() || me.email);
+    const emailLine = me.name?.trim() ? `<div class="margo-account-sub">${escapeHtml(me.email)}</div>` : '';
+    let projectSection = '';
+    if (me.mode === 'server' && me.server) {
+      const projectName = escapeHtml(me.server.project);
+      const hostName = escapeHtml(me.server.url);
+      let roleChip: string;
+      if (me.role) {
+        roleChip = `<span class="margo-account-chip">${escapeHtml(me.role)}</span>`;
+      } else if (me.projectExists === false) {
+        roleChip = `<span class="margo-account-chip margo-account-chip-warn">not found</span>`;
+      } else {
+        roleChip = `<span class="margo-account-chip margo-account-chip-warn">no access</span>`;
+      }
+      projectSection = `
+        <div class="margo-account-divider"></div>
+        <div class="margo-account-section">
+          <div class="margo-account-label">Project</div>
+          <div class="margo-account-line">${projectName} ${roleChip}</div>
+          <div class="margo-account-sub">${hostName}</div>
+        </div>`;
+    } else {
+      projectSection = `
+        <div class="margo-account-divider"></div>
+        <div class="margo-account-section">
+          <div class="margo-account-label">Mode</div>
+          <div class="margo-account-line">Local · comments committed to git</div>
+        </div>`;
+    }
+    // Sign out only makes sense in server mode — there's nothing to
+    // sign out of in local mode (no host credential exists).
+    const signOutRow = me.mode === 'server'
+      ? `<div class="margo-account-divider"></div>
+         <button type="button" class="margo-account-action" role="menuitem" data-action="signout">
+           Sign out
+         </button>`
+      : '';
+    accountPopover.innerHTML = `
+      <div class="margo-account-section">
+        <div class="margo-account-label">Signed in as</div>
+        <div class="margo-account-line">${nameLine}</div>
+        ${emailLine}
+      </div>
+      ${projectSection}
+      ${signOutRow}`;
+  };
+
+  accountPopover.addEventListener("click", (e) => {
+    const action = (e.target as HTMLElement | null)?.closest('[data-action]')?.getAttribute('data-action');
+    if (action === 'signout') {
+      e.stopPropagation();
+      setAccountOpen(false);
+      void triggerSignOut();
+    }
   });
-  root.appendChild(signOutBtn);
 
   // Re-renders the Pin FAB's innerHTML to embed the user's avatar + project
   // (server mode) or just the avatar (local mode) into the always-visible
@@ -512,7 +609,10 @@ export function start(opts: StartOptions): void {
     // a confusing "click → error" flow. Detected via CSS attribute on
     // root; updated here so it tracks /__margo/me refreshes.
     root.toggleAttribute("data-margo-no-access", noAccess);
-    let identityChunk = eyeChunk + `<span class="margo-fab-avatar${noAccess ? " margo-fab-avatar-denied" : ""}" aria-hidden="true">${escapeHtml(initial)}</span>`;
+    // Avatar is now interactive: opens the account popover. role="button"
+    // + title make the affordance discoverable without expanding the
+    // markup; the click is handled via delegation in fabMain.
+    let identityChunk = eyeChunk + `<span class="margo-fab-avatar${noAccess ? " margo-fab-avatar-denied" : ""}" role="button" tabindex="-1" title="${escapeHtml(me.email ?? '')} — click for account" aria-label="account">${escapeHtml(initial)}</span>`;
     if (me.mode === "server" && me.server) {
       if (noAccess) {
         // Two distinct failure modes worth separating in the UI:
@@ -546,16 +646,23 @@ export function start(opts: StartOptions): void {
   // (target phase); we collapse the menu after, so the close never fights
   // with the action. Outside-click anywhere → collapse.
   document.addEventListener("click", (e) => {
-    if (!fabOpen) return;
     const t = e.target as Element | null;
     if (!t) return;
     // The main pill manages its own toggle in its click handler — nothing to
     // do here when it's the target.
-    if (fabMain.contains(t)) return;
-    setFabOpen(false);
+    const insidePill = fabMain.contains(t);
+    if (fabOpen && !insidePill) setFabOpen(false);
+    // Account popover follows the same outside-click rule, but the pill
+    // is its anchor so clicks on the pill don't dismiss it (the pill's
+    // handler decides whether to toggle vs. leave open).
+    if (accountOpen && !insidePill && !accountPopover.contains(t)) {
+      setAccountOpen(false);
+    }
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && fabOpen) setFabOpen(false);
+    if (e.key !== "Escape") return;
+    if (accountOpen) setAccountOpen(false);
+    else if (fabOpen) setFabOpen(false);
   });
 
   // Hash deep-link: `#margo=<id>` makes the overlay scroll to that pin once
@@ -3840,34 +3947,76 @@ function injectStyles(): void {
     .margo-launcher       { bottom: 64px;  right: 16px; }
     .margo-launcher-gap   { bottom: 112px; right: 16px; }
     .margo-inbox-toggle   { bottom: 160px; right: 16px; }
-    /* ——— sign-out tray item — sits at the top of the tray stack,
-       styled subdued so it doesn't compete with the action buttons.
-       Hidden by default; tray-open + server-mode + authenticated
-       reveals it via the same visibility transition the launchers use. */
-    .margo-signout {
-      position: fixed; bottom: 264px; right: 16px;
-      z-index: 1000001;
-      padding: 0 12px; height: 28px;
-      border: 1px solid var(--margo-border); border-radius: 9999px;
-      background: var(--margo-bg); color: var(--margo-muted-fg);
-      font: inherit; font-size: 11px; line-height: 1;
-      cursor: pointer; white-space: nowrap;
-      visibility: hidden; opacity: 0; pointer-events: none;
-      transition: opacity .14s ease, visibility 0s linear .14s;
+    /* ——— account popover — anchored above the FAB pill, opens when
+       the user clicks the avatar chip. Holds identity recap + sign-out.
+       Right-aligned to the pill so it hangs above-right where the
+       avatar lives. */
+    .margo-account-popover {
+      position: fixed; bottom: 60px; right: 16px;
+      z-index: 1000002;
+      width: 260px; max-width: calc(100vw - 32px);
+      background: var(--margo-bg); color: var(--margo-fg);
+      border: 1px solid var(--margo-border); border-radius: 12px;
+      box-shadow: 0 12px 40px rgb(0 0 0 / .18);
+      padding: 4px 0;
+      animation: margo-account-pop-in .12s ease-out;
     }
-    .margo-signout:hover { background: var(--margo-muted); color: var(--margo-fg); }
-    .margo-signout:focus-visible { outline: 2px solid var(--margo-ring); outline-offset: 2px; }
-    [data-margo-fab-open] .margo-signout {
-      visibility: visible; opacity: 1; pointer-events: auto;
-      transition: opacity .14s ease, visibility 0s linear 0s;
+    .margo-account-popover[hidden] { display: none; }
+    @keyframes margo-account-pop-in {
+      from { opacity: 0; transform: translateY(4px); }
+      to   { opacity: 1; transform: none; }
     }
-    /* Sign-out is only meaningful in server mode + signed-in. The
-       data-margo-mode-server attribute is set on root by
-       updateFabIdentity when both conditions hold. Local mode + needs-
-       auth state both leave the attribute off, which hides the button. */
-    .margo-signout { display: none; }
-    [data-margo-mode-server] .margo-signout { display: inline-flex; }
-    [data-margo-needs-auth] .margo-signout { display: none; }
+    .margo-account-section {
+      padding: 10px 14px;
+    }
+    .margo-account-label {
+      font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--margo-muted-fg); font-weight: 600; margin-bottom: 4px;
+    }
+    .margo-account-line {
+      font-size: 13px; color: var(--margo-fg); line-height: 1.3;
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    }
+    .margo-account-sub {
+      font-size: 11px; color: var(--margo-muted-fg); margin-top: 2px;
+      word-break: break-all;
+    }
+    .margo-account-muted { color: var(--margo-muted-fg); }
+    .margo-account-divider {
+      height: 1px; background: var(--margo-border); margin: 4px 0;
+    }
+    .margo-account-chip {
+      display: inline-flex; align-items: center;
+      padding: 1px 7px; border-radius: 9999px;
+      font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+      font-weight: 600;
+      background: hsl(220 60% 50% / .12); color: hsl(220 60% 38%);
+      border: 1px solid hsl(220 60% 50% / .22);
+    }
+    .margo-account-chip-warn {
+      background: hsl(0 70% 50% / .10); color: hsl(0 65% 42%);
+      border-color: hsl(0 70% 50% / .22);
+    }
+    .margo-account-action {
+      display: block; width: 100%; text-align: left;
+      padding: 10px 14px;
+      background: transparent; border: 0;
+      font: inherit; font-size: 13px; color: var(--margo-fg);
+      cursor: pointer;
+    }
+    .margo-account-action:hover { background: var(--margo-muted); }
+    .margo-account-action:focus-visible {
+      outline: 2px solid var(--margo-ring); outline-offset: -2px;
+    }
+    /* Avatar chip in the FAB pill — clickable, with a hover hint that
+       hints at the affordance. The popover handles the actual surface. */
+    .margo-fab-avatar { cursor: pointer; }
+    .margo-fab-avatar:hover {
+      box-shadow: 0 0 0 2px var(--margo-ring) inset;
+    }
+    [data-margo-account-open] .margo-fab-avatar {
+      box-shadow: 0 0 0 2px var(--margo-ring) inset;
+    }
     /* ——— sign-in FAB (needs-auth state) ———
        Replaces the normal pill contents; same shape so the click target
        stays familiar. Slightly more saturated background to draw the

@@ -19,6 +19,7 @@ import {
   type SseClient,
 } from './handlers.js';
 import type { CreateCommentRequest, UpdateCommentRequest } from '../shared/types.js';
+import { AuthError } from '../storage/transport.js';
 
 // Re-export handler context as the public type the plugin uses, so the rest
 // of the package keeps the existing import path.
@@ -75,6 +76,10 @@ export async function handleEndpoint(
       const payload = typeof err.payload === 'string' ? { error: err.payload } : err.payload;
       return sendJson(res, err.status, payload ?? { error: err.message });
     }
+    // Re-throw AuthError so the plugin's outer middleware can recognize
+    // it as "bearer token went dead" and flip back to needsAuth. Catching
+    // it here would swallow the signal and surface a generic 500 instead.
+    if (err instanceof AuthError) throw err;
     sendJson(res, 500, { error: (err as Error).message });
   }
 }

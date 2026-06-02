@@ -16,7 +16,7 @@ import type { SseClient } from '../server/handlers.js';
 import { handleAuthLogout, handleAuthPoll, handleAuthStart, isAuthEndpoint } from '../server/auth-endpoints.js';
 import { mirrorTransportToDir } from '../storage/cache-mirror.js';
 import { createTransport } from '../storage/factory.js';
-import type { Transport } from '../storage/transport.js';
+import { AuthError, type Transport } from '../storage/transport.js';
 import type { MargoConfig } from '../shared/types.js';
 
 const PLUGIN_DIR = path.dirname(url.fileURLToPath(import.meta.url));
@@ -180,10 +180,12 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
           return;
         }
         if (!isMargoEndpoint(u)) return next();
-        // No transport yet — overlay learns from /me that it needs to
-        // sign in, and every other endpoint reports the same so the UI
-        // can render an explanatory state instead of a generic 5xx.
-        if (!transport) {
+
+        // Centralized "no transport → needsAuth payload" response so the
+        // boot path and the post-revoke recovery path produce identical
+        // shapes. The overlay then has one rule: needsAuth → sign-in
+        // pill, never the git-identity dialog.
+        const respondNeedsAuth = (): void => {
           if (u === '/__margo/me' && req.method === 'GET') {
             res.writeHead(200, { 'content-type': 'application/json' });
             res.end(JSON.stringify({
@@ -195,9 +197,28 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
           }
           res.writeHead(503, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ error: 'authentication required', needsAuth: true }));
-          return;
+        };
+
+        if (!transport) return respondNeedsAuth();
+
+        try {
+          await handleEndpoint(ctx(), req, res);
+        } catch (err) {
+          if (err instanceof AuthError) {
+            // The bearer token went dead mid-session — typically the user
+            // revoked it from the host dashboard. Drop the in-memory
+            // transport so subsequent requests render the sign-in pill
+            // instead of looping on the same dead token.
+            console.warn(`[margo] host rejected bearer token (${err.message}); dropping transport, sign-in required.`);
+            try { await transport.close(); } catch { /* best-effort */ }
+            transport = null;
+            // Headers may already be partially written by handleEndpoint —
+            // only write the recovery response if nothing's been sent yet.
+            if (!res.headersSent) respondNeedsAuth();
+            return;
+          }
+          throw err;
         }
-        await handleEndpoint(ctx(), req, res);
       });
 
       server.httpServer?.once('close', () => {
