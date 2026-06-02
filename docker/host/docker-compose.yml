@@ -17,7 +17,7 @@ services:
     # Published image — `docker compose up -d` pulls and runs. Contributors
     # rebuild from local source by passing `--build` to compose; the build
     # block below is preserved for that case.
-    image: margolabs/margo-host:0.4.0
+    image: margolabs/margo-host:0.4.1
     build:
       # Build context is packages/host/ (see Dockerfile header).
       context: ../../packages/host

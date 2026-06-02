@@ -1,13 +1,13 @@
 {
   "name": "margo-dev",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Live-app feedback layer for AI-coding teams. Comments live as files in your repo; AI works through them.",
   "author": "Stanley Song <sxhuan@gmail.com>",
   "homepage": "https://github.com/margolabs/margo#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/margolabs/margo.git",
-    "directory": "package"
+    "directory": "packages/dev"
   },
   "bugs": {
     "url": "https://github.com/margolabs/margo/issues"

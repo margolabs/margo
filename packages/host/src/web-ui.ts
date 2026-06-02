@@ -277,6 +277,93 @@ const SHARED_CSS = `
        height as the input + button in the form row. */
     width: auto; min-width: 110px;
   }
+  /* ─── Connect (project → workspace wiring guide) ──────────────────── */
+  .connect-steps {
+    display: flex; flex-direction: column; gap: 20px;
+    margin: 16px 0 0;
+  }
+  .connect-step {
+    display: grid; grid-template-columns: 32px 1fr; gap: 14px;
+    align-items: start;
+  }
+  .connect-step-num {
+    width: 28px; height: 28px; border-radius: 9999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 600; font-size: 13px;
+    border: 1px solid rgba(37, 99, 235, 0.22);
+  }
+  .connect-step-body {
+    display: flex; flex-direction: column; gap: 8px;
+    min-width: 0; /* let <pre>s overflow gracefully */
+  }
+  .connect-step-title {
+    font-size: 14px; font-weight: 600; color: var(--fg-strong);
+    margin: 2px 0 2px;
+  }
+  .connect-block {
+    position: relative;
+    border: 1px solid var(--border); border-radius: var(--radius-md);
+    background: var(--code-bg);
+    padding: 12px 14px;
+  }
+  .connect-block pre {
+    margin: 0;
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
+    font-size: 12.5px; line-height: 1.55;
+    color: var(--fg-strong);
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .connect-block pre code { background: transparent; padding: 0; }
+  .connect-block-label {
+    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .connect-copy {
+    position: absolute; top: 8px; right: 8px;
+    height: 24px; padding: 0 10px;
+    background: var(--bg); color: var(--muted-strong);
+    border: 1px solid var(--border); border-radius: 6px;
+    font: inherit; font-size: 11px; font-weight: 500;
+    cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .connect-copy:hover { background: var(--accent-soft); color: var(--accent); border-color: rgba(37, 99, 235, 0.3); }
+  .connect-copy.connect-copy-ok {
+    background: hsl(142 72% 94%); color: hsl(142 72% 32%); border-color: hsl(142 60% 70%);
+  }
+  .connect-or {
+    font-size: 12px; color: var(--muted);
+    padding: 4px 0 0; margin: 0;
+  }
+  .connect-host { color: var(--accent); font-weight: 500; }
+  /* Optional CLI sign-in path — collapsed by default so it doesn't
+     compete with the recommended in-overlay sign-in flow. */
+  .connect-fallback {
+    margin: 16px 0 0;
+    padding: 12px 14px;
+    border: 1px solid var(--border); border-radius: var(--radius-md);
+    background: var(--bg);
+  }
+  .connect-fallback > summary {
+    cursor: pointer;
+    font-size: 13px; font-weight: 500;
+    color: var(--muted-strong);
+    list-style: none;
+  }
+  .connect-fallback > summary::-webkit-details-marker { display: none; }
+  .connect-fallback > summary::before {
+    content: '▸';
+    display: inline-block; margin-right: 6px;
+    color: var(--muted);
+    transition: transform .12s ease;
+  }
+  .connect-fallback[open] > summary::before { transform: rotate(90deg); }
+  .connect-fallback > summary:hover { color: var(--fg-strong); }
+  .connect-fallback p { margin: 10px 0 8px; }
+  .connect-fallback .connect-block { margin-top: 6px; }
 `
 
 function shell(title: string, body: string): string {
@@ -701,7 +788,71 @@ export function renderProject(data: ProjectPageData): string {
         <code>${escapeHtml(data.project.slug)}</code> · created ${formatDate(data.project.createdAt)}
       </p>
 
-      <h2 style="margin-top:40px">Members</h2>
+      <h2 style="margin-top:44px">Connect</h2>
+      <h1>Wire this project into your app</h1>
+      <p class="muted">
+        Drop a <code>margo.config.json</code> into your app's repo so the margo dev plugin
+        knows where to send pins and comments. After that, sign-in happens in the browser
+        from the overlay itself — no extra terminal step.
+      </p>
+
+      <div class="connect-steps">
+        <div class="connect-step">
+          <div class="connect-step-num">1</div>
+          <div class="connect-step-body">
+            <div class="connect-step-title">Scaffold the config in your app's repo</div>
+            <div class="connect-block">
+              <div class="connect-block-label">One-liner</div>
+              <button type="button" class="connect-copy" data-copy="cmd-init">Copy</button>
+<pre id="cmd-init"><code>npx margo init --server <span class="connect-host">…</span> --project ${escapeHtml(data.project.slug)}</code></pre>
+            </div>
+            <div class="connect-or">or paste this into the repo root as <code>margo.config.json</code></div>
+            <div class="connect-block">
+              <div class="connect-block-label">margo.config.json</div>
+              <button type="button" class="connect-copy" data-copy="cfg-json">Copy</button>
+<pre id="cfg-json"><code>{
+  "storage": "server",
+  "server": {
+    "url": "<span class="connect-host">…</span>",
+    "project": "${escapeHtml(data.project.slug)}"
+  }
+}</code></pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="connect-step">
+          <div class="connect-step-num">2</div>
+          <div class="connect-step-body">
+            <div class="connect-step-title">Open your app and sign in</div>
+            <p class="muted">
+              Run your dev server as usual (<code>npm run dev</code>) and open the page. The
+              margo overlay shows a blue <strong>Sign in to margo</strong> pill in the bottom-right
+              corner — click it. A browser tab opens here, you click <strong>Authorize device</strong>,
+              and you're done. The token's saved to <code>~/.margo/credentials.json</code> on your
+              machine; the plugin picks it up automatically.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <details class="connect-fallback">
+        <summary>Prefer the terminal? Sign in from the CLI.</summary>
+        <p class="muted">
+          For CI, headless dev containers, or anyone who'd rather not click through the browser:
+        </p>
+        <div class="connect-block">
+          <button type="button" class="connect-copy" data-copy="cmd-login">Copy</button>
+<pre id="cmd-login"><code>npx margo login <span class="connect-host">…</span></code></pre>
+        </div>
+        <p class="muted">
+          Opens the same authorize page in your browser. To skip the browser entirely, paste a
+          token from <a href="/dashboard">your tokens page</a> with
+          <code>--token mgo_…</code>.
+        </p>
+      </details>
+
+      <h2 style="margin-top:48px">Members</h2>
       <div class="member-grid" id="members">${memberRows}</div>
 
       ${manageBlock}
@@ -709,6 +860,30 @@ export function renderProject(data: ProjectPageData): string {
 
     <script>
       const PROJECT_SLUG = ${JSON.stringify(data.project.slug)};
+
+      // Connect snippets — fill in the real host URL from the address bar
+      // so localhost / prod / reverse-proxied hosts all show the URL the
+      // user just hit this page on. No server-side change needed.
+      document.querySelectorAll('.connect-host').forEach((el) => {
+        el.textContent = location.origin;
+      });
+      // Copy-to-clipboard on each snippet block.
+      document.querySelectorAll('.connect-copy').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const targetId = btn.getAttribute('data-copy');
+          const target = targetId ? document.getElementById(targetId) : null;
+          if (!target) return;
+          try {
+            await navigator.clipboard.writeText(target.innerText);
+            const prev = btn.textContent;
+            btn.textContent = 'Copied';
+            btn.classList.add('connect-copy-ok');
+            setTimeout(() => { btn.textContent = prev; btn.classList.remove('connect-copy-ok'); }, 1200);
+          } catch (err) {
+            console.warn('[margo host] clipboard write failed', err);
+          }
+        });
+      });
 
       ${data.canManage ? `
         const inviteErr = document.getElementById('invite-error');
