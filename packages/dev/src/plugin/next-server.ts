@@ -125,6 +125,31 @@ async function ensureCtx(): Promise<HandlerContext> {
   transport.subscribeRemoteChanges((payload) => {
     if (payload) broadcastSse(cachedCtx!, { type: 'remote-changes', ...payload });
   });
+  // Server mode only: mirror every host-side change to the local
+  // `.margo/comments/` directory so AI agents reading the disk see
+  // fresh state without a dev-server restart. mirrorTransportToDir
+  // above only ran at boot — without this listener, a pin created via
+  // the overlay would land on the host but never hit disk and Claude
+  // would see stale comments. Same liveness `margo watch` provides,
+  // baked into the plugin.
+  if (created.mode === 'server') {
+    const captured = transport;
+    transport.subscribe(async (ev) => {
+      try {
+        const file = path.join(commentsDir, `${ev.id}.md`);
+        if (ev.type === 'deleted') {
+          await fsp.unlink(file).catch(() => undefined);
+          return;
+        }
+        const fresh = await captured.read(ev.id);
+        if (!fresh) return; // raced with a delete
+        await fsp.mkdir(commentsDir, { recursive: true });
+        await fsp.writeFile(file, fresh.raw, 'utf8');
+      } catch (err) {
+        console.warn(`[margo] failed to mirror ${ev.id} to .margo/comments/:`, (err as Error).message);
+      }
+    });
+  }
   // Process exit cleans up the transport; Next.js dev server doesn't tell us
   // when it shuts down per-route, so we lean on process lifecycle.
   process.once('exit', () => {

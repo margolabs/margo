@@ -150,6 +150,38 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
           transport.subscribeRemoteChanges((payload) => {
             if (payload) broadcastSse(ctx(), { type: 'remote-changes', ...payload });
           });
+          // Server mode only: also mirror every host-side change to the
+          // local `.margo/comments/` directory so AI agents reading the
+          // disk see fresh state without a dev-server restart. Without
+          // this, `mirrorTransportToDir` above only ran at boot — a pin
+          // created via the overlay would land on the host but never
+          // hit disk, and Claude would see stale comments. This is the
+          // same liveness the `margo watch` CLI provides, baked into
+          // the plugin so users don't have to run a second process.
+          if (created.mode === 'server') {
+            const captured = transport;
+            transport.subscribe(async (ev) => {
+              try {
+                const file = path.join(commentsDir, `${ev.id}.md`);
+                if (ev.type === 'deleted') {
+                  await fsp.unlink(file).catch(() => undefined);
+                  return;
+                }
+                // 'created' / 'updated' — read the canonical content
+                // back from the host so what lands on disk is byte-
+                // identical to what other teammates see.
+                const fresh = await captured.read(ev.id);
+                if (!fresh) return; // raced with a delete
+                await fsp.mkdir(commentsDir, { recursive: true });
+                await fsp.writeFile(file, fresh.raw, 'utf8');
+              } catch (err) {
+                // Don't crash the plugin on a transient mirror failure
+                // — the next event (or a dev-server restart) will
+                // recover. Warn so the operator sees it.
+                console.warn(`[margo] failed to mirror ${ev.id} to .margo/comments/:`, (err as Error).message);
+              }
+            });
+          }
         }
       };
 
