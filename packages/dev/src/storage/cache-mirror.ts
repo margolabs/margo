@@ -25,10 +25,17 @@ export interface MirrorResult {
  * round-trip is byte-for-byte stable because we persist `c.raw`. Local-
  * only files (orphans) are preserved by default so AI work-in-progress
  * doesn't get silently nuked; the caller can act on the returned list.
+ *
+ * `onWillWrite` fires synchronously BEFORE each file write. The plugin
+ * uses it to register expected-hashes with its CacheWatcher so chokidar
+ * doesn't see the boot pull's writes as "local edits to push to host"
+ * — without it we'd loop the host's own data right back through the
+ * outbox.
  */
 export async function mirrorTransportToDir(
   transport: Transport,
   commentsDir: string,
+  onWillWrite?: (id: string, raw: string) => void,
 ): Promise<MirrorResult> {
   const comments = await transport.list()
   await fs.mkdir(commentsDir, { recursive: true })
@@ -37,6 +44,7 @@ export async function mirrorTransportToDir(
     const id = c.frontmatter.id
     expected.add(`${id}.md`)
     const file = path.join(commentsDir, `${id}.md`)
+    onWillWrite?.(id, c.raw)
     await fs.writeFile(file, c.raw, 'utf8')
   }
   let localFiles: string[] = []

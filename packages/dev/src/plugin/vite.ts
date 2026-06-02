@@ -15,7 +15,9 @@ import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } f
 import type { SseClient } from '../server/handlers.js';
 import { handleAuthLogout, handleAuthPoll, handleAuthStart, isAuthEndpoint } from '../server/auth-endpoints.js';
 import { mirrorTransportToDir } from '../storage/cache-mirror.js';
+import { CacheWatcher } from '../storage/cache-watcher.js';
 import { createTransport } from '../storage/factory.js';
+import type { RemoteTransport } from '../storage/remote-transport.js';
 import { AuthError, type Transport } from '../storage/transport.js';
 import type { MargoConfig } from '../shared/types.js';
 
@@ -57,6 +59,11 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
   let storageMode: 'standalone' | 'server' = 'standalone';
   let serverInfo: { host: string; project: string } | undefined;
   let needsAuth = false;
+  // Server-mode only: watches the cache directory and pushes any local
+  // edit (overlay, AI, manual) up to the host through the same offline-
+  // tolerant transport.write path. Lives outside recreateTransport so
+  // the close handler can tear it down on dev-server shutdown.
+  let cacheWatcher: CacheWatcher | null = null;
 
   const ctx = (): EndpointContext => {
     if (!transport) throw new Error('[margo] transport not initialized');
@@ -107,6 +114,13 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
           try { await transport.close(); } catch { /* best-effort */ }
           transport = null;
         }
+        // Drop the existing cache watcher so it doesn't keep talking to
+        // a dead transport. A new one is constructed below when the
+        // fresh transport boots into server mode.
+        if (cacheWatcher) {
+          try { await cacheWatcher.stop(); } catch { /* best-effort */ }
+          cacheWatcher = null;
+        }
         const created = await createTransport({
           rootDir: viteRoot,
           // Plugins recover from missing credentials via the in-overlay
@@ -131,12 +145,6 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
         // see fresh state without anyone running `npx margo pull`. Fire
         // and forget — boot succeeds even if the host is briefly
         // unreachable; a partial cache is better than a crashed plugin.
-        if (transport && created.mode === 'server') {
-          const captured = transport;
-          void mirrorTransportToDir(captured, commentsDir)
-            .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI at ${commentsDir}`))
-            .catch((err) => console.warn('[margo] initial pull failed (AI cache may be stale):', (err as Error).message));
-        }
         // Bridge transport events into the SSE stream so connected
         // overlays re-render on file changes / upstream divergence.
         if (transport) {
@@ -144,20 +152,37 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
           transport.subscribeRemoteChanges((payload) => {
             if (payload) broadcastSse(ctx(), { type: 'remote-changes', ...payload });
           });
-          // Server mode only: also mirror every host-side change to the
-          // local `.margo/comments/` directory so AI agents reading the
-          // disk see fresh state without a dev-server restart. Without
-          // this, `mirrorTransportToDir` above only ran at boot — a pin
-          // created via the overlay would land on the host but never
-          // hit disk, and Claude would see stale comments. This is the
-          // same liveness the `margo watch` CLI provides, baked into
-          // the plugin so users don't have to run a second process.
+          // Server mode only: bidirectional sync between the cache
+          // directory and the host. Three halves:
+          //   - Boot pull seeds the cache with the host's current state
+          //   - SSE subscriber mirrors host → disk for subsequent updates
+          //   - CacheWatcher (chokidar) mirrors disk → host for local
+          //     edits (overlay POSTs, AI direct edits, manual edits)
+          // The echo-loop guard is the shared expected-hash set on
+          // CacheWatcher: every time something writes to the cache
+          // (boot pull or SSE subscriber), it registers the content
+          // hash so the chokidar 'change' event we're about to receive
+          // doesn't push the same content back to the host. Same
+          // pattern as the `margo watch` CLI.
           if (created.mode === 'server') {
             const captured = transport;
+            const watcher = new CacheWatcher({
+              commentsDir,
+              transport: captured as RemoteTransport,
+            });
+            cacheWatcher = watcher;
+            // Start the watcher BEFORE the boot pull so its
+            // expected-hash registrations are in place before chokidar
+            // sees the pull's writes.
+            watcher.start();
+            void mirrorTransportToDir(captured, commentsDir, (id, raw) => watcher.registerExpectedWrite(id, raw))
+              .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI at ${commentsDir}`))
+              .catch((err) => console.warn('[margo] initial pull failed (AI cache may be stale):', (err as Error).message));
             transport.subscribe(async (ev) => {
               try {
                 const file = path.join(commentsDir, `${ev.id}.md`);
                 if (ev.type === 'deleted') {
+                  watcher.registerExpectedDelete(ev.id);
                   await fsp.unlink(file).catch(() => undefined);
                   return;
                 }
@@ -166,13 +191,14 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
                 // identical to what other teammates see.
                 const fresh = await captured.read(ev.id);
                 if (!fresh) return; // raced with a delete
+                watcher.registerExpectedWrite(ev.id, fresh.raw);
                 await fsp.mkdir(commentsDir, { recursive: true });
                 await fsp.writeFile(file, fresh.raw, 'utf8');
               } catch (err) {
                 // Don't crash the plugin on a transient mirror failure
                 // — the next event (or a dev-server restart) will
                 // recover. Warn so the operator sees it.
-                console.warn(`[margo] failed to mirror ${ev.id} to .margo/comments/:`, (err as Error).message);
+                console.warn(`[margo] failed to mirror ${ev.id} to cache:`, (err as Error).message);
               }
             });
           }
@@ -277,6 +303,8 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
           clearInterval(drainTimer);
           drainTimer = null;
         }
+        void cacheWatcher?.stop();
+        cacheWatcher = null;
         void transport?.close();
         transport = null;
       });

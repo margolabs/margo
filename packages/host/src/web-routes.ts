@@ -7,12 +7,36 @@
 // other auth lane and stays unchanged.
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { appendReply, serializeComment } from './shared/frontmatter.js'
+import type { CommentStatus } from './shared/types.js'
 import { issueSessionCookie, clearSessionCookie, readSession, setCookieHeader } from './session.js'
-import { renderCliLogin, renderDashboard, renderLogin, renderProject, renderSetup, renderSignup, type CliLoginPageData, type DashboardData } from './web-ui.js'
+import {
+  renderCliLogin,
+  renderDashboard,
+  renderLogin,
+  renderProject,
+  renderProjectComments,
+  renderProjectCommentDetail,
+  renderSetup,
+  renderSignup,
+  type CliLoginPageData,
+  type DashboardData,
+} from './web-ui.js'
+import type { ProjectStore } from './store.js'
 import type { Role, UserRecord, UserStore } from './user-store.js'
 
 export interface WebContext {
   users: UserStore
+  /** Comment storage — used by the portal's comments-management routes
+   *  to read, mutate status, append replies, and delete. The bearer-auth
+   *  /api/projects/:project/comments path (used by the dev plugin) also
+   *  hits this store, just through the routes.ts dispatcher. */
+  store: ProjectStore
+  /** SSE broadcast helper — shared with the bearer-auth lane so portal-
+   *  side mutations fan out to every connected overlay just like API
+   *  writes do. Without this, a portal user changing a comment's status
+   *  would only be visible after the next dev-server boot. */
+  broadcast: (project: string, payload: unknown) => void
   /** Resolved per request — null on first call, lazily populated when
    *  any web route needs to sign or verify a cookie. */
   sessionSecret: () => Promise<string>
@@ -116,6 +140,45 @@ export async function handleWebRoute(
     if (req.method === 'DELETE') return handleRemoveMember(ctx, req, res, slug, memberUserId)
     if (req.method === 'PATCH') return handleChangeMemberRole(ctx, req, res, slug, memberUserId)
   }
+
+  // ─── Comments portal ──────────────────────────────────────────────
+  // Session-authed surface for browsing + managing comments. Bearer-auth
+  // dev-plugin path under /api/projects/:slug/comments lives in routes.ts
+  // and is unchanged.
+  const commentsListPageMatch = /^\/projects\/([a-zA-Z0-9._-]+)\/comments$/.exec(path)
+  if (commentsListPageMatch && req.method === 'GET') {
+    return handleProjectCommentsPage(ctx, req, res, commentsListPageMatch[1], url)
+  }
+  const commentDetailPageMatch = /^\/projects\/([a-zA-Z0-9._-]+)\/comments\/([a-zA-Z0-9._-]+)$/.exec(path)
+  if (commentDetailPageMatch && req.method === 'GET') {
+    return handleProjectCommentDetailPage(ctx, req, res, commentDetailPageMatch[1], commentDetailPageMatch[2])
+  }
+  const statusActionMatch = /^\/api\/projects\/([a-zA-Z0-9._-]+)\/comments\/([a-zA-Z0-9._-]+)\/status$/.exec(path)
+  if (statusActionMatch && req.method === 'POST') {
+    return handleCommentStatusUpdate(ctx, req, res, statusActionMatch[1], statusActionMatch[2])
+  }
+  const replyActionMatch = /^\/api\/projects\/([a-zA-Z0-9._-]+)\/comments\/([a-zA-Z0-9._-]+)\/reply$/.exec(path)
+  if (replyActionMatch && req.method === 'POST') {
+    return handleCommentReply(ctx, req, res, replyActionMatch[1], replyActionMatch[2])
+  }
+  const deleteActionMatch = /^\/api\/portal\/projects\/([a-zA-Z0-9._-]+)\/comments\/([a-zA-Z0-9._-]+)$/.exec(path)
+  if (deleteActionMatch && req.method === 'DELETE') {
+    return handleCommentDelete(ctx, req, res, deleteActionMatch[1], deleteActionMatch[2])
+  }
+  // Also accept DELETE on the public path when a session cookie is
+  // present — easier on the JS in the detail page (no path branching).
+  // The bearer-auth lane in routes.ts only triggers when there's no
+  // session cookie, so this doesn't collide.
+  const directDeleteMatch = /^\/api\/projects\/([a-zA-Z0-9._-]+)\/comments\/([a-zA-Z0-9._-]+)$/.exec(path)
+  if (directDeleteMatch && req.method === 'DELETE') {
+    // Probe for a session cookie before claiming this route — if there
+    // isn't one, fall through to the bearer-auth lane in routes.ts.
+    const session = await readSession(req, await ctx.sessionSecret())
+    if (session) {
+      return handleCommentDelete(ctx, req, res, directDeleteMatch[1], directDeleteMatch[2])
+    }
+  }
+
   return false
 }
 
@@ -511,6 +574,338 @@ async function handleProjectPage(
     canManage,
     members: hydrated,
   }))
+}
+
+// ─── Comments portal ──────────────────────────────────────────────────
+
+const VALID_STATUSES: readonly CommentStatus[] = [
+  'open', 'in-progress', 'ready-for-review', 'blocked', 'resolved', 'wontfix',
+] as const
+
+async function ensurePortalAccess(
+  ctx: WebContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  slug: string,
+  required: 'read' | 'write' | 'admin',
+): Promise<{ user: UserRecord; myRole: string; canWrite: boolean; canDelete: boolean } | null> {
+  const user = await currentUser(ctx, req)
+  if (!user) {
+    sendJson(res, 401, { error: 'not logged in' })
+    return null
+  }
+  const project = await ctx.users.getProject(slug)
+  if (!project) {
+    sendJson(res, 404, { error: 'project not found' })
+    return null
+  }
+  const membership = await ctx.users.getMembership(user.id, slug)
+  const role = membership?.role ?? (user.isSuperuser ? 'admin' : null)
+  if (!role) {
+    sendJson(res, 403, { error: 'not a member of this project' })
+    return null
+  }
+  // Role hierarchy: admin > write > read. Superuser bypasses.
+  const rank: Record<string, number> = { read: 1, write: 2, admin: 3 }
+  if (rank[role] < rank[required]) {
+    sendJson(res, 403, { error: `requires ${required} role on this project` })
+    return null
+  }
+  return {
+    user,
+    myRole: role,
+    canWrite: rank[role] >= rank.write,
+    canDelete: rank[role] >= rank.admin,
+  }
+}
+
+async function handleProjectCommentsPage(
+  ctx: WebContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  slug: string,
+  url: string,
+): Promise<boolean> {
+  const user = await currentUser(ctx, req)
+  if (!user) {
+    res.writeHead(302, { location: '/login' }).end()
+    return true
+  }
+  const project = await ctx.users.getProject(slug)
+  if (!project) {
+    res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' })
+      .end('<p style="font-family:sans-serif; padding:40px">No such project. <a href="/dashboard">Back to dashboard</a>.</p>')
+    return true
+  }
+  const myMembership = await ctx.users.getMembership(user.id, slug)
+  if (!myMembership && !user.isSuperuser) {
+    res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' })
+      .end('<p style="font-family:sans-serif; padding:40px">You are not a member of this project. Ask a project admin to add you.</p>')
+    return true
+  }
+  const myRole = myMembership?.role ?? (user.isSuperuser ? 'admin' : 'read')
+  const canWrite = myRole === 'write' || myRole === 'admin'
+  const canDelete = myRole === 'admin'
+
+  // Parse query for filters. Defaults: status=open, type=all, q=empty.
+  // The list page re-renders on every filter change as a GET — no JS,
+  // matches the rest of the portal's progressive-enhancement pattern.
+  const statusFilter = parseQueryParam(url, 'status') ?? 'open'
+  const typeFilter = parseQueryParam(url, 'type') ?? 'all'
+  const q = (parseQueryParam(url, 'q') ?? '').toLowerCase()
+
+  // Load every comment up front — projects in the wild have at most a
+  // few hundred. Pagination is a problem we'll solve when it shows up.
+  const all = await ctx.store.list(slug)
+  const counts: Record<string, number> = {}
+  for (const c of all) {
+    const s = c.frontmatter.status
+    counts[s] = (counts[s] ?? 0) + 1
+  }
+
+  const filtered = all.filter((c) => {
+    const fm = c.frontmatter
+    if (statusFilter !== 'all' && fm.status !== statusFilter) return false
+    if (typeFilter !== 'all' && fm.type !== typeFilter) return false
+    if (q) {
+      const hay = `${c.body} ${fm.id} ${fm.author} ${fm.authorName ?? ''}`.toLowerCase()
+      if (!hay.includes(q)) return false
+    }
+    return true
+  })
+
+  // Newest first by creation timestamp — matches what the overlay's
+  // inbox does by default.
+  filtered.sort((a, b) => (b.frontmatter.created ?? '').localeCompare(a.frontmatter.created ?? ''))
+
+  return sendHtml(res, 200, renderProjectComments({
+    user: { id: user.id, email: user.email, name: user.name, isSuperuser: !!user.isSuperuser },
+    project: { slug: project.slug, name: project.name },
+    myRole,
+    canWrite,
+    canDelete,
+    counts,
+    filter: { status: statusFilter, type: typeFilter, q: parseQueryParam(url, 'q') ?? '' },
+    comments: filtered.map((c) => {
+      const fm = c.frontmatter
+      // Strip reply blocks (lines after the first `---` divider) so the
+      // excerpt shows the original comment, not the last reply.
+      const original = stripReplyTail(c.body)
+      const excerpt = original.replace(/\s+/g, ' ').trim().slice(0, 240)
+      const targetUrl = (fm.target as { url?: string; pageUrl?: string })?.url
+        ?? (fm.target as { pageUrl?: string })?.pageUrl
+      return {
+        id: fm.id,
+        type: fm.type,
+        status: fm.status,
+        author: fm.author,
+        authorName: fm.authorName,
+        created: fm.created,
+        bodyExcerpt: excerpt || '(empty)',
+        targetUrl,
+      }
+    }),
+  }))
+}
+
+async function handleProjectCommentDetailPage(
+  ctx: WebContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  slug: string,
+  id: string,
+): Promise<boolean> {
+  const user = await currentUser(ctx, req)
+  if (!user) {
+    res.writeHead(302, { location: '/login' }).end()
+    return true
+  }
+  const project = await ctx.users.getProject(slug)
+  if (!project) {
+    res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' })
+      .end('<p style="font-family:sans-serif; padding:40px">No such project. <a href="/dashboard">Back to dashboard</a>.</p>')
+    return true
+  }
+  const myMembership = await ctx.users.getMembership(user.id, slug)
+  if (!myMembership && !user.isSuperuser) {
+    res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' })
+      .end('<p style="font-family:sans-serif; padding:40px">You are not a member of this project.</p>')
+    return true
+  }
+  const myRole = myMembership?.role ?? (user.isSuperuser ? 'admin' : 'read')
+  const canWrite = myRole === 'write' || myRole === 'admin'
+  const canDelete = myRole === 'admin'
+
+  const found = await ctx.store.read(slug, id)
+  if (!found) {
+    res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' })
+      .end(`<p style="font-family:sans-serif; padding:40px">No comment with id <code>${id}</code>. <a href="/projects/${slug}/comments">Back to comments</a>.</p>`)
+    return true
+  }
+  const { comment } = found
+  const fm = comment.frontmatter
+  const { original, replies } = splitBodyAndReplies(comment.body)
+
+  return sendHtml(res, 200, renderProjectCommentDetail({
+    user: { id: user.id, email: user.email, name: user.name, isSuperuser: !!user.isSuperuser },
+    project: { slug: project.slug, name: project.name },
+    myRole,
+    canWrite,
+    canDelete,
+    comment: {
+      id: fm.id,
+      type: fm.type,
+      status: fm.status,
+      author: fm.author,
+      authorName: fm.authorName,
+      branch: fm.branch,
+      created: fm.created,
+      body: original,
+      target: {
+        url: (fm.target as { url?: string; pageUrl?: string })?.url ?? (fm.target as { pageUrl?: string })?.pageUrl,
+        selector: (fm.target as { selector?: string })?.selector,
+        kind: (fm.target as { kind?: string })?.kind,
+      },
+      replies,
+      raw: comment.raw,
+    },
+  }))
+}
+
+async function handleCommentStatusUpdate(
+  ctx: WebContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  slug: string,
+  id: string,
+): Promise<boolean> {
+  const access = await ensurePortalAccess(ctx, req, res, slug, 'write')
+  if (!access) return true
+  const body = await readJson<{ status?: string }>(req)
+  const status = body.status as CommentStatus
+  if (!VALID_STATUSES.includes(status)) {
+    return sendJson(res, 400, { error: 'status must be one of: ' + VALID_STATUSES.join(', ') })
+  }
+  const found = await ctx.store.read(slug, id)
+  if (!found) return sendJson(res, 404, { error: 'comment not found' })
+  const next = serializeComment({ ...found.comment.frontmatter, status }, found.comment.body)
+  await ctx.store.write(slug, id, next, {
+    commitMessage: `status ${status} on ${id}`,
+    authorEmail: access.user.email,
+    authorName: access.user.name,
+  })
+  ctx.broadcast(slug, { type: 'updated', id })
+  return sendJson(res, 200, { ok: true, status })
+}
+
+async function handleCommentReply(
+  ctx: WebContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  slug: string,
+  id: string,
+): Promise<boolean> {
+  const access = await ensurePortalAccess(ctx, req, res, slug, 'write')
+  if (!access) return true
+  const body = await readJson<{ body?: string }>(req)
+  const text = (body.body ?? '').trim()
+  if (!text) return sendJson(res, 400, { error: 'reply body is required' })
+  const found = await ctx.store.read(slug, id)
+  if (!found) return sendJson(res, 404, { error: 'comment not found' })
+  const appended = appendReply(found.comment.body, {
+    author: access.user.email,
+    timestamp: new Date().toISOString(),
+    body: text,
+  })
+  const next = serializeComment(found.comment.frontmatter, appended)
+  await ctx.store.write(slug, id, next, {
+    commitMessage: `reply on ${id} by ${access.user.email}`,
+    authorEmail: access.user.email,
+    authorName: access.user.name,
+  })
+  ctx.broadcast(slug, { type: 'updated', id })
+  return sendJson(res, 200, { ok: true })
+}
+
+async function handleCommentDelete(
+  ctx: WebContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  slug: string,
+  id: string,
+): Promise<boolean> {
+  const access = await ensurePortalAccess(ctx, req, res, slug, 'admin')
+  if (!access) return true
+  const found = await ctx.store.read(slug, id)
+  if (!found) return sendJson(res, 404, { error: 'comment not found' })
+  await ctx.store.remove(slug, id, {
+    commitMessage: `delete ${id} via portal by ${access.user.email}`,
+    authorEmail: access.user.email,
+    authorName: access.user.name,
+  })
+  ctx.broadcast(slug, { type: 'deleted', id })
+  return sendJson(res, 200, { ok: true })
+}
+
+/** Drop everything from the first `---` divider on. Replies are
+ *  appended with `\n---\n**reply**…` blocks; the original body sits
+ *  above. Returns the whole body unchanged if no divider exists. */
+function stripReplyTail(body: string): string {
+  const m = /\n---\n/.exec(body)
+  return m ? body.slice(0, m.index) : body
+}
+
+/** Parse a comment body into the original content + structured reply
+ *  array. Reply format authored by `appendReply` (shared/frontmatter):
+ *
+ *    \n---\n**reply** — <author>[ (<role>)] — <ts>\n\n<body>\n
+ *    \n---\n**ai-reply** — <model> — <ts>\n\n<body>\n
+ *
+ *  Anything not matching one of those header lines is treated as part
+ *  of the previous reply's body. */
+function splitBodyAndReplies(body: string): {
+  original: string
+  replies: Array<{
+    author: string
+    role?: string
+    timestamp: string
+    body: string
+    isAi?: boolean
+    aiModel?: string
+  }>
+} {
+  const parts = body.split(/\n---\n/)
+  const original = parts.shift()?.trimEnd() ?? ''
+  const replies: ReturnType<typeof splitBodyAndReplies>['replies'] = []
+  for (const part of parts) {
+    const aiMatch = /^\*\*ai-reply\*\* — ([^—\n]+) — ([^\n]+)\n+([\s\S]*?)$/.exec(part)
+    if (aiMatch) {
+      replies.push({
+        author: 'ai',
+        timestamp: aiMatch[2].trim(),
+        body: aiMatch[3].trim(),
+        isAi: true,
+        aiModel: aiMatch[1].trim(),
+      })
+      continue
+    }
+    const humanMatch = /^\*\*reply\*\* — ([^(\n—]+?)(?:\s*\(([^)]+)\))?\s* — ([^\n]+)\n+([\s\S]*?)$/.exec(part)
+    if (humanMatch) {
+      replies.push({
+        author: humanMatch[1].trim(),
+        role: humanMatch[2]?.trim() ?? undefined,
+        timestamp: humanMatch[3].trim(),
+        body: humanMatch[4].trim(),
+      })
+      continue
+    }
+    // Unrecognized divider block — treat as a raw extension of the
+    // previous reply if any, else attach to the original.
+    if (replies.length > 0) {
+      replies[replies.length - 1].body += `\n---\n${part}`
+    }
+  }
+  return { original, replies }
 }
 
 // ─── CLI device-login (session-authed confirmation page) ─────────────

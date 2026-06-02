@@ -1,6 +1,6 @@
 {
   "name": "margo-host",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Self-hostable margo comment server. Runs once per team; clients connect via the margo-dev plugin in server mode.",
   "author": "Stanley Song <sxhuan@gmail.com>",
   "license": "MIT",

@@ -43,7 +43,9 @@ import {
   type SseClient,
 } from '../server/handlers.js';
 import { mirrorTransportToDir } from '../storage/cache-mirror.js';
+import { CacheWatcher } from '../storage/cache-watcher.js';
 import { createTransport } from '../storage/factory.js';
+import type { RemoteTransport } from '../storage/remote-transport.js';
 import type { Transport } from '../storage/transport.js';
 import type { CreateCommentRequest, MargoConfig, UpdateCommentRequest } from '../shared/types.js';
 
@@ -103,13 +105,6 @@ async function ensureCtx(): Promise<HandlerContext> {
     onAfterSync: () => transport.resetRemoteChanges(),
   };
 
-  // Server mode: pull all comments into the local cache once on boot so
-  // AI agents have fresh disk state without needing manual `margo pull`.
-  if (created.mode === 'server') {
-    void mirrorTransportToDir(transport, commentsDir)
-      .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI at ${commentsDir}`))
-      .catch((err) => console.warn('[margo] initial pull failed (AI cache may be stale):', (err as Error).message));
-  }
   // Bridge transport events into the SSE stream. Subscribing once is fine —
   // the transport coalesces all listeners into a single underlying watcher/
   // poller pair, and we never unsubscribe in this code path (process exit
@@ -118,34 +113,45 @@ async function ensureCtx(): Promise<HandlerContext> {
   transport.subscribeRemoteChanges((payload) => {
     if (payload) broadcastSse(cachedCtx!, { type: 'remote-changes', ...payload });
   });
-  // Server mode only: mirror every host-side change to the local
-  // `.margo/comments/` directory so AI agents reading the disk see
-  // fresh state without a dev-server restart. mirrorTransportToDir
-  // above only ran at boot — without this listener, a pin created via
-  // the overlay would land on the host but never hit disk and Claude
-  // would see stale comments. Same liveness `margo watch` provides,
-  // baked into the plugin.
+  // Server mode only: full bidirectional sync between cache + host.
+  // See vite.ts for the longer rationale. Order matters here:
+  //   1. Construct + start the CacheWatcher (chokidar begins observing)
+  //   2. Boot pull with onWillWrite registering each file's hash on
+  //      the watcher so chokidar's 'add' events get skipped by the
+  //      echo-loop guard
+  //   3. SSE subscriber that mirrors subsequent host updates into the
+  //      cache, also registering expected hashes
+  let cacheWatcher: CacheWatcher | null = null;
   if (created.mode === 'server') {
     const captured = transport;
+    const watcher = new CacheWatcher({ commentsDir, transport: captured as RemoteTransport });
+    cacheWatcher = watcher;
+    watcher.start();
+    void mirrorTransportToDir(captured, commentsDir, (id, raw) => watcher.registerExpectedWrite(id, raw))
+      .then(({ pulled }) => console.log(`[margo] cached ${pulled} comment(s) from host for AI at ${commentsDir}`))
+      .catch((err) => console.warn('[margo] initial pull failed (AI cache may be stale):', (err as Error).message));
     transport.subscribe(async (ev) => {
       try {
         const file = path.join(commentsDir, `${ev.id}.md`);
         if (ev.type === 'deleted') {
+          watcher.registerExpectedDelete(ev.id);
           await fsp.unlink(file).catch(() => undefined);
           return;
         }
         const fresh = await captured.read(ev.id);
         if (!fresh) return; // raced with a delete
+        watcher.registerExpectedWrite(ev.id, fresh.raw);
         await fsp.mkdir(commentsDir, { recursive: true });
         await fsp.writeFile(file, fresh.raw, 'utf8');
       } catch (err) {
-        console.warn(`[margo] failed to mirror ${ev.id} to .margo/comments/:`, (err as Error).message);
+        console.warn(`[margo] failed to mirror ${ev.id} to cache:`, (err as Error).message);
       }
     });
   }
   // Process exit cleans up the transport; Next.js dev server doesn't tell us
   // when it shuts down per-route, so we lean on process lifecycle.
   process.once('exit', () => {
+    void cacheWatcher?.stop();
     void cachedTransport?.close();
   });
 

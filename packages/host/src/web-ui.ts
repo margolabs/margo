@@ -339,6 +339,24 @@ const SHARED_CSS = `
     padding: 4px 0 0; margin: 0;
   }
   .connect-host { color: var(--accent); font-weight: 500; }
+  /* Per-project subnav strip — currently a single Comments link, but
+     room to grow as the portal accumulates per-project surfaces (audit
+     log, decisions, etc). */
+  .project-subnav {
+    display: flex; align-items: center; gap: 12px;
+    margin: 16px 0 0; padding: 12px 16px;
+    border: 1px solid var(--border); border-radius: var(--radius-md);
+    background: var(--bg);
+  }
+  .subnav-link {
+    text-decoration: none; color: var(--fg);
+    padding: 6px 12px; border-radius: 9999px;
+    background: var(--code-bg);
+    font-size: 13px; font-weight: 500;
+    transition: background-color .12s;
+  }
+  .subnav-link:hover { background: var(--accent); color: var(--accent-fg); }
+  .subnav-hint { font-size: 13px; }
   /* Optional CLI sign-in path — collapsed by default so it doesn't
      compete with the recommended in-overlay sign-in flow. */
   .connect-fallback {
@@ -788,6 +806,11 @@ export function renderProject(data: ProjectPageData): string {
         <code>${escapeHtml(data.project.slug)}</code> · created ${formatDate(data.project.createdAt)}
       </p>
 
+      <div class="project-subnav">
+        <a class="subnav-link" href="/projects/${escapeHtml(data.project.slug)}/comments">📋 Comments</a>
+        <span class="muted subnav-hint">Browse + manage every comment on this project.</span>
+      </div>
+
       <h2 style="margin-top:44px">Connect</h2>
       <h1>Wire this project into your app</h1>
       <p class="muted">
@@ -931,6 +954,445 @@ export function renderProject(data: ProjectPageData): string {
       ` : ''}
     </script>
   `)
+}
+
+// ─── Comments listing + detail ────────────────────────────────────────
+
+export interface ProjectCommentsData {
+  user: { id: string; email: string; name: string; isSuperuser: boolean }
+  project: { slug: string; name: string }
+  myRole: string
+  canWrite: boolean
+  canDelete: boolean
+  /** Resolved counts per status — used to render the filter chips with
+   *  numbers ("Open (12)"). Computed across the unfiltered set so the
+   *  user can see how much is in each bucket. */
+  counts: Record<string, number>
+  /** Filter set applied to the listed comments. Echoed back to keep
+   *  the chips highlighted on reload. */
+  filter: {
+    status: string  // 'all' | one of CommentStatus
+    type: string    // 'all' | one of CommentType
+    q: string       // search query
+  }
+  comments: Array<{
+    id: string
+    type: string
+    status: string
+    author: string
+    authorName?: string
+    created: string
+    bodyExcerpt: string
+    targetUrl?: string
+  }>
+}
+
+export function renderProjectComments(data: ProjectCommentsData): string {
+  const superBadge = data.user.isSuperuser ? '<span class="badge">superuser</span>' : ''
+  const STATUSES = ['all', 'open', 'in-progress', 'ready-for-review', 'blocked', 'resolved', 'wontfix']
+  const TYPES = ['all', 'task', 'question', 'discussion']
+  const statusChips = STATUSES.map((s) => {
+    const count = s === 'all'
+      ? Object.values(data.counts).reduce((sum, n) => sum + n, 0)
+      : (data.counts[s] ?? 0)
+    const active = data.filter.status === s ? ' chip-active' : ''
+    return `<a class="chip${active}" href="?${qs({ status: s, type: data.filter.type, q: data.filter.q })}">${escapeHtml(prettyStatus(s))} <span class="chip-count">${count}</span></a>`
+  }).join('')
+  const typeChips = TYPES.map((t) => {
+    const active = data.filter.type === t ? ' chip-active' : ''
+    return `<a class="chip chip-sm${active}" href="?${qs({ status: data.filter.status, type: t, q: data.filter.q })}">${escapeHtml(prettyType(t))}</a>`
+  }).join('')
+
+  const rows = data.comments.length === 0
+    ? `<div class="empty">No comments match this filter.</div>`
+    : `<div class="comment-grid">${data.comments.map((c) => `
+        <a class="comment-row" href="/projects/${escapeHtml(data.project.slug)}/comments/${escapeHtml(c.id)}">
+          <span class="comment-id code">${escapeHtml(c.id)}</span>
+          <span class="comment-type type-${escapeHtml(c.type)}">${escapeHtml(prettyType(c.type))}</span>
+          <span class="comment-status status-${escapeHtml(c.status)}">${escapeHtml(prettyStatus(c.status))}</span>
+          <span class="comment-author">${escapeHtml(c.authorName || c.author)}</span>
+          <span class="comment-excerpt">${escapeHtml(c.bodyExcerpt)}</span>
+          <span class="comment-date muted">${formatRelative(c.created)}</span>
+        </a>
+      `).join('')}</div>`
+
+  return shell(`${data.project.slug} · comments`, `
+    <div class="container">
+      <div class="nav">
+        <div class="brand"><span class="dot"></span> margo host</div>
+        <div class="grow"></div>
+        <a href="/projects/${escapeHtml(data.project.slug)}" class="alt">← ${escapeHtml(data.project.name)}</a>
+        <span class="who"><strong>${escapeHtml(data.user.name)}</strong> &lt;${escapeHtml(data.user.email)}&gt;${superBadge}</span>
+      </div>
+
+      <h2>Inbox</h2>
+      <h1>Comments on <code>${escapeHtml(data.project.slug)}</code></h1>
+      <p class="muted">
+        Browse and manage every comment on this project — change status, reply, or
+        delete. Connected dev overlays update in real time via SSE.
+      </p>
+
+      <div class="filter-row">
+        <div class="chip-row">${statusChips}</div>
+        <div class="chip-row chip-row-tight">${typeChips}</div>
+        <form class="search-form" method="get" action="">
+          <input type="hidden" name="status" value="${escapeHtml(data.filter.status)}" />
+          <input type="hidden" name="type" value="${escapeHtml(data.filter.type)}" />
+          <input type="search" name="q" placeholder="Search body or id…" value="${escapeHtml(data.filter.q)}" />
+        </form>
+      </div>
+
+      ${rows}
+    </div>
+    ${commentsListStyles()}
+  `)
+}
+
+export interface ProjectCommentDetailData {
+  user: { id: string; email: string; name: string; isSuperuser: boolean }
+  project: { slug: string; name: string }
+  myRole: string
+  canWrite: boolean
+  canDelete: boolean
+  comment: {
+    id: string
+    type: string
+    status: string
+    author: string
+    authorName?: string
+    branch: string
+    created: string
+    body: string
+    target: { url?: string; selector?: string; kind?: string }
+    replies: Array<{
+      author: string
+      role?: string
+      timestamp: string
+      body: string
+      isAi?: boolean
+      aiModel?: string
+    }>
+    raw: string
+  }
+}
+
+export function renderProjectCommentDetail(data: ProjectCommentDetailData): string {
+  const superBadge = data.user.isSuperuser ? '<span class="badge">superuser</span>' : ''
+  const STATUSES = ['open', 'in-progress', 'ready-for-review', 'blocked', 'resolved', 'wontfix']
+  const statusSelect = data.canWrite ? `
+    <select id="status-select">
+      ${STATUSES.map((s) => `<option value="${s}"${s === data.comment.status ? ' selected' : ''}>${escapeHtml(prettyStatus(s))}</option>`).join('')}
+    </select>
+  ` : `<span class="status status-${escapeHtml(data.comment.status)}">${escapeHtml(prettyStatus(data.comment.status))}</span>`
+
+  const repliesBlock = data.comment.replies.length === 0
+    ? ''
+    : `<div class="replies">${data.comment.replies.map((r) => `
+        <div class="reply ${r.isAi ? 'reply-ai' : ''}">
+          <div class="reply-head">
+            ${r.isAi ? `<span class="reply-tag tag-ai">ai-reply</span> <span class="muted">${escapeHtml(r.aiModel || '')}</span>` : `<strong>${escapeHtml(r.author)}</strong>${r.role ? ` <span class="muted">(${escapeHtml(r.role)})</span>` : ''}`}
+            <span class="muted reply-time">${formatRelative(r.timestamp)}</span>
+          </div>
+          <div class="reply-body">${escapeHtml(r.body)}</div>
+        </div>
+      `).join('')}</div>`
+
+  const replyForm = data.canWrite ? `
+    <div class="reply-form">
+      <h3>Add a reply</h3>
+      <textarea id="reply-body" rows="4" placeholder="Your reply…"></textarea>
+      <div class="actions">
+        <button type="button" class="primary" id="reply-btn">Reply</button>
+      </div>
+      <div id="reply-error" class="error" hidden></div>
+    </div>
+  ` : ''
+
+  const deleteBlock = data.canDelete ? `
+    <div class="danger-zone">
+      <h3>Danger</h3>
+      <p class="muted">Permanent. Removes the comment from the host and tells every connected overlay to drop the pin.</p>
+      <button type="button" class="danger" id="delete-btn">Delete comment</button>
+    </div>
+  ` : ''
+
+  const targetLink = data.comment.target.url
+    ? `<a href="${escapeHtml(data.comment.target.url)}" target="_blank" rel="noopener" class="muted">${escapeHtml(data.comment.target.url)}</a>`
+    : '<span class="muted">—</span>'
+
+  return shell(`Comment ${data.comment.id}`, `
+    <div class="container">
+      <div class="nav">
+        <div class="brand"><span class="dot"></span> margo host</div>
+        <div class="grow"></div>
+        <a href="/projects/${escapeHtml(data.project.slug)}/comments" class="alt">← Comments</a>
+        <span class="who"><strong>${escapeHtml(data.user.name)}</strong> &lt;${escapeHtml(data.user.email)}&gt;${superBadge}</span>
+      </div>
+
+      <h2>Comment</h2>
+      <h1>${escapeHtml(data.comment.id)}</h1>
+
+      <div class="comment-meta-grid">
+        <div><div class="meta-label">Type</div><div class="comment-type type-${escapeHtml(data.comment.type)}">${escapeHtml(prettyType(data.comment.type))}</div></div>
+        <div><div class="meta-label">Status</div><div id="status-cell">${statusSelect}</div></div>
+        <div><div class="meta-label">Author</div><div>${escapeHtml(data.comment.authorName || data.comment.author)} <code class="muted">${escapeHtml(data.comment.author)}</code></div></div>
+        <div><div class="meta-label">Created</div><div>${formatDate(data.comment.created)}</div></div>
+        <div><div class="meta-label">Branch</div><div><code>${escapeHtml(data.comment.branch)}</code></div></div>
+        <div><div class="meta-label">Pinned on</div><div>${targetLink}</div></div>
+      </div>
+
+      <h3 style="margin-top:32px">Body</h3>
+      <div class="comment-body">${escapeHtml(data.comment.body).replace(/\n/g, '<br/>')}</div>
+
+      ${repliesBlock}
+      ${replyForm}
+      ${deleteBlock}
+    </div>
+    ${commentDetailStyles()}
+    <script>
+      const PROJECT_SLUG = ${JSON.stringify(data.project.slug)};
+      const COMMENT_ID = ${JSON.stringify(data.comment.id)};
+
+      ${data.canWrite ? `
+      const statusSel = document.getElementById('status-select');
+      statusSel.addEventListener('change', async () => {
+        const status = statusSel.value;
+        const res = await fetch('/api/projects/' + encodeURIComponent(PROJECT_SLUG) + '/comments/' + encodeURIComponent(COMMENT_ID) + '/status', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ status }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          alert(data.error || ('Status change failed: HTTP ' + res.status));
+          location.reload();
+        }
+      });
+
+      const replyBtn = document.getElementById('reply-btn');
+      const replyBody = document.getElementById('reply-body');
+      const replyErr = document.getElementById('reply-error');
+      replyBtn.addEventListener('click', async () => {
+        const body = replyBody.value.trim();
+        if (!body) { replyErr.textContent = 'Reply body is required.'; replyErr.hidden = false; return; }
+        replyBtn.disabled = true;
+        const res = await fetch('/api/projects/' + encodeURIComponent(PROJECT_SLUG) + '/comments/' + encodeURIComponent(COMMENT_ID) + '/reply', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ body }),
+        });
+        if (res.ok) { location.reload(); return; }
+        const data = await res.json().catch(() => ({}));
+        replyErr.textContent = data.error || ('Reply failed: HTTP ' + res.status);
+        replyErr.hidden = false;
+        replyBtn.disabled = false;
+      });
+      ` : ''}
+
+      ${data.canDelete ? `
+      document.getElementById('delete-btn').addEventListener('click', async () => {
+        if (!confirm('Delete this comment? Cannot be undone.')) return;
+        const res = await fetch('/api/projects/' + encodeURIComponent(PROJECT_SLUG) + '/comments/' + encodeURIComponent(COMMENT_ID), {
+          method: 'DELETE',
+        });
+        if (res.ok) { location.href = '/projects/' + encodeURIComponent(PROJECT_SLUG) + '/comments'; return; }
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || ('Delete failed: HTTP ' + res.status));
+      });
+      ` : ''}
+    </script>
+  `)
+}
+
+function commentsListStyles(): string {
+  return `
+    <style>
+      .filter-row {
+        display: flex; flex-direction: column; gap: 10px;
+        margin: 18px 0 22px;
+      }
+      .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+      .chip-row-tight .chip { padding: 4px 9px; font-size: 12px; }
+      .chip {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 6px 12px; border-radius: 9999px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--fg);
+        font-size: 13px; text-decoration: none;
+        transition: background-color .12s, border-color .12s;
+      }
+      .chip:hover { background: var(--code-bg); }
+      .chip-active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+      .chip-count { font-size: 11px; opacity: .85; padding: 0 5px; border-radius: 9999px; background: rgb(255 255 255 / .2); }
+      .chip:not(.chip-active) .chip-count { background: var(--code-bg); color: var(--muted); }
+      .search-form input {
+        width: 100%; padding: 8px 12px; border-radius: 8px;
+        border: 1px solid var(--border); background: var(--bg);
+        font: inherit; font-size: 13px; color: var(--fg);
+      }
+      .comment-grid {
+        border: 1px solid var(--border); border-radius: 10px;
+        background: var(--bg); overflow: hidden;
+      }
+      .comment-row {
+        display: grid;
+        grid-template-columns: 100px 80px 130px 140px 1fr 100px;
+        gap: 12px; align-items: center;
+        padding: 12px 16px;
+        text-decoration: none; color: var(--fg);
+        border-bottom: 1px solid var(--border);
+        transition: background-color .1s;
+        font-size: 13px;
+      }
+      .comment-row:last-child { border-bottom: 0; }
+      .comment-row:hover { background: var(--code-bg); }
+      .comment-id { font-size: 12px; color: var(--muted); }
+      .comment-type, .comment-status {
+        display: inline-flex; align-items: center;
+        padding: 2px 8px; border-radius: 9999px;
+        font-size: 11px; font-weight: 500;
+        text-transform: lowercase;
+      }
+      .type-task { background: hsl(220 60% 90%); color: hsl(220 60% 35%); }
+      .type-question { background: hsl(45 80% 88%); color: hsl(30 70% 35%); }
+      .type-discussion { background: hsl(260 50% 90%); color: hsl(260 50% 38%); }
+      .status-open { background: hsl(0 0% 90%); color: hsl(0 0% 38%); }
+      .status-in-progress { background: hsl(200 60% 88%); color: hsl(200 60% 35%); }
+      .status-ready-for-review { background: hsl(142 50% 88%); color: hsl(142 50% 30%); }
+      .status-blocked { background: hsl(0 60% 88%); color: hsl(0 60% 38%); }
+      .status-resolved { background: hsl(142 30% 92%); color: hsl(142 40% 32%); opacity: .8; }
+      .status-wontfix { background: hsl(0 0% 88%); color: hsl(0 0% 50%); opacity: .7; }
+      .comment-excerpt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-strong); }
+      .comment-author { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .comment-date { font-size: 12px; text-align: right; }
+      .empty {
+        padding: 32px; text-align: center; color: var(--muted);
+        border: 1px dashed var(--border); border-radius: 10px;
+      }
+      @media (max-width: 800px) {
+        .comment-row { grid-template-columns: 1fr; gap: 4px; padding: 14px; }
+        .comment-date { text-align: left; }
+      }
+    </style>
+  `
+}
+
+function commentDetailStyles(): string {
+  return `
+    <style>
+      .comment-meta-grid {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 14px 24px;
+        padding: 18px 20px;
+        border: 1px solid var(--border); border-radius: 10px;
+        background: var(--bg);
+        margin-top: 10px;
+      }
+      .meta-label {
+        font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+        color: var(--muted); font-weight: 600; margin-bottom: 4px;
+      }
+      #status-select {
+        padding: 4px 8px; border-radius: 6px;
+        border: 1px solid var(--border); background: var(--bg);
+        font: inherit; font-size: 13px; color: var(--fg);
+      }
+      .comment-type {
+        display: inline-flex; padding: 2px 8px; border-radius: 9999px;
+        font-size: 11px; font-weight: 500;
+      }
+      .type-task { background: hsl(220 60% 90%); color: hsl(220 60% 35%); }
+      .type-question { background: hsl(45 80% 88%); color: hsl(30 70% 35%); }
+      .type-discussion { background: hsl(260 50% 90%); color: hsl(260 50% 38%); }
+      .status { display: inline-flex; padding: 2px 8px; border-radius: 9999px; font-size: 11px; }
+      .status-open { background: hsl(0 0% 90%); color: hsl(0 0% 38%); }
+      .status-in-progress { background: hsl(200 60% 88%); color: hsl(200 60% 35%); }
+      .status-ready-for-review { background: hsl(142 50% 88%); color: hsl(142 50% 30%); }
+      .status-blocked { background: hsl(0 60% 88%); color: hsl(0 60% 38%); }
+      .status-resolved { background: hsl(142 30% 92%); color: hsl(142 40% 32%); }
+      .status-wontfix { background: hsl(0 0% 88%); color: hsl(0 0% 50%); }
+      .comment-body {
+        padding: 16px 20px;
+        background: var(--code-bg);
+        border-radius: 10px;
+        font-size: 14px; line-height: 1.55;
+        white-space: pre-wrap; word-wrap: break-word;
+        margin-top: 8px;
+      }
+      .replies { margin-top: 24px; display: flex; flex-direction: column; gap: 12px; }
+      .reply {
+        padding: 14px 18px;
+        border: 1px solid var(--border); border-radius: 10px;
+        background: var(--bg);
+      }
+      .reply-ai { border-color: hsl(220 60% 50% / .25); background: hsl(220 60% 50% / .04); }
+      .reply-head {
+        display: flex; align-items: center; gap: 8px;
+        font-size: 13px; margin-bottom: 8px;
+      }
+      .reply-tag {
+        padding: 1px 7px; border-radius: 9999px;
+        font-size: 10px; font-weight: 600; text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .tag-ai { background: hsl(220 60% 50% / .15); color: hsl(220 60% 35%); }
+      .reply-time { margin-left: auto; font-size: 12px; }
+      .reply-body {
+        font-size: 14px; line-height: 1.55;
+        white-space: pre-wrap; word-wrap: break-word;
+      }
+      .reply-form { margin-top: 24px; }
+      .reply-form textarea {
+        width: 100%; padding: 12px 14px; border-radius: 10px;
+        border: 1px solid var(--border); background: var(--bg);
+        font: inherit; font-size: 14px; color: var(--fg);
+        resize: vertical; min-height: 80px;
+      }
+      .reply-form .actions { margin-top: 10px; }
+      .danger-zone {
+        margin-top: 48px; padding: 18px 20px;
+        border: 1px solid hsl(0 60% 50% / .25); border-radius: 10px;
+        background: hsl(0 60% 50% / .04);
+      }
+      .danger-zone h3 { margin-top: 0; color: hsl(0 60% 38%); }
+    </style>
+  `
+}
+
+function qs(params: Record<string, string>): string {
+  return Object.entries(params)
+    .filter(([, v]) => v && v !== 'all')
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&')
+}
+
+function prettyStatus(s: string): string {
+  if (s === 'all') return 'All'
+  if (s === 'ready-for-review') return 'Ready for review'
+  if (s === 'in-progress') return 'In progress'
+  if (s === 'wontfix') return 'Won\'t fix'
+  return s[0].toUpperCase() + s.slice(1)
+}
+
+function prettyType(t: string): string {
+  if (t === 'all') return 'All types'
+  return t[0].toUpperCase() + t.slice(1)
+}
+
+function formatRelative(iso: string): string {
+  try {
+    const then = new Date(iso).getTime()
+    const now = Date.now()
+    const seconds = Math.floor((now - then) / 1000)
+    if (seconds < 60) return 'just now'
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
+    if (seconds < 86400 * 30) return `${Math.floor(seconds / 86400)}d ago`
+    return formatDate(iso)
+  } catch {
+    return iso
+  }
 }
 
 export interface CliLoginPageData {

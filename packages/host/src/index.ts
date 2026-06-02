@@ -63,6 +63,8 @@ export async function startHost(opts: StartHostOptions): Promise<HostHandle> {
   let cachedSecret: string | null = null
   const webCtx: WebContext = {
     users: opts.users,
+    store,
+    broadcast: ctx.broadcast,
     sessionSecret: async () => {
       if (cachedSecret) return cachedSecret
       cachedSecret = await opts.users.getOrCreateSessionSecret()

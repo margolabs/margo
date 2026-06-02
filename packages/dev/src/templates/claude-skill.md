@@ -22,9 +22,9 @@ Resolved-path examples:
 ## How to read the inbox
 
 1. Read every `<file>.md` in the resolved comments directory.
-3. Filter: `status` ∈ {`open`, `in-progress`} AND `type: task`. Skip `resolved`, `wontfix`, `ready-for-review`, and `blocked` — those are terminal or already-acted-on states. `wontfix` is the "Dismiss" verdict and is reversible only by humans clicking Reopen; do not re-process it.
-4. Sort by `created` ascending (oldest first), but bump anything with `@ai` in the body to the top.
-5. Skip `type: discussion` (humans only — never modify code in response to these). For `type: question`, answer in-thread but do not modify code.
+2. Filter: `status` ∈ {`open`, `in-progress`} AND `type: task`. Skip `resolved`, `wontfix`, `ready-for-review`, and `blocked` — those are terminal or already-acted-on states. `wontfix` is the "Dismiss" verdict and is reversible only by humans clicking Reopen; do not re-process it.
+3. Sort by `created` ascending (oldest first), but bump anything with `@ai` in the body to the top.
+4. Skip `type: discussion` (humans only — never modify code in response to these). For `type: question`, answer in-thread but do not modify code.
 
 ## How to process a single comment
 
@@ -91,16 +91,17 @@ Use it as direction, not gospel. If the trigger says "Subscribe" and the request
 
 **Don't update `target.request.trigger` when you fix the code** — it's a historical snapshot of what fired the call, not a re-resolvable anchor.
 
-## How to commit
+## How your edits propagate
 
-The margo dev plugin auto-commits and pushes comment files when humans pin them. When *you* edit a comment file (reply, status change, anchor update), commit with the same `margo:` prefix so the history reads consistently:
+Comment files NEVER live in the project's git history — see "Where the files actually live" above. Both modes auto-propagate your edits once the dev server's running:
 
-```
-margo: ai-reply on c-7f3a91 (ready-for-review)
-margo: ai-reply on c-7f3a91 (blocked: missing design token)
-```
+- **Standalone mode** (`storage: "standalone"`): the file at `~/.margo/standalone/<id>/comments/<id>.md` IS the source of truth. The dev plugin's chokidar watcher detects your edit and broadcasts SSE so any open overlays refresh immediately.
 
-Group code changes and the corresponding comment update in the same commit when possible, so reviewers can trace "this code change resolved this comment."
+- **Server mode** (`storage: "server"`): the file at `~/.margo/cache/<host>/<project>/comments/<id>.md` is a local cache — the host is the source of truth. The dev plugin also watches this dir; the moment you save your edit it gets pushed to the host through an offline-tolerant outbox (host down → queued + retried). Teammates see the update through the host's SSE the moment it lands.
+
+**Either mode: just edit the file.** Don't run `npx margo push` from inside an AI session — the plugin's watcher already handles propagation. If you've edited a comment but the dev server isn't running, no push happens until next boot; that's expected.
+
+If a code change accompanies the comment update, you can still commit the code in the same git commit. The comment file is not part of the repo, so nothing about it goes into the commit — that's expected. Reviewers see the code change; they see the comment-file change via the margo overlay (or the host's portal at `<host>/projects/<slug>/comments/<id>`).
 
 ## Edge cases
 
@@ -115,4 +116,4 @@ Group code changes and the corresponding comment update in the same commit when 
 - Don't process `status: resolved` or `status: wontfix` comments. You may *read* them for historical context (e.g. to avoid re-proposing something the team declined), but never act on them.
 - Don't mark `resolved` or `wontfix` yourself. Both are human-only verdicts.
 - Don't bulk-process more than ~5 comments without surfacing a summary; the human running you should see what you're doing.
-- Don't push to a branch other than what the dev is currently on, unless the dev tells you otherwise.
+- Don't try to push comments manually with `margo push` — the dev plugin's cache watcher handles propagation automatically. Manually invoking the CLI duplicates work and can race with the watcher.
