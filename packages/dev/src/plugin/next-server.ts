@@ -169,6 +169,7 @@ const ROUTES: ReadonlyArray<{ route: string; methods: ReadonlyArray<string> }> =
   { route: 'comment', methods: ['POST', 'PATCH', 'DELETE'] },
   { route: 'events', methods: ['GET'] },
   { route: 'sync', methods: ['POST'] },
+  { route: 'sync-status', methods: ['GET'] },
 ];
 
 function isKnownRoute(route: string, method: string): boolean {
@@ -242,6 +243,20 @@ async function dispatch(request: Request, ctx: RouteContext): Promise<Response> 
     }
     if (route === 'sync' && request.method === 'POST') {
       return jsonResponse(200, await syncFromRemote(handlerCtx));
+    }
+    if (route === 'sync-status' && request.method === 'GET') {
+      // Mirror of the sidecar/Vite implementation in server/endpoints.ts.
+      // Server mode: RemoteTransport carries the offline-first outbox
+      // and reports pending / lastSyncAt / lastError. Standalone mode:
+      // no host, no outbox; return zeros so the overlay banner logic
+      // doesn't have to branch on storage mode.
+      const t = handlerCtx.transport as unknown as {
+        getSyncStatus?: () => Promise<{ pending: number; lastSyncAt: string | null; lastError: string | null }>;
+      };
+      if (typeof t.getSyncStatus === 'function') {
+        return jsonResponse(200, await t.getSyncStatus());
+      }
+      return jsonResponse(200, { pending: 0, lastSyncAt: null, lastError: null });
     }
     return new Response('not found', { status: 404 });
   } catch (err) {
