@@ -25,7 +25,14 @@ import { AuthError } from '../storage/transport.js';
 // of the package keeps the existing import path.
 export type EndpointContext = HandlerContext;
 
-const ENDPOINTS = ['/__margo/comment', '/__margo/list', '/__margo/events', '/__margo/sync', '/__margo/sync-status', '/__margo/me', '/__margo/git-state'] as const;
+/** Exported so dispatcher-parity tests can verify this list stays in
+ *  sync with the ROUTES table in plugin/next-server.ts — the two are
+ *  parallel implementations of the same surface, and a route registered
+ *  here but missing from ROUTES (or vice versa) means one of the
+ *  integrations 404s a URL the overlay calls. Any change to this list
+ *  must be mirrored in ROUTES + the matching dispatch case in next-
+ *  server.ts. */
+export const ENDPOINTS = ['/__margo/comment', '/__margo/list', '/__margo/events', '/__margo/sync', '/__margo/sync-status', '/__margo/me', '/__margo/git-state'] as const;
 
 export function isMargoEndpoint(url: string | undefined): boolean {
   if (!url) return false;

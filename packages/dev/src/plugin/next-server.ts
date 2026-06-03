@@ -162,7 +162,13 @@ function isDev(): boolean {
   return process.env.NODE_ENV !== 'production';
 }
 
-const ROUTES: ReadonlyArray<{ route: string; methods: ReadonlyArray<string> }> = [
+/** Exported so dispatcher-parity tests can verify this list stays in
+ *  sync with the sidecar/Vite ENDPOINTS table in server/endpoints.ts —
+ *  the two are parallel implementations of the same surface, and a
+ *  missing entry here means a published Next.js plugin 404s a URL the
+ *  overlay calls. Any change to this list must be mirrored in
+ *  ENDPOINTS + the matching dispatch case in this file. */
+export const ROUTES: ReadonlyArray<{ route: string; methods: ReadonlyArray<string> }> = [
   { route: 'list', methods: ['GET'] },
   { route: 'me', methods: ['GET', 'POST'] },
   { route: 'git-state', methods: ['GET'] },
@@ -172,7 +178,7 @@ const ROUTES: ReadonlyArray<{ route: string; methods: ReadonlyArray<string> }> =
   { route: 'sync-status', methods: ['GET'] },
 ];
 
-function isKnownRoute(route: string, method: string): boolean {
+export function isKnownRoute(route: string, method: string): boolean {
   return ROUTES.some((r) => r.route === route && r.methods.includes(method));
 }
 
@@ -211,8 +217,13 @@ async function dispatch(request: Request, ctx: RouteContext): Promise<Response> 
     return new Response('not found', { status: 404 });
   }
 
-  const handlerCtx = await ensureCtx();
   try {
+    // ensureCtx() throws when there's no margo.config.json (test
+    // harness, fresh project before `margo init`, etc). Catching here
+    // turns the throw into a clean 500 + error body instead of an
+    // uncaught rejection that would crash the framework. Production
+    // setups have a config; this is purely robustness for the edge.
+    const handlerCtx = await ensureCtx();
     if (route === 'list' && request.method === 'GET') {
       return jsonResponse(200, await listComments(handlerCtx));
     }
