@@ -41,7 +41,7 @@ npm run dev</code></pre>
       <h3>1. Pin it</h3>
       <p>
         Click any element on the running app, type a comment. The overlay captures a hybrid anchor
-        (selector + text + role + coords) so the pin survives refactors.
+        (selector + text + role + coords) so the pin survives refactors. Network calls can be pinned too.
       </p>
     </article>
     <article>
@@ -49,14 +49,16 @@ npm run dev</code></pre>
       <p>
         Each comment is a markdown file under <code>~/.margo/</code>. Claude Code reads them
         via the <code>/margo</code> skill, makes the code change, replies in-thread, bumps status
-        to <code>ready-for-review</code>.
+        to <code>ready-for-review</code>. The plugin auto-syncs the file change to teammates — no
+        <code>margo push</code> step.
       </p>
     </article>
     <article>
       <h3>3. Humans review</h3>
       <p>
-        Humans approve, reply, or mark resolved — through the same overlay UI. The project repo's
-        git history stays untouched; comments live in <code>~/.margo/</code> on each machine.
+        Approve, reply, or mark resolved — from the overlay on the live app, or from the host's
+        dashboard at <code>/projects/&lt;slug&gt;/comments</code>. Either surface propagates
+        instantly via SSE. Your project repo's git history stays untouched.
       </p>
     </article>
   </section>
@@ -83,11 +85,12 @@ npm run dev</code></pre>
       <div class="storage-card storage-card-server">
         <div class="storage-tag">Self-hostable · team collab</div>
         <h3>Server</h3>
-        <p class="storage-pitch">Team collaboration via a self-hostable host. Offline-first by default.</p>
+        <p class="storage-pitch">Team collaboration via a self-hostable host. Web dashboard + offline-first sync.</p>
         <ul class="storage-list">
           <li>Drop-in Docker image: <code>margolabs/margo-host</code>. First signup at <code>/setup</code> becomes superuser.</li>
           <li>Per-project member roster (read / write / admin). Plugin caches to <code>~/.margo/cache/&lt;host&gt;/&lt;project&gt;/</code>.</li>
-          <li>Pins work even when the host's unreachable — writes queue locally and drain when the host's back. Overlay shows a "syncing" pill while pending.</li>
+          <li>Web dashboard at <code>&lt;host&gt;/projects/&lt;slug&gt;/comments</code>: browse, filter, change status, reply, delete — every action broadcasts SSE so connected overlays update in real time.</li>
+          <li>Pins work even when the host's unreachable — writes queue locally and drain when it's back. Overlay shows a "syncing" pill while pending.</li>
         </ul>
 <pre class="storage-snippet"><code>docker run -d -p 7331:7331 margolabs/margo-host
 npx margo init --server http://&lt;host&gt;:7331 --project &lt;slug&gt;
@@ -128,7 +131,7 @@ npm run dev   # click "Sign in to margo" in the overlay</code></pre>
     <ul>
       <li><strong>Humans never code.</strong> They only annotate. AI is the sole implementer.</li>
       <li><strong>Anchored to the running app, not files.</strong> Pins live on what users see, not on <code>file.ts:42</code>.</li>
-      <li><strong>Self-hosted by default.</strong> Either git-synced files in your repo OR a self-hostable Docker container — never a third-party SaaS.</li>
+      <li><strong>Your repo's git history stays clean.</strong> Comments live under <code>~/.margo/</code> — locally on your machine in standalone mode, on a self-hostable Docker container in server mode. Never in your project's git tree, never on a third-party SaaS.</li>
       <li><strong>Single-user value on day one.</strong> A solo founder + Claude Code gets value before any second user.</li>
     </ul>
   </section>
