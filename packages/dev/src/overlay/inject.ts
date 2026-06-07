@@ -380,21 +380,19 @@ export function start(opts: StartOptions): void {
         updateFabIdentity();
         return;
       }
-      // Local mode (declared OR detected). Missing git config user.name
-      // / user.email is the most common cause of "author api failed"
-      // surfacing later when the user clicks Pin. Catch it now, prompt
-      // for setup, persist via `git config --global`, then continue.
-      const incomplete = !u || !u.name || !u.email;
-      if (incomplete) {
-        const set = await openIdentitySetup(sync, {
-          name: u?.name ?? "",
-          email: u?.email ?? "",
-        });
-        // Re-fetch via /me so we pick up mode + server info (those aren't
-        // returned by the setMe roundtrip but we need them for the inbox
-        // server-mode badge).
-        u = set ? await sync.getMe() : null;
-      }
+      // Standalone mode. The plugin's StandaloneTransport.getIdentity()
+      // ALWAYS returns an Identity now — git config if set, synthetic
+      // (OS user + hostname) otherwise — so we never need to prompt the
+      // user up front. The "Set up your margo identity" dialog used to
+      // open here when git config was missing; that was a v0 leftover
+      // from when comments lived in the repo's git history and needed
+      // a real git author. Now that comments are server-pushed or
+      // standalone-cached under ~/.margo/, the synthetic fallback is
+      // perfectly fine for attribution.
+      //
+      // Users who want to override (set their real name + email) can
+      // still do so through the account popover on the FAB pill, which
+      // calls setIdentity → `git config --global` for persistence.
       me = u;
       updateFabIdentity();
       renderPins();
@@ -3014,161 +3012,6 @@ async function uiAlert(message: string, title = "Heads up"): Promise<void> {
   });
 }
 
-/**
- * First-run identity setup. Two-input modal (name + email) that POSTs to
- * /__margo/me on Save, which runs `git config --global user.name/email` so
- * subsequent operations (createComment, commitAndPush) have a real author.
- *
- * Returns the persisted identity on Save, null on Cancel/Escape/backdrop.
- * Cancelling leaves the overlay running with me=null — the user can still
- * read pins, but attempts to create or update comments will fail until they
- * refresh and complete setup. We don't loop-on-cancel because some users
- * (preview deploys, read-only walkthroughs) genuinely don't need to write.
- */
-function openIdentitySetup(
-  sync: SyncClient,
-  seed: { name: string; email: string } = { name: "", email: "" },
-): Promise<{ email: string; name: string } | null> {
-  return new Promise((resolve) => {
-    const root = document.getElementById(ROOT_ID);
-    if (!root) {
-      resolve(null);
-      return;
-    }
-    root.querySelector("[data-margo-modal]")?.remove();
-
-    const backdrop = document.createElement("div");
-    backdrop.className = "margo-modal-backdrop";
-    backdrop.dataset.margoModal = "";
-
-    const modal = document.createElement("div");
-    modal.className = "margo-modal";
-    modal.setAttribute("role", "dialog");
-    modal.setAttribute("aria-modal", "true");
-
-    const header = document.createElement("header");
-    const h = document.createElement("h3");
-    h.textContent = "Set up your margo identity";
-    header.appendChild(h);
-    const close = document.createElement("button");
-    close.className = "margo-close";
-    close.type = "button";
-    close.setAttribute("aria-label", "close");
-    close.textContent = "×";
-    close.addEventListener("click", () => done(null));
-    header.appendChild(close);
-    modal.appendChild(header);
-
-    const body = document.createElement("div");
-    body.className = "margo-modal-body";
-    const p = document.createElement("p");
-    p.className = "margo-modal-message";
-    // Tailor the message to which half is missing so a user who only needs
-    // to fill in a name doesn't see "user.email isn't set" and get confused.
-    const missingName = !seed.name;
-    const missingEmail = !seed.email;
-    p.textContent =
-      missingName && missingEmail
-        ? "git config user.name / user.email aren't set on this machine. " +
-          "margo uses them to attribute every comment. Save once and you're done — " +
-          "they'll be written to your global git config."
-        : missingName
-          ? "git config user.name isn't set. margo attributes comments by name + email, so a name is required. It'll be written to your global git config."
-          : "git config user.email isn't set. margo attributes comments by name + email, so an email is required. It'll be written to your global git config.";
-    body.appendChild(p);
-
-    const nameInput = document.createElement("input");
-    nameInput.className = "margo-modal-input";
-    nameInput.type = "text";
-    nameInput.placeholder = "Your name";
-    nameInput.autocomplete = "name";
-    nameInput.value = seed.name;
-    body.appendChild(nameInput);
-
-    const emailInput = document.createElement("input");
-    emailInput.className = "margo-modal-input";
-    emailInput.type = "email";
-    emailInput.placeholder = "you@example.com";
-    emailInput.autocomplete = "email";
-    emailInput.value = seed.email;
-    body.appendChild(emailInput);
-
-    const errorEl = document.createElement("p");
-    errorEl.className = "margo-modal-error";
-    body.appendChild(errorEl);
-
-    modal.appendChild(body);
-
-    const footer = document.createElement("footer");
-    const cancel = document.createElement("button");
-    cancel.className = "margo-modal-cancel";
-    cancel.type = "button";
-    cancel.textContent = "Later";
-    cancel.addEventListener("click", () => done(null));
-    footer.appendChild(cancel);
-
-    const confirm = document.createElement("button");
-    confirm.className = "margo-modal-confirm";
-    confirm.type = "button";
-    confirm.textContent = "Save";
-    confirm.addEventListener("click", () => void submit());
-    footer.appendChild(confirm);
-    modal.appendChild(footer);
-
-    backdrop.appendChild(modal);
-    backdrop.addEventListener("mousedown", (e) => {
-      if (e.target === backdrop) done(null);
-    });
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        done(null);
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        void submit();
-      }
-    };
-    document.addEventListener("keydown", onKey, true);
-
-    root.appendChild(backdrop);
-    // Land focus on the field that needs the input, so the user can start
-    // typing the missing half without tabbing past a pre-filled one.
-    queueMicrotask(() => (missingName ? nameInput : emailInput).focus());
-
-    async function submit(): Promise<void> {
-      const name = nameInput.value.trim();
-      const email = emailInput.value.trim();
-      if (!name) return showError("Name is required.");
-      if (!email) return showError("Email is required.");
-      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))
-        return showError("That email doesn't look right.");
-      hideError();
-      confirm.disabled = true;
-      confirm.textContent = "Saving…";
-      const result = await sync.setMe(name, email);
-      confirm.disabled = false;
-      confirm.textContent = "Save";
-      if ("error" in result) {
-        showError(result.error);
-        return;
-      }
-      done(result);
-    }
-    function showError(msg: string): void {
-      errorEl.textContent = msg;
-      errorEl.classList.add("margo-modal-error-shown");
-    }
-    function hideError(): void {
-      errorEl.classList.remove("margo-modal-error-shown");
-    }
-    function done(result: { email: string; name: string } | null): void {
-      document.removeEventListener("keydown", onKey, true);
-      backdrop.remove();
-      resolve(result);
-    }
-  });
-}
 
 function injectStyles(): void {
   if (document.getElementById(STYLE_ID)) return;

@@ -343,13 +343,6 @@ export class RemoteTransport implements Transport {
     }
   }
 
-  async setIdentity(_info: Identity): Promise<void> {
-    // Identity in server mode is bound to the auth token. The user's local
-    // git config is irrelevant here, and overwriting it would surprise the
-    // operator. Quietly noop — the overlay never reaches this path in
-    // server mode because /me always resolves on first load.
-  }
-
   async getDeclaredRole(_email: string): Promise<string | null> {
     // Phase-2 host has no project roster, so there's no role to declare.
     // Future: hit `/api/projects/:project/roster/:email`.

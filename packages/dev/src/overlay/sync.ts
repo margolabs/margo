@@ -193,28 +193,6 @@ export class SyncClient extends EventTarget {
     }
   }
 
-  /** Persist git user.name / user.email so subsequent operations succeed. */
-  async setMe(name: string, email: string): Promise<{ email: string; name: string } | { error: string }> {
-    try {
-      const res = await fetch('/__margo/me', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name, email }),
-      });
-      if (!res.ok) {
-        let error = `${res.status}`;
-        try {
-          const body = (await res.json()) as { error?: string };
-          if (body.error) error = body.error;
-        } catch { /* fall through */ }
-        return { error };
-      }
-      return await res.json();
-    } catch (e) {
-      return { error: (e as Error).message };
-    }
-  }
-
   /** Trigger a `git pull --rebase --autostash` on the dev server. */
   async syncFromRemote(): Promise<{ ok: true } | { ok: false; error: string }> {
     try {

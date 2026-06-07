@@ -22,7 +22,6 @@ import { parseComment } from '../shared/frontmatter.js'
 import {
   getAuthor,
   getDeclaredRole,
-  setAuthor,
 } from '../server/git.js'
 import { CommentWatcher, type WatcherEvent } from '../server/watcher.js'
 import type { Comment } from '../shared/types.js'
@@ -145,19 +144,17 @@ export class StandaloneTransport implements Transport {
   // ─── Identity ───────────────────────────────────────────────────────────
 
   async getIdentity(): Promise<Identity | null> {
-    // Standalone mode reads author from the user's git config (same as
-    // before). The dialog in the overlay prompts when name/email aren't
-    // set; setIdentity persists via `git config --global`.
+    // Read from `git config user.name/email` when available — that's
+    // the canonical "who is this person" signal on a dev machine.
+    // Returns null when git config isn't set; the createComment handler
+    // substitutes a generic author at that point, so pins always
+    // succeed without an up-front dialog.
     try {
       const author = await getAuthor(this.rootDir)
       return { email: author.email, name: author.name }
     } catch {
       return null
     }
-  }
-
-  async setIdentity(info: Identity): Promise<void> {
-    await setAuthor(info.name, info.email, this.rootDir)
   }
 
   async getDeclaredRole(_email: string): Promise<string | null> {

@@ -113,10 +113,6 @@ export interface Transport {
   /** Identity of the current user, or null if not configured. */
   getIdentity(): Promise<Identity | null>
 
-  /** Set identity. In local mode writes to git config; in server mode
-   *  bound to the auth token's identity and may throw. */
-  setIdentity(info: Identity): Promise<void>
-
   /** Optional declared-role lookup for the current user. Local: reads
    *  `git config margo.role`. Remote: reads the server's project roster.
    *  Returns the role string ('pm' | 'designer' | 'dev' | etc.) or null. */

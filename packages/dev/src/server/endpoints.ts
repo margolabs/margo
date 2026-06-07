@@ -12,7 +12,6 @@ import {
   getGitState,
   getMe,
   listComments,
-  setMe,
   syncFromRemote,
   updateComment,
   type HandlerContext,
@@ -51,10 +50,6 @@ export async function handleEndpoint(
     }
     if (url === '/__margo/me' && req.method === 'GET') {
       return sendJson(res, 200, await getMe(ctx));
-    }
-    if (url === '/__margo/me' && req.method === 'POST') {
-      const body = await readJson<{ name?: string; email?: string }>(req);
-      return sendJson(res, 200, await setMe(ctx, body));
     }
     if (url === '/__margo/git-state' && req.method === 'GET') {
       return sendJson(res, 200, await getGitState(ctx));

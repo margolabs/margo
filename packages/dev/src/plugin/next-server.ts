@@ -36,7 +36,6 @@ import {
   getGitState,
   getMe,
   listComments,
-  setMe,
   syncFromRemote,
   updateComment,
   type HandlerContext,
@@ -170,7 +169,7 @@ function isDev(): boolean {
  *  ENDPOINTS + the matching dispatch case in this file. */
 export const ROUTES: ReadonlyArray<{ route: string; methods: ReadonlyArray<string> }> = [
   { route: 'list', methods: ['GET'] },
-  { route: 'me', methods: ['GET', 'POST'] },
+  { route: 'me', methods: ['GET'] },
   { route: 'git-state', methods: ['GET'] },
   { route: 'comment', methods: ['POST', 'PATCH', 'DELETE'] },
   { route: 'events', methods: ['GET'] },
@@ -229,10 +228,6 @@ async function dispatch(request: Request, ctx: RouteContext): Promise<Response> 
     }
     if (route === 'me' && request.method === 'GET') {
       return jsonResponse(200, await getMe(handlerCtx));
-    }
-    if (route === 'me' && request.method === 'POST') {
-      const body = (await request.json()) as { name?: string; email?: string };
-      return jsonResponse(200, await setMe(handlerCtx, body));
     }
     if (route === 'git-state' && request.method === 'GET') {
       return jsonResponse(200, await getGitState(handlerCtx));

@@ -92,20 +92,6 @@ export async function getMe(
   };
 }
 
-export async function setMe(
-  ctx: HandlerContext,
-  body: { name?: string; email?: string },
-): Promise<{ email: string; name: string }> {
-  const name = (body.name ?? '').trim();
-  const email = (body.email ?? '').trim();
-  if (!name) throw new HandlerError(400, 'name is required');
-  // Permissive email regex — git itself doesn't validate, but a leading sanity
-  // check catches typos before we shell out to `git config`.
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HandlerError(400, 'invalid email');
-  await ctx.transport.setIdentity({ name, email });
-  return { name, email };
-}
-
 export async function getGitState(ctx: HandlerContext): Promise<GitState> {
   // Git state describes the user's working repo (used for pin diagnostics:
   // "you're on a different commit / dirty tree than when the pin was made").
@@ -132,8 +118,7 @@ export async function createComment(
   body: CreateCommentRequest,
 ): Promise<{ id: string }> {
   const id = newCommentId();
-  const identity = await ctx.transport.getIdentity();
-  if (!identity) throw new HandlerError(412, 'identity not configured');
+  const identity = await resolveActor(ctx);
   const role = await resolveRole(identity.email, ctx);
   // Git state captured into the pin still describes the user's working repo —
   // independent of comment storage. Commit/branch/dirty go onto target so the
@@ -174,8 +159,7 @@ export async function updateComment(
 ): Promise<{ ok: true }> {
   const comment = await ctx.transport.read(body.id);
   if (!comment) throw new HandlerError(404, 'not found');
-  const identity = await ctx.transport.getIdentity();
-  if (!identity) throw new HandlerError(412, 'identity not configured');
+  const identity = await resolveActor(ctx);
   let newBody = comment.body;
   if (body.patch.reply) {
     newBody = appendReply(newBody, {
@@ -228,6 +212,21 @@ export async function syncFromRemote(ctx: HandlerContext): Promise<{ ok: true }>
 export function broadcastSse(ctx: HandlerContext, payload: unknown): void {
   const data = `data: ${JSON.stringify(payload)}\n\n`;
   for (const client of ctx.sseClients) client.write(data);
+}
+
+/** Author identity for pin / reply / decision writes. Server mode
+ *  always has one (bearer token → host's user record). Standalone mode
+ *  returns the local git config when set; when not, we substitute a
+ *  generic "you" placeholder rather than reject the write, because the
+ *  standalone workspace by definition has exactly one user — there's
+ *  nothing to distinguish them from. The overlay no longer prompts
+ *  for a "set up your identity" dialog at boot; users override the
+ *  placeholder by running `git config --global user.name/email …`
+ *  (the next request picks it up). */
+async function resolveActor(ctx: HandlerContext): Promise<{ email: string; name?: string }> {
+  const identity = await ctx.transport.getIdentity();
+  if (identity?.email) return identity;
+  return { email: 'you@local', name: 'you' };
 }
 
 type ValidRole = 'pm' | 'designer' | 'dev';
