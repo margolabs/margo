@@ -18,7 +18,14 @@
 // in a peer dep, and importing it forces consumers without `next` installed
 // to install it just to typecheck the package. A structural shape we can
 // satisfy with `unknown` interop is plenty for what we touch.
-type NextRewrite = { source: string; destination: string };
+type NextRewrite = {
+  source: string;
+  destination: string;
+  /** Required when the rewrite needs to match origin-root URLs in a
+   *  project that has a `basePath` set. Defaults to true (rewrite is
+   *  auto-prefixed by the basePath). */
+  basePath?: false;
+};
 type NextRewritesArray = NextRewrite[];
 type NextRewritesObject = {
   beforeFiles?: NextRewrite[];
@@ -28,15 +35,40 @@ type NextRewritesObject = {
 type NextRewritesResult = NextRewritesArray | NextRewritesObject;
 
 interface MinimalNextConfig {
+  /** When set, every Next route is served under this prefix (e.g.
+   *  `/ui`). The overlay calls origin-root `/__margo/*` regardless, so
+   *  the rewrite must use `basePath: false` + an absolute destination
+   *  URL to reach the route handler under `<basePath>/margo-runtime/`. */
+  basePath?: string;
   serverExternalPackages?: string[];
   rewrites?: () => Promise<NextRewritesResult> | NextRewritesResult;
   [key: string]: unknown;
 }
 
-const MARGO_REWRITE: NextRewrite = {
-  source: '/__margo/:path*',
-  destination: '/margo-runtime/:path*',
-};
+/** Build the rewrite that exposes the overlay's `/__margo/*` URLs to
+ *  the route handler at `<appRoot>/margo-runtime/`.
+ *
+ *  Without basePath: a simple internal rewrite. Both ends live at the
+ *  origin root and Next applies the destination directly.
+ *
+ *  With basePath: the overlay still calls origin-root `/__margo/*`, but
+ *  the route handler lives under `<basePath>/margo-runtime/`. Next
+ *  forbids a `basePath: false` rewrite from targeting an internal
+ *  basePath'd path via a relative destination, so the destination has
+ *  to be an absolute URL. PORT is read from env at config-evaluation
+ *  time — that's when Next boots and PORT reflects the dev server's
+ *  port (3000 by default). */
+export function makeMargoRewrite(basePath: string | undefined): NextRewrite {
+  if (!basePath) {
+    return { source: '/__margo/:path*', destination: '/margo-runtime/:path*' };
+  }
+  const port = process.env.PORT || '3000';
+  return {
+    source: '/__margo/:path*',
+    destination: `http://localhost:${port}${basePath}/margo-runtime/:path*`,
+    basePath: false,
+  };
+}
 
 // Externalize chokidar specifically — NOT the whole 'margo-dev' package.
 //
@@ -72,16 +104,17 @@ export function withMargo<T extends MinimalNextConfig>(config: T = {} as T): Wit
     ...EXTERNALIZED.filter((p) => !userExternals.includes(p)),
   ];
 
+  const margoRewrite = makeMargoRewrite(config.basePath);
   const userRewrites = config.rewrites;
   const rewrites: MinimalNextConfig['rewrites'] = async () => {
     const fromUser = userRewrites ? await userRewrites() : undefined;
-    if (!fromUser) return [MARGO_REWRITE];
-    if (Array.isArray(fromUser)) return [MARGO_REWRITE, ...fromUser];
+    if (!fromUser) return [margoRewrite];
+    if (Array.isArray(fromUser)) return [margoRewrite, ...fromUser];
     // Structured form: put margo in beforeFiles so it always wins over
     // user routes (e.g. catch-alls). Preserves user's other buckets.
     return {
       ...fromUser,
-      beforeFiles: [MARGO_REWRITE, ...(fromUser.beforeFiles ?? [])],
+      beforeFiles: [margoRewrite, ...(fromUser.beforeFiles ?? [])],
     };
   };
 

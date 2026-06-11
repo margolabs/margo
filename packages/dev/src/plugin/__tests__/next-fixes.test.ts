@@ -118,44 +118,51 @@ describe('handlers — Next 15+ route handler signature', () => {
 });
 
 describe('MargoScript — CSP nonce prop', () => {
+  // MargoScript is now async (returns Promise<ReactElement | null>) so
+  // it can auto-read the CSP nonce from next/headers in App Router
+  // Server Component contexts. Tests await the result.
+  //
   // Vitest defaults NODE_ENV='test', so MargoScript treats it as dev and
   // renders the element rather than null.
 
-  it('renders a <script type="module"> with the bootstrap inline', () => {
-    const el = MargoScript() as ReactScriptElement;
+  it('renders a <script type="module"> with the bootstrap inline', async () => {
+    const el = (await MargoScript()) as ReactScriptElement | null;
     expect(el).not.toBeNull();
-    expect(el.type).toBe('script');
-    expect(el.props.type).toBe('module');
-    expect(el.props.dangerouslySetInnerHTML.__html).toContain("/__margo/overlay.js");
+    expect(el!.type).toBe('script');
+    expect(el!.props.type).toBe('module');
+    expect(el!.props.dangerouslySetInnerHTML.__html).toContain("/__margo/overlay.js");
   });
 
-  it('threads the nonce prop onto the rendered <script>', () => {
-    const el = MargoScript({ nonce: 'abc123' }) as ReactScriptElement;
+  it('threads an explicit nonce prop onto the rendered <script>', async () => {
+    const el = (await MargoScript({ nonce: 'abc123' })) as ReactScriptElement;
     expect(el.props.nonce).toBe('abc123');
   });
 
-  it('omits the nonce attribute when not provided', () => {
-    const el = MargoScript() as ReactScriptElement;
+  it('omits the nonce attribute when no prop is given and next/headers is unavailable', async () => {
+    // In the vitest environment next/headers can't resolve, so the
+    // auto-read path swallows the error and returns undefined. That's
+    // the intended graceful-fallback behavior for non-Next contexts.
+    const el = (await MargoScript()) as ReactScriptElement;
     expect(el.props.nonce).toBeUndefined();
   });
 
-  it('renders null in production when MARGO_ENABLED is unset', () => {
+  it('renders null in production when MARGO_ENABLED is unset', async () => {
     const original = process.env.NODE_ENV;
     process.env.NODE_ENV = 'production';
     try {
-      expect(MargoScript()).toBeNull();
+      expect(await MargoScript()).toBeNull();
     } finally {
       process.env.NODE_ENV = original;
     }
   });
 
-  it('renders in production when MARGO_ENABLED=1 (preview deploys)', () => {
+  it('renders in production when MARGO_ENABLED=1 (preview deploys)', async () => {
     const originalEnv = process.env.NODE_ENV;
     const originalFlag = process.env.MARGO_ENABLED;
     process.env.NODE_ENV = 'production';
     process.env.MARGO_ENABLED = '1';
     try {
-      const el = MargoScript({ nonce: 'preview-nonce' }) as ReactScriptElement;
+      const el = (await MargoScript({ nonce: 'preview-nonce' })) as ReactScriptElement;
       expect(el).not.toBeNull();
       expect(el.props.nonce).toBe('preview-nonce');
       expect(el.props['data-margo-mode']).toBe('preview');

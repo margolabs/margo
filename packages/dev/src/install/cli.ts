@@ -344,8 +344,9 @@ async function init(
   // Pick the first integration that matches the project. We don't try both —
   // a project that mixes Vite + Next.js is unusual enough to handle by hand.
   const framework = await detectFramework(cwd);
+  const storage: 'standalone' | 'server' = serverMode ? 'server' : 'standalone';
   if (framework === 'next') {
-    await patchNextProject(cwd, opts.overwriteTemplates);
+    await patchNextProject(cwd, opts.overwriteTemplates, storage);
   } else {
     await patchViteConfig(cwd);
   }
@@ -722,7 +723,7 @@ async function pathExists(p: string): Promise<boolean> {
   try { await fs.access(p); return true; } catch { return false; }
 }
 
-async function patchNextProject(cwd: string, overwrite = false): Promise<void> {
+async function patchNextProject(cwd: string, overwrite = false, storage: 'standalone' | 'server' = 'standalone'): Promise<void> {
   const appRoot = await detectNextAppRoot(cwd);
 
   // 1. Drop the catch-all Route Handler at <appRoot>/margo-runtime/[[...path]]/route.ts.
@@ -739,19 +740,47 @@ async function patchNextProject(cwd: string, overwrite = false): Promise<void> {
   await patchNextConfig(cwd);
 
   // 3. Insert <MargoScript /> into <appRoot>/layout.tsx.
-  await patchNextLayout(cwd, appRoot);
+  await patchNextLayout(cwd, appRoot, storage);
 }
 
 const NEXT_ROUTE_FILE = `// Catch-all Route Handler for margo's /__margo/* surface (App Router).
 // All four methods point to the same dispatcher; it inspects path + method.
 //
-// Imported from 'margo-dev/next-server' (not 'margo-dev/next'). The umbrella
-// re-exports MargoScript + withMargo only; pulling handlers through it would
-// drag chokidar through Next's compiled bundle for callers that don't need
-// the route handler.
-import { handlers } from 'margo-dev/next-server';
+// Production safety: margo is a development-only tool. The MARGO_ENABLED
+// gate short-circuits in production (NODE_ENV=production, MARGO_ENABLED
+// unset) so every request 404s WITHOUT importing margo-dev at all — its
+// runtime (chokidar file watchers, git polling, comment-file I/O) never
+// loads into the prod server. The dynamic import is what enforces this:
+// a static \`import { handlers } from 'margo-dev/next-server'\` would pull
+// chokidar's native binding into the prod bundle even though the handlers
+// also self-gate. Doing it at this layer makes the prod behavior explicit
+// and independent of the margo-dev version.
+//
+// margo-dev is intentionally a devDependency; the dynamic import keeps
+// it off the prod execution path. It still resolves at \`next build\`
+// time, so the build must run with devDependencies installed.
+type RouteCtx = { params: Promise<{ path?: string[] }> };
+type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
-export const { GET, POST, PATCH, DELETE } = handlers;
+const MARGO_ENABLED =
+  process.env.NODE_ENV !== 'production' || process.env.MARGO_ENABLED === '1';
+
+async function dispatch(method: Method, request: Request, ctx: RouteCtx) {
+  if (!MARGO_ENABLED) {
+    return new Response('not found', { status: 404 });
+  }
+  // Imported from 'margo-dev/next-server' (not 'margo-dev/next'): the
+  // umbrella re-exports MargoScript + withMargo only; pulling handlers
+  // through it would drag chokidar through Next's compiled bundle for
+  // callers that don't need the route handler.
+  const { handlers } = await import('margo-dev/next-server');
+  return handlers[method](request, ctx);
+}
+
+export const GET = (request: Request, ctx: RouteCtx) => dispatch('GET', request, ctx);
+export const POST = (request: Request, ctx: RouteCtx) => dispatch('POST', request, ctx);
+export const PATCH = (request: Request, ctx: RouteCtx) => dispatch('PATCH', request, ctx);
+export const DELETE = (request: Request, ctx: RouteCtx) => dispatch('DELETE', request, ctx);
 
 // Node runtime is required: handlers shell out to git and use chokidar.
 export const runtime = 'nodejs';
@@ -811,7 +840,7 @@ async function patchNextConfig(cwd: string): Promise<void> {
   await fs.writeFile(target, next, 'utf8');
 }
 
-async function patchNextLayout(cwd: string, appRoot: string): Promise<void> {
+async function patchNextLayout(cwd: string, appRoot: string, storage: 'standalone' | 'server'): Promise<void> {
   const exts = ['tsx', 'jsx', 'ts', 'js'];
   const candidates = exts.map((e) => path.join(appRoot, `layout.${e}`));
   let target: string | undefined;
@@ -821,13 +850,16 @@ async function patchNextLayout(cwd: string, appRoot: string): Promise<void> {
   if (!target) {
     console.log(`[margo] no ${appRoot}/layout.* found — add manually to your root layout:`);
     console.log("       import { MargoScript } from 'margo-dev/next-client-script';");
-    console.log('       <body>{children}<MargoScript /></body>');
+    console.log(`       {process.env.NODE_ENV !== 'production' && <MargoScript storage=\"${storage}\" />}`);
     return;
   }
   const original = await fs.readFile(target, 'utf8');
   if (original.includes('margo-dev/next-client-script') || original.includes('MargoScript')) return;
 
-  // Add the import after the last existing import line.
+  // Add the import after the last existing import line. The component
+  // auto-reads the CSP nonce from `next/headers` when present, so the
+  // user doesn't have to thread it explicitly — solves the strict-CSP
+  // case automatically without bloating the layout.
   const importLines = [...original.matchAll(/^import .+;$/gm)];
   const lastImport = importLines[importLines.length - 1];
   let next = original;
@@ -842,9 +874,19 @@ async function patchNextLayout(cwd: string, appRoot: string): Promise<void> {
   } else {
     next = `${importStmt}\n${original}`;
   }
-  // Insert <MargoScript /> just before the closing </body>.
+
+  // Insert <MargoScript /> just before the closing </body>, gated on
+  // NODE_ENV so production bundles never reach the component (whose
+  // body would render null anyway, but the explicit gate documents the
+  // intent and lets bundlers tree-shake it).
   if (next.includes('</body>')) {
-    next = next.replace('</body>', '<MargoScript /></body>');
+    const margoBlock =
+      `        {/* margo: development-only overlay loader. The component\n` +
+      `             auto-reads the CSP nonce from next/headers when one's set. */}\n` +
+      `        {(process.env.NODE_ENV !== 'production' || process.env.MARGO_ENABLED === '1') && (\n` +
+      `          <MargoScript storage=\"${storage}\" />\n` +
+      `        )}\n        `;
+    next = next.replace('</body>', `${margoBlock}</body>`);
   } else {
     console.log(`[margo] inserted import into ${target}, but couldn't find </body> — add <MargoScript /> manually.`);
   }
