@@ -41,6 +41,7 @@ import {
   type HandlerContext,
   type SseClient,
 } from '../server/handlers.js';
+import { BOOTSTRAP_JS } from '../server/bootstrap-js.js';
 import { mirrorTransportToDir } from '../storage/cache-mirror.js';
 import { CacheWatcher } from '../storage/cache-watcher.js';
 import { createTransport } from '../storage/factory.js';
@@ -207,6 +208,19 @@ async function dispatch(request: Request, ctx: RouteContext): Promise<Response> 
   // Static-asset short-circuit: serve the overlay bundle from the package.
   if (request.method === 'GET' && (route === 'overlay.js' || route === 'overlay.js.map')) {
     return serveOverlay(route);
+  }
+  // Same `<script src="/__margo/bootstrap.js">` URL the sidecar
+  // serves. Users sometimes paste that snippet from the README into
+  // HTML files in a Next.js project; without this route the bootstrap
+  // 404s and the overlay silently fails to load.
+  if (request.method === 'GET' && route === 'bootstrap.js') {
+    return new Response(BOOTSTRAP_JS, {
+      status: 200,
+      headers: {
+        'content-type': 'application/javascript; charset=utf-8',
+        'cache-control': 'no-cache',
+      },
+    });
   }
 
   // Unknown routes return 404 BEFORE we try to instantiate a transport —

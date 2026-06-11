@@ -12,6 +12,7 @@ import * as url from 'node:url';
 import type { ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
 import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } from '../server/endpoints.js';
+import { BOOTSTRAP_JS } from '../server/bootstrap-js.js';
 import type { SseClient } from '../server/handlers.js';
 import { handleAuthLogout, handleAuthPoll, handleAuthStart, isAuthEndpoint } from '../server/auth-endpoints.js';
 import { mirrorTransportToDir } from '../storage/cache-mirror.js';
@@ -245,6 +246,19 @@ export default function margo(opts: MargoPluginOptions = {}): Plugin {
         const u = req.url ?? '';
         if (u === '/__margo/overlay.js' || u === '/__margo/overlay.js.map') {
           return serveOverlay(u, res);
+        }
+        // Same `<script src="/__margo/bootstrap.js">` the sidecar
+        // exposes. Sounds like a sidecar-only thing, but users copy
+        // that snippet from the README into HTML files served from
+        // Vite-managed apps too; without this route the bootstrap
+        // 404s and the overlay silently fails to load.
+        if (u === '/__margo/bootstrap.js') {
+          res.writeHead(200, {
+            'content-type': 'application/javascript; charset=utf-8',
+            'cache-control': 'no-cache',
+          });
+          res.end(BOOTSTRAP_JS);
+          return;
         }
         // Plugin-side device-login proxy. Always available regardless of
         // transport state — that's the whole point: the user hits these

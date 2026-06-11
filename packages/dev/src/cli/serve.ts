@@ -29,6 +29,7 @@ import * as path from 'node:path';
 import * as url from 'node:url';
 import type { ServerResponse } from 'node:http';
 import { handleEndpoint, isMargoEndpoint, broadcastSse, type EndpointContext } from '../server/endpoints.js';
+import { BOOTSTRAP_JS } from '../server/bootstrap-js.js';
 import type { SseClient } from '../server/handlers.js';
 import { mirrorTransportToDir } from '../storage/cache-mirror.js';
 import { createTransport } from '../storage/factory.js';
@@ -38,20 +39,10 @@ const CLI_DIR = path.dirname(url.fileURLToPath(import.meta.url));
 const OVERLAY_BUNDLE_PATH = path.join(CLI_DIR, '..', 'overlay.bundle.js');
 const OVERLAY_MAP_PATH = path.join(CLI_DIR, '..', 'overlay.bundle.js.map');
 
-// Tiny bootstrap served at /__margo/bootstrap.js. External <script src=...>
-// so the user only adds one line to their index.html. We hardcode mode=dev
-// because the sidecar only ever runs during local development — preview
-// builds use the native plugins, which inline the bootstrap with the mode
-// already known at build time.
-const BOOTSTRAP_JS = `(async () => {
-  try {
-    const mod = await import('/__margo/overlay.js');
-    mod.start({ mode: 'dev' });
-  } catch (err) {
-    console.warn('[margo] failed to start overlay', err);
-  }
-})();
-`;
+// Shared bootstrap-JS string lives in server/bootstrap-js.ts now so
+// the Vite + Next plugins can serve the same content at the same path.
+// Users who add `<script src="/__margo/bootstrap.js">` to their HTML
+// don't need to know which integration mode they're using.
 
 const DEFAULTS: MargoConfig = {
   workspace: { name: 'unnamed', appUrl: { dev: 'http://localhost:3000', preview: null } },
